@@ -1826,6 +1826,7 @@ async function loadCapabilities(){
   revealStagger($('skill-list').querySelectorAll('.skill'),45);
   if(ins.by_day&&ins.by_day.some(d=>d.n))animateSpark();
   if(typeof mindExtras==='function')mindExtras().catch(()=>{});
+  if(typeof renderMemoryPanel==='function')renderMemoryPanel(c.memory);
 }
 function animateSpark(){
   if(REDUCE)return;
@@ -2047,5 +2048,6 @@ $('input').addEventListener('input',function(){this.style.height='auto';this.sty
 {const sv=localStorage.getItem('hermes_view');if(sv&&sv!=='hub')setView(sv);}
 </script>
 <script src="/expand.js"></script>
+<script src="/aux_memory.js"></script>
 </body>
 </html>
