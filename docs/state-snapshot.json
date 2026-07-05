@@ -1,0 +1,114 @@
+{
+ "agent_config": {
+  "approvals.mode": "manual",
+  "model.context_length": 65536
+ },
+ "dashboard": {
+  "layout": {
+   "order": [
+    "clock",
+    "weather",
+    "markets",
+    "system",
+    "messages",
+    "tasks",
+    "hackernews",
+    "briefing",
+    "agent_pulse",
+    "github",
+    "battery",
+    "rss",
+    "quicklinks",
+    "notes",
+    "crypto",
+    "today",
+    "reminders",
+    "worldclock",
+    "recent",
+    "folders"
+   ]
+  },
+  "models": {
+   "active": "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
+   "roster": [
+    {
+     "id": "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
+     "label": "Qwen3-30B-A3B",
+     "note": "MoE · fast · current default",
+     "ram": 18
+    },
+    {
+     "id": "mlx-community/Hermes-3-Llama-3.1-8B-4bit",
+     "label": "Hermes-3-8B",
+     "note": "Nous · tuned for tool-calling",
+     "ram": 5
+    },
+    {
+     "id": "mlx-community/Qwen3-8B-4bit",
+     "label": "Qwen3-8B",
+     "note": "strong general 8B",
+     "ram": 5
+    },
+    {
+     "id": "mlx-community/Qwen3-14B-4bit",
+     "label": "Qwen3-14B",
+     "note": "more headroom for tool chains",
+     "ram": 9
+    },
+    {
+     "id": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
+     "label": "Qwen3-4B",
+     "note": "ultra-light",
+     "ram": 3
+    }
+   ]
+  },
+  "settings": {
+   "quicklinks": [
+    {
+     "label": "GitHub",
+     "url": "https://github.com"
+    },
+    {
+     "label": "Hacker News",
+     "url": "https://news.ycombinator.com"
+    },
+    {
+     "label": "Gmail",
+     "url": "https://mail.google.com"
+    },
+    {
+     "label": "Calendar",
+     "url": "https://calendar.google.com"
+    },
+    {
+     "label": "Claude",
+     "url": "https://claude.ai"
+    },
+    {
+     "label": "Reddit",
+     "url": "https://reddit.com"
+    },
+    {
+     "label": "YouTube",
+     "url": "https://youtube.com"
+    }
+   ],
+   "starred_tickers": [],
+   "tickers": [
+    "SPCX",
+    "AAPL",
+    "NVDA",
+    "MSFT"
+   ]
+  }
+ },
+ "exported_at": "2026-07-05T02:10:04-04:00",
+ "kind": "hermes-state-snapshot",
+ "note": "",
+ "permissions": {
+  "classes": {},
+  "patterns": {}
+ },
+ "schema": 1
+}
