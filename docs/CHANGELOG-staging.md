@@ -89,3 +89,14 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   cap published → shows usage vs your own busiest block). Registers via WIDGETS/EXPANDERS + RENDER/
   EXPAND_RENDER/WICONS + layout inject. VERIFIED: today's output_tokens EXACT-match vs independent
   tally, live numbers, all render cases. Fixed a shared-global datetime-rebind gotcha (now in CLAUDE.md).
+- `<brief-v2>` World Brief v2 (user feedback) — aux_watchtower.py →2098L + expand_markets extended.
+  (1) LINKS on every item ([title](url) — verified all 38 convert cleanly through the real Telegram
+  MarkdownV2 formatter; synthesis has a URL-retention guard). (2) AFTER-HOURS markets: includePrePost
+  chart fetch → honest phase REGULAR/PRE/POST/CLOSED + post/pre price/pct (also fixed marketState=None).
+  (3) HOURLY INTEL: intel_loop thread — 14 keyless AI/social RSS feeds (labs, TechCrunch/Verge AI,
+  Willison/Import AI/Zvi, r/LocalLLaMA…) + one local-model curation pass/hour w/ URL validation →
+  intel.json (0600, dedupe, 72h); new "AI & Labs" brief section + enriched underground signal; 8am
+  composes from the STORE (no fresh network). (4) TRUE AGENT SEARCH ENABLED: installed ddgs 9.14.4
+  into the hermes venv (pre-approved) — web_search_tool returns real results; fixed the probe's
+  multi-line-JSON parse bug → web_search_available:true → hourly `hermes -z` research pass active.
+  Chunked >4096 Telegram sends (no truncation). Formatting polish deferred (TODO in code, per user).

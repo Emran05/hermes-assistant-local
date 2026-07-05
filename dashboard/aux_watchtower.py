@@ -47,7 +47,8 @@ WT_STATE  = os.path.join(DATA, "watchtower-state.json")    # dedupe/cooldown/cap
 WT_LOG    = os.path.join(DATA, "watchtower-log.jsonl")     # append-only fire log
 WT_LOG_MAX = 1024 * 1024                                    # 1 MB single-gen rotate
 
-TELEGRAM_MAX = 4096            # hard Telegram message cap
+TELEGRAM_MAX = 4096            # per-message Telegram cap (hermes send chunks here)
+SEND_MAX = 14000               # runaway ceiling for a whole brief (~3-4 messages)
 RULES_CAP    = 40
 FEED_N       = 15
 RECENT_N     = 20
@@ -504,6 +505,34 @@ def _fmt_price(p):
     return "$%.4f" % v
 
 
+# ---- links: [display](url) markdown — clickable on BOTH Telegram and the hub.
+# Telegram's send path (send_message_tool -> adapter.format_message) converts
+# [text](url) to a proper MarkdownV2 inline link with correct escaping; the hub's
+# renderMd()/inline() converts it to <a href>. Bare URLs are NOT auto-linked by
+# the hub renderer, so markdown links are the only form clickable on both.
+def _linksafe(s):
+    """Neutralise characters that would break the [display](url) link regex."""
+    return str(s or "").replace("[", "(").replace("]", ")").replace("\n", " ").strip()
+
+
+def _md_link(text, url):
+    text = _linksafe(text)
+    url = str(url or "").strip()
+    if url.startswith("http") and ")" not in url:   # hub link regex stops at ')'
+        return "[%s](%s)" % (text, url)
+    if url.startswith("http"):                       # url has parens: append bare
+        return "%s %s" % (text, url)
+    return text
+
+
+def _quote_url(symbol):
+    return "https://finance.yahoo.com/quote/" + urllib.parse.quote(str(symbol or "").upper())
+
+
+def _count_urls(text):
+    return len(re.findall(r"https?://", text or ""))
+
+
 # --------------------------------------------------------------------------
 # cached-provider access (ride hub_prewarm_loop; zero extra network in-loop)
 # --------------------------------------------------------------------------
@@ -828,11 +857,15 @@ def _wt_gate(rule, signature, now_ts, cfg, state):
 # delivery — Telegram home channel (no chat_id => cannot be redirected)
 # --------------------------------------------------------------------------
 def _wt_send_telegram(text):
-    """Returns (ok, detail).  Reuses server's HERMES + _hermes_env(); trims to
-    the Telegram limit.  NEVER passes a chat_id (locked to the home channel)."""
+    """Returns (ok, detail).  Reuses server's HERMES + _hermes_env().  NEVER
+    passes a chat_id (locked to the home channel).  `hermes send` auto-chunks a
+    long message into multiple 4096-char Telegram messages (and falls back to
+    plain text if MarkdownV2 fails), so we do NOT pre-truncate at 4096 — that
+    would drop the tail of a multi-section brief.  We only guard a runaway with
+    a generous ceiling (a normal brief is one or two messages)."""
     text = _strip_emoji(text)
-    if len(text) > TELEGRAM_MAX:
-        text = text[:TELEGRAM_MAX - 1].rstrip() + "…"
+    if len(text) > SEND_MAX:
+        text = text[:SEND_MAX - 1].rstrip() + "…"
     try:
         p = subprocess.run([HERMES, "send", "--to", "telegram", "--quiet", text],
                            capture_output=True, text=True, timeout=20,
@@ -978,7 +1011,7 @@ def _brief_world():
         lines.append(sec.get("name", "") + ":")
         for it in items[:3]:
             src = it.get("source", "")
-            lines.append("• %s%s" % (it.get("title", ""),
+            lines.append("• %s%s" % (_md_link(it.get("title", ""), it.get("url")),
                                           (" (" + src + ")") if src else ""))
     return _sec(lines) if lines else _sec(note="No fresh headlines right now.")
 
@@ -1003,7 +1036,8 @@ def _brief_markets():
         parts = []
         for q in idx:
             nm = q.get("friendly") or q.get("name") or q.get("symbol")
-            parts.append("%s %s" % (nm, _fmt_pct(q.get("pct"))))
+            parts.append("%s %s" % (_md_link(nm, _quote_url(q.get("symbol"))),
+                                    _fmt_pct(q.get("pct"))))
         lines.append("Indices: " + ", ".join(parts))
     wl = [q for q in (mk.get("watchlist") or []) if not q.get("error")
           and q.get("pct") is not None]
@@ -1012,8 +1046,15 @@ def _brief_markets():
     if movers:
         lines.append("Movers:")
         for q in movers:
-            lines.append("• %s %s · %s" % (
-                q.get("symbol"), _fmt_pct(q.get("pct")), _fmt_price(q.get("price"))))
+            link = _md_link(q.get("symbol"), _quote_url(q.get("symbol")))
+            base = "• %s %s · %s" % (link, _fmt_pct(q.get("pct")),
+                                     _fmt_price(q.get("price")))
+            # honest extended-hours read: only when the session is truly PRE/POST
+            if q.get("ext_kind") and q.get("ext_price") is not None:
+                phase = "after hours" if q["ext_kind"] == "post" else "pre-market"
+                base += " · %s %s (%s)" % (phase, _fmt_price(q.get("ext_price")),
+                                           _fmt_pct(q.get("ext_pct")))
+            lines.append(base)
     return _sec(lines, meta={"state": state, "asof": asof})
 
 
@@ -1028,7 +1069,7 @@ def _brief_underground():
             stars = r.get("stars")
             meta = " · ".join([x for x in [lang, ("★%s" % stars) if stars else ""] if x])
             desc = (r.get("desc") or "").strip()
-            lines.append("• %s%s%s" % (r.get("name", ""),
+            lines.append("• %s%s%s" % (_md_link(r.get("name", ""), r.get("url")),
                                             (" — " + desc) if desc else "",
                                             (" (" + meta + ")") if meta else ""))
     hn = _safe_call(w_hackernews, {})
@@ -1037,7 +1078,16 @@ def _brief_underground():
     if stories:
         lines.append("Hacker News risers:")
         for s in stories[:3]:
-            lines.append("• %s (%s pts)" % (s.get("title", ""), s.get("score", 0)))
+            lines.append("• %s (%s pts)" % (_md_link(s.get("title", ""), s.get("url")),
+                                            s.get("score", 0)))
+    # research-feed picks (Substack voices + niche communities) — the freshest
+    # intel items most people haven't seen yet.
+    picks = _intel_underground_picks(3)
+    if picks:
+        lines.append("From the feeds:")
+        for it in picks:
+            lines.append("• %s (%s)" % (_md_link(it.get("title", ""), it.get("url")),
+                                        it.get("source", "")))
     if not lines:
         return _sec(note="Nothing surfacing from the underground feeds yet.")
     return _sec(lines)
@@ -1070,7 +1120,8 @@ def _brief_lookahead():
         top = max(wl, key=lambda q: abs(float(q.get("pct") or 0)))
         if abs(float(top.get("pct") or 0)) >= 1.0:
             lines.append("Watch %s (%s) at the open." % (
-                top.get("symbol"), _fmt_pct(top.get("pct"))))
+                _md_link(top.get("symbol"), _quote_url(top.get("symbol"))),
+                _fmt_pct(top.get("pct"))))
     if not lines:
         return _sec(note="Nothing flagged further out.")
     return _sec(lines)
@@ -1078,6 +1129,7 @@ def _brief_lookahead():
 
 _BRIEF_HEADERS = [("day", "Your day"),
                   ("world", "World & tech front page"),
+                  ("ai", "AI & Labs"),
                   ("markets", "Market movers"),
                   ("underground", "Underground signal"),
                   ("lookahead", "Look-ahead")]
@@ -1085,8 +1137,9 @@ _BRIEF_HEADERS = [("day", "Your day"),
 
 def _brief_build_sections():
     """Deterministic structured brief.  Returns (sections, degraded)."""
-    builders = {"day": _brief_day, "world": _brief_world, "markets": _brief_markets,
-                "underground": _brief_underground, "lookahead": _brief_lookahead}
+    builders = {"day": _brief_day, "world": _brief_world, "ai": _brief_ai_labs,
+                "markets": _brief_markets, "underground": _brief_underground,
+                "lookahead": _brief_lookahead}
     sections, degraded = {}, []
     for key, _title in _BRIEF_HEADERS:
         try:
@@ -1138,10 +1191,15 @@ _SYNTH_SYSTEM = (
     "You are the editor of a personal 8am World Brief. You are given a factual, "
     "already-correct draft assembled from cached data. Rewrite it into a crisp, "
     "scannable brief a busy person reads in under 60 seconds.\n"
-    "RULES: Keep EXACTLY these five section headers as markdown '##' lines and in "
-    "this order: 'Your day', 'World & tech front page', 'Market movers', "
+    "RULES: Keep EXACTLY these section headers as markdown '##' lines and in this "
+    "order: 'Your day', 'World & tech front page', 'AI & Labs', 'Market movers', "
     "'Underground signal', 'Look-ahead'. Use 12-hour clock times. NO emoji of any "
-    "kind. Do NOT invent events, numbers, headlines, or prices — use only what the "
+    "kind.\n"
+    "CRITICAL — LINKS: The draft contains markdown links written as [text](url). "
+    "You MUST preserve every link EXACTLY, keeping its full URL verbatim inside the "
+    "parentheses. Never drop a link, never shorten or alter a URL, never replace a "
+    "URL with '#' or a placeholder. Every item that had a link must still have it.\n"
+    "Do NOT invent events, numbers, headlines, prices, or URLs — use only what the "
     "draft contains. For a market mover you MAY add a short, widely-known one-line "
     "'why' ONLY if you are confident; otherwise leave it. Bespoke, direct tone; no "
     "preamble, no sign-off, no role tags. Output ONLY the brief markdown."
@@ -1159,7 +1217,10 @@ def _brief_synthesize(det_text):
                          {"role": "user", "content":
                           "Here is today's draft brief. Rewrite per the rules.\n\n"
                           + det_text}],
-            "temperature": 0.4, "max_tokens": 1100, "stream": False,
+            # the brief now carries 6 sections + a link on every item; give the
+            # rewrite enough room to reproduce it all (else the tail truncates and
+            # the link-retention guard rightly falls back to deterministic).
+            "temperature": 0.4, "max_tokens": 3200, "stream": False,
         }).encode("utf-8")
         req = urllib.request.Request(_model_chat_url(), data=payload,
                                      headers={"Content-Type": "application/json"})
@@ -1172,6 +1233,14 @@ def _brief_synthesize(det_text):
         return None
     text = _strip_emoji(text)
     if not _brief_is_sane(text):
+        return None
+    # link-retention guard: if the model dropped the links, fall back to the
+    # deterministic draft (which carries every URL) rather than ship a linkless
+    # brief. Require >=70% of the draft's URLs to survive.
+    det_urls = _count_urls(det_text)
+    if det_urls and _count_urls(text) < 0.7 * det_urls:
+        _wt_log_err("synthesis dropped links (%d/%d urls) — using deterministic"
+                    % (_count_urls(text), det_urls))
         return None
     return text.rstrip() + "\n"
 
@@ -1204,6 +1273,361 @@ def _brief_compose(run_synthesis):
     return {"text": _strip_emoji(text), "synthesized": synthesized,
             "sections": sections, "degraded": degraded,
             "asof": mk_meta.get("asof"), "markets_state": mk_meta.get("state")}
+
+
+# ==========================================================================
+# AI & SOCIAL INTEL — hourly background research feeding the World Brief.
+#
+# The user asked to "send off the agent every hour" to search trending
+# Twitter/Reddit/Substack + AI-lab news. The agent's web_search tool needs a
+# provider (Firecrawl/Tavily key or Nous Portal login) that is NOT configured
+# here and the keyless `ddgs` package is not installed, so `hermes -z` deflects
+# instead of searching (verified). Per the fallback plan we gather the sources
+# DIRECTLY over keyless RSS (reliable, zero-auth) on an hourly loop, then use the
+# LOCAL model for one curation pass (why-it-matters) — the "hourly research
+# pass" the user wanted, on real fetched data. If web_search is ever enabled,
+# `_intel_web_ok()` flips True and `_intel_agent_pass()` augments the store.
+#
+# NOTIFY-ONLY + safety unchanged: read-only network (RSS GET), no mutating tool,
+# no approval path, local model only. The brief is composed from the STORED
+# intel (+ cached widgets) so the 8am compose does no fresh network.
+# ==========================================================================
+INTEL_FILE = os.path.join(DATA, "intel.json")
+INTEL_MAX_ITEMS = 120
+INTEL_INTERVAL = 3600            # gather at most once/hour
+INTEL_FRESH_H = 72               # retain 3 days so a poor-fetch pass can't thin
+                                 # the store (labs don't post daily); the brief
+                                 # still surfaces the freshest ~24h on top.
+_intel_gather_lock = threading.Lock()   # only one gather at a time (no clobber)
+INTEL_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36")
+_VENV_PY = os.path.join(HOME, ".hermes", "hermes-agent", "venv", "bin", "python")
+_HERMES_SRC = os.path.join(HOME, ".hermes", "hermes-agent")
+
+# (topic, source-label, feed-url) — all verified keyless + reachable.
+_INTEL_FEEDS = [
+    ("OpenAI",  "OpenAI",           "https://openai.com/news/rss.xml"),
+    ("Labs",    "Google DeepMind",  "https://deepmind.google/blog/rss.xml"),
+    ("Labs",    "Hugging Face",     "https://huggingface.co/blog/feed.xml"),
+    ("Labs",    "MIT Tech Review",  "https://www.technologyreview.com/topic/artificial-intelligence/feed"),
+    ("News",    "TechCrunch AI",    "https://techcrunch.com/category/artificial-intelligence/feed/"),
+    ("News",    "The Verge AI",     "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml"),
+    ("News",    "VentureBeat AI",   "https://venturebeat.com/category/ai/feed/"),
+    ("News",    "Ars Technica AI",  "https://arstechnica.com/ai/feed/"),
+    ("Voices",  "Simon Willison",   "https://simonwillison.net/atom/everything/"),
+    ("Voices",  "Import AI",        "https://importai.substack.com/feed"),
+    ("Voices",  "Zvi",              "https://thezvi.substack.com/feed"),
+    ("Voices",  "One Useful Thing", "https://www.oneusefulthing.org/feed"),
+    ("Social",  "r/LocalLLaMA",     "https://www.reddit.com/r/LocalLLaMA/top/.rss?t=day"),
+    ("Social",  "r/artificial",     "https://www.reddit.com/r/artificial/top/.rss?t=day"),
+]
+_UNDERGROUND_TOPICS = ("Voices", "Social")   # what enriches the underground section
+
+
+def _intel_clean(s):
+    s = re.sub(r"<[^>]+>", " ", str(s or ""))
+    s = re.sub(r"&#?\w+;", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _intel_norm_url(u):
+    u = str(u or "").strip()
+    u = re.sub(r"[?#].*$", "", u)          # drop query/fragment for dedupe
+    return u.rstrip("/").lower()
+
+
+def _intel_load():
+    d = read_json(INTEL_FILE, None)
+    if not isinstance(d, dict):
+        d = {}
+    d.setdefault("version", 1)
+    d.setdefault("updated", 0)
+    if not isinstance(d.get("items"), list):
+        d["items"] = []
+    if not isinstance(d.get("curated"), list):
+        d["curated"] = []
+    return d
+
+
+def _intel_save(store):
+    with _wt_lock:
+        _wt_write_json(INTEL_FILE, store)
+
+
+def _intel_fetch_feed(url, source, topic):
+    """Fetch + parse one feed with a browsery UA (reddit/substack reject the
+    default UA). Never raises; returns a list of item dicts."""
+    import xml.etree.ElementTree as ET
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": INTEL_UA,
+            "Accept": "application/rss+xml,application/atom+xml,application/xml,text/xml,*/*"})
+        with urllib.request.urlopen(req, timeout=14, context=_SSL_CTX) as r:
+            raw = r.read().decode("utf-8", "replace")
+        root = ET.fromstring(raw)
+    except Exception:
+        return []
+    out = []
+    for el in root.iter():
+        if el.tag.split("}")[-1] not in ("item", "entry"):
+            continue
+        title = link = date_raw = summary = ""
+        for c in el:
+            ct = c.tag.split("}")[-1]
+            if ct == "title" and not title:
+                title = (c.text or "").strip()
+            elif ct == "link":
+                href = (c.get("href") or c.text or "").strip()
+                if href.startswith("http") and (not link or c.get("rel") in (None, "", "alternate")):
+                    link = href
+            elif ct in ("pubDate", "published", "updated", "date") and not date_raw:
+                date_raw = (c.text or "").strip()
+            elif ct in ("description", "summary", "content") and not summary:
+                summary = c.text or ""
+        if not title or not link:
+            continue
+        try:
+            ts = _news_parse_date(date_raw)
+        except Exception:
+            ts = None
+        out.append({"title": _intel_clean(title)[:180], "url": link,
+                    "source": source, "topic": topic, "ts": ts,
+                    "summary": _intel_clean(summary)[:220]})
+        if len(out) >= 8:
+            break
+    return out
+
+
+def _intel_feeds():
+    feeds = list(_INTEL_FEEDS)
+    for u in (_safe_call(get_settings, {}).get("intel_feeds") or []):
+        if isinstance(u, str) and u.startswith("http"):
+            try:
+                dom = urllib.parse.urlparse(u).netloc.replace("www.", "")
+            except Exception:
+                dom = "custom"
+            feeds.append(("Yours", dom, u))
+    return feeds
+
+
+def _intel_gather():
+    """One hourly research pass: fetch feeds -> merge/dedupe/prune -> curate -> save.
+    Guarded so a manual poke and the hourly loop can't run concurrently and
+    clobber each other's read-modify-write."""
+    if not _intel_gather_lock.acquire(blocking=False):
+        return (_intel_load().get("items") or [])
+    try:
+        feeds = _intel_feeds()
+        fetched = []
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                for res in ex.map(lambda f: _intel_fetch_feed(f[2], f[1], f[0]), feeds):
+                    fetched.extend(res or [])
+        except Exception:
+            for f in feeds:
+                fetched.extend(_intel_fetch_feed(f[2], f[1], f[0]) or [])
+
+        # optional: augment with the agent's web_search when it is actually usable
+        fetched.extend(_intel_agent_pass())
+
+        store = _intel_load()
+        now = time.time()
+        by_url = {}
+        for it in (store.get("items", []) + fetched):
+            key = _intel_norm_url(it.get("url"))
+            if not key:
+                continue
+            prev = by_url.get(key)
+            if prev is None or (it.get("ts") or 0) > (prev.get("ts") or 0):
+                by_url[key] = it
+        merged = [it for it in by_url.values()
+                  if not it.get("ts") or (now - (it.get("ts") or now)) < INTEL_FRESH_H * 3600]
+        merged.sort(key=lambda it: it.get("ts") or 0, reverse=True)
+        merged = merged[:INTEL_MAX_ITEMS]
+        curated = _intel_curate(merged)
+        _intel_save({"version": 1, "updated": now, "items": merged, "curated": curated,
+                     "feeds": len(feeds)})
+        _wt_log_err("intel gather: %d feeds, %d fetched -> %d items, %d curated"
+                    % (len(feeds), len(fetched), len(merged), len(curated)))
+        return merged
+    finally:
+        _intel_gather_lock.release()
+
+
+# ---- one LOCAL-model curation pass: pick the top items + a one-line "why" ----
+_INTEL_CURATE_SYS = (
+    "You are an AI-industry analyst. From the list of recent headlines you are "
+    "given, select the 6 MOST significant developments about AI labs (Anthropic/"
+    "Claude, OpenAI, Google DeepMind, Meta, Mistral, xAI, etc.), notable model or "
+    "product releases, or important research/community signals. For each, write ONE "
+    "short sentence on why it matters. Use ONLY the items provided — never invent a "
+    "headline, source, or URL, and copy each URL verbatim. Output ONLY a JSON array "
+    "of objects with keys: title, source, url, why. No prose, no code fence.")
+
+
+def _intel_curate(items):
+    """Returns a curated list [{title,source,url,why}] or [] (best-effort)."""
+    if not items or not model_online() or agent_paused():
+        return []
+    pool = items[:22]
+    listing = "\n".join(
+        "- %s | %s | %s" % (it.get("title", ""), it.get("source", ""), it.get("url", ""))
+        for it in pool)
+    try:
+        payload = json.dumps({
+            "model": _active_model(),
+            "messages": [{"role": "system", "content": _INTEL_CURATE_SYS},
+                         {"role": "user", "content":
+                          "Recent AI headlines:\n" + listing}],
+            "temperature": 0.3, "max_tokens": 900, "stream": False,
+        }).encode("utf-8")
+        req = urllib.request.Request(_model_chat_url(), data=payload,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=90) as r:
+            resp = json.loads(r.read().decode("utf-8", "replace"))
+        text = (((resp.get("choices") or [{}])[0].get("message") or {})
+                .get("content") or "").strip()
+    except Exception as e:
+        _wt_log_err("intel curate failed: %r" % e)
+        return []
+    arr = _intel_extract_json(text)
+    valid_urls = {_intel_norm_url(it.get("url")) for it in pool}
+    out = []
+    for o in arr:
+        if not isinstance(o, dict):
+            continue
+        url = str(o.get("url", "")).strip()
+        if _intel_norm_url(url) not in valid_urls:   # reject invented URLs
+            continue
+        out.append({"title": _intel_clean(o.get("title"))[:180], "url": url,
+                    "source": _intel_clean(o.get("source"))[:40],
+                    "why": _intel_clean(o.get("why"))[:180]})
+        if len(out) >= 6:
+            break
+    return out
+
+
+def _intel_extract_json(text):
+    if not text:
+        return []
+    m = re.search(r"\[.*\]", text, re.S)     # first JSON array
+    if not m:
+        return []
+    try:
+        v = json.loads(m.group(0))
+        return v if isinstance(v, list) else []
+    except Exception:
+        return []
+
+
+# ---- optional agent augmentation (dormant until web_search is configured) ----
+def _intel_web_ok():
+    """Cached probe: is the agent's web_search actually usable here? Currently
+    False (no Firecrawl/Tavily key, no Nous Portal login, ddgs not installed).
+    Flips True automatically once a provider is configured."""
+    def probe():
+        if not os.path.exists(_VENV_PY):
+            return False
+        code = ("import json;from tools.web_tools import web_search_tool;"
+                "print(web_search_tool('AI news',1))")
+        try:
+            p = subprocess.run([_VENV_PY, "-c", code], capture_output=True, text=True,
+                               timeout=30, cwd=_HERMES_SRC,
+                               env={**_hermes_env(),
+                                    "HERMES_HOME": os.path.join(HOME, ".hermes")})
+            out = (p.stdout or "").strip()
+            # web_search_tool returns PRETTY-PRINTED multi-line JSON — parse
+            # the whole blob from the first brace, not just the last line.
+            j = json.loads(out[out.index("{"):]) if "{" in out else {}
+            return bool(j.get("success") or j.get("data"))
+        except Exception:
+            return False
+    try:
+        return _cached("intel_web_ok", 6 * 3600, probe)
+    except Exception:
+        return False
+
+
+_INTEL_AGENT_PROMPT = (
+    "Use your web_search tool NOW (do not answer from memory) to find the most "
+    "important, freshest items from the last 24 hours across: (a) trending AI "
+    "discussion on Reddit/X/Substack, and (b) AI-lab news — Anthropic/Claude, "
+    "OpenAI, Google DeepMind, Meta AI, Mistral, xAI. Return ONLY a JSON array of "
+    "objects with keys title, source, url, why (one line). Copy URLs verbatim.")
+
+
+def _intel_agent_pass():
+    """When web_search is usable, run ONE `hermes -z` research pass and return
+    parsed items. Dormant (returns []) until a web provider is configured."""
+    if not _intel_web_ok():
+        return []
+    try:
+        p = subprocess.run([HERMES, "-z", _INTEL_AGENT_PROMPT],
+                           capture_output=True, text=True, timeout=180,
+                           env=_hermes_env())
+        arr = _intel_extract_json(p.stdout or "")
+    except Exception as e:
+        _wt_log_err("intel agent pass failed: %r" % e)
+        return []
+    out = []
+    for o in arr:
+        if isinstance(o, dict) and str(o.get("url", "")).startswith("http"):
+            out.append({"title": _intel_clean(o.get("title"))[:180],
+                        "url": str(o.get("url")).strip(),
+                        "source": _intel_clean(o.get("source"))[:40] or "web",
+                        "topic": "Agent", "ts": time.time(),
+                        "summary": _intel_clean(o.get("why"))[:220]})
+    _wt_log_err("intel agent pass: %d items" % len(out))
+    return out
+
+
+# ---- brief consumers ----
+def _brief_ai_labs():
+    store = _intel_load()
+    curated = store.get("curated") or []
+    lines = []
+    if curated:
+        for c in curated[:6]:
+            why = (c.get("why") or "").strip()
+            lines.append("• %s (%s)%s" % (
+                _md_link(c.get("title", ""), c.get("url")),
+                c.get("source", ""), (" — " + why) if why else ""))
+    else:
+        items = store.get("items") or []
+        now = time.time()
+        fresh = [it for it in items
+                 if not it.get("ts") or (now - (it.get("ts") or now)) < 24 * 3600]
+        for it in (fresh or items)[:6]:
+            lines.append("• %s (%s)" % (_md_link(it.get("title", ""), it.get("url")),
+                                        it.get("source", "")))
+    if not lines:
+        return _sec(note="No fresh AI-lab news gathered yet "
+                         "(the hourly research pass runs in the background).")
+    return _sec(lines, meta={"updated": store.get("updated")})
+
+
+def _intel_underground_picks(n):
+    """Freshest Voices/Social intel items for the underground section."""
+    store = _intel_load()
+    picks = [it for it in (store.get("items") or [])
+             if it.get("topic") in _UNDERGROUND_TOPICS]
+    picks.sort(key=lambda it: it.get("ts") or 0, reverse=True)
+    return picks[:n]
+
+
+def intel_loop():
+    """Sibling daemon: gather intel at most once/hour (catch-up after downtime)."""
+    _wt_log_err("intel loop started")
+    time.sleep(20)                       # let the hub prewarm first
+    while True:
+        try:
+            store = _intel_load()
+            if time.time() - (store.get("updated") or 0) >= INTEL_INTERVAL:
+                _intel_gather()
+        except Exception as e:
+            _wt_log_err("intel loop: %r" % e)
+        time.sleep(300)                  # check every 5 min
 
 
 # --------------------------------------------------------------------------
@@ -1622,8 +2046,24 @@ def watchtower_feed_handler(ctx):
     return {"ok": True, "fires": fires}
 
 
+def intel_handler(ctx):
+    """Visibility into the hourly AI/social research store (also a manual poke)."""
+    if (ctx.q1("gather", "") or "") == "1":
+        try:
+            threading.Thread(target=_intel_gather, daemon=True).start()
+        except Exception:
+            pass
+        return {"ok": True, "gathering": True}
+    store = _intel_load()
+    return {"ok": True, "updated": store.get("updated"),
+            "feeds": store.get("feeds"), "web_search_available": _intel_web_ok(),
+            "count": len(store.get("items") or []),
+            "curated": store.get("curated") or [],
+            "items": (store.get("items") or [])[:40]}
+
+
 # ==========================================================================
-# WIRING — rebind, routes, guarded thread (mirror aux_recorder's pattern)
+# WIRING — rebind, routes, guarded threads (mirror aux_recorder's pattern)
 # ==========================================================================
 globals()["_generate_briefing"] = _wt_generate_briefing
 globals()["_briefing_payload"] = _wt_briefing_payload
@@ -1633,6 +2073,7 @@ register_post("/api/brief/send", brief_send_handler)
 register_get("/api/watchtower", watchtower_get_handler)
 register_post("/api/watchtower", watchtower_post_handler)
 register_get("/api/watchtower/feed", watchtower_feed_handler)
+register_get("/api/intel", intel_handler)
 
 if not globals().get("_watchtower_thread_started"):
     globals()["_watchtower_thread_started"] = True
@@ -1640,3 +2081,20 @@ if not globals().get("_watchtower_thread_started"):
         threading.Thread(target=watchtower_loop, daemon=True).start()
     except Exception as _e:            # pragma: no cover
         _wt_log_err("thread failed to start: %r" % _e)
+
+if not globals().get("_intel_thread_started"):
+    globals()["_intel_thread_started"] = True
+    try:
+        threading.Thread(target=intel_loop, daemon=True).start()
+    except Exception as _e:            # pragma: no cover
+        _wt_log_err("intel thread failed to start: %r" % _e)
+
+
+# ==========================================================================
+# TODO (Tier 3 — DEFERRED, not built here): prettier "blurb" formatting of the
+# outgoing messages. The user said this is not paramount and asked to delegate
+# it for later. Scope for that pass: richer per-item blurbs (a headline + a
+# 1-2 line synthesized summary instead of a bare title), section dividers/emphasis
+# that survive both MarkdownV2 and the hub's renderMd(), and optional grouping of
+# AI & Labs by lab. Keep the link-on-every-item + zero-emoji + 12-hour invariants.
+# ==========================================================================

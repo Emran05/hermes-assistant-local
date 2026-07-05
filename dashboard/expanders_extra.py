@@ -1521,18 +1521,70 @@ def expand_markets():
     watch = watch[:16]
 
     def one(sym, friendly=None):
+        # includePrePost=true extends the timestamp/close arrays into the pre-
+        # and post-market sessions so we can report extended-hours prices and
+        # derive an HONEST market phase from currentTradingPeriod (the chart
+        # meta's own "marketState" is unreliable — it comes back None). This
+        # endpoint needs no auth (the v7 quote endpoint now 401s without a crumb).
         j = _http_json("https://query1.finance.yahoo.com/v8/finance/chart/"
-                       + urllib.parse.quote(sym) + "?range=1d&interval=15m", timeout=7)
+                       + urllib.parse.quote(sym)
+                       + "?range=1d&interval=15m&includePrePost=true", timeout=7)
         res = j["chart"]["result"][0]
         m = res["meta"]
-        closes = [c for c in (res.get("indicators", {}).get("quote", [{}])[0]
-                              .get("close") or []) if c is not None]
+        ts = res.get("timestamp") or []
+        allc = res.get("indicators", {}).get("quote", [{}])[0].get("close") or []
+        pts = [(t, c) for t, c in zip(ts, allc) if c is not None]
         price = m.get("regularMarketPrice")
         prev = m.get("chartPreviousClose") or m.get("previousClose") or price
         chg = (price - prev) if (price is not None and prev) else 0
         pct = (chg / prev * 100) if prev else 0
-        # prevClose-anchored sparkline so slope matches the daily %.
-        spark = ([prev] + closes)[-60:] if prev else closes[-60:]
+
+        # --- market phase from currentTradingPeriod (absolute epochs) ---
+        ctp = m.get("currentTradingPeriod") or {}
+        reg = ctp.get("regular") or {}
+        pre_p = ctp.get("pre") or {}
+        post_p = ctp.get("post") or {}
+        reg_s, reg_e = reg.get("start"), reg.get("end")
+        now = int(time.time())
+
+        def _within(p):
+            s, e = (p or {}).get("start"), (p or {}).get("end")
+            return s is not None and e is not None and s <= now < e
+
+        if _within(reg):
+            state = "REGULAR"
+        elif _within(pre_p):
+            state = "PRE"
+        elif _within(post_p):
+            state = "POST"
+        else:
+            state = "CLOSED"
+
+        # split closes by session; keep the sparkline REGULAR-only so the
+        # dashboard widget shape is unchanged.
+        reg_closes = [c for t, c in pts
+                      if reg_s is None or reg_e is None or reg_s <= t < reg_e]
+        pre_closes = [c for t, c in pts if reg_s is not None and t < reg_s]
+        post_closes = [c for t, c in pts if reg_e is not None and t >= reg_e]
+        reg_close = reg_closes[-1] if reg_closes else price
+        spark = ([prev] + reg_closes)[-60:] if prev else reg_closes[-60:]
+
+        def _pctv(p, base):
+            return round((p - base) / base * 100, 2) if (p is not None and base) else None
+
+        post_price = post_closes[-1] if post_closes else None
+        pre_price = pre_closes[-1] if pre_closes else None
+        post_pct = _pctv(post_price, reg_close)     # after-hours vs regular close
+        pre_pct = _pctv(pre_price, prev)            # pre-market vs prior close
+
+        # the extended quote appropriate to the CURRENT phase (None when the
+        # market is fully closed / regular — the brief then labels honestly).
+        ext_kind = ext_price = ext_pct = None
+        if state == "POST" and post_price is not None:
+            ext_kind, ext_price, ext_pct = "post", post_price, post_pct
+        elif state == "PRE" and pre_price is not None:
+            ext_kind, ext_price, ext_pct = "pre", pre_price, pre_pct
+
         return {"symbol": sym, "friendly": friendly,
                 "name": m.get("shortName") or m.get("longName") or sym,
                 "price": price, "chg": round(chg, 2), "pct": round(pct, 2),
@@ -1545,7 +1597,14 @@ def expand_markets():
                 "cur": m.get("currency") or "USD",
                 "exch": m.get("exchangeName"),
                 "spark": spark, "asof": m.get("regularMarketTime"),
-                "state": m.get("marketState")}
+                "state": state,
+                "post_price": round(post_price, 2) if post_price is not None else None,
+                "post_pct": post_pct,
+                "pre_price": round(pre_price, 2) if pre_price is not None else None,
+                "pre_pct": pre_pct,
+                "ext_kind": ext_kind,
+                "ext_price": round(ext_price, 2) if ext_price is not None else None,
+                "ext_pct": ext_pct}
 
     def grab(sym, friendly=None):
         # per-symbol cache: adding/starring one ticker only refetches the
