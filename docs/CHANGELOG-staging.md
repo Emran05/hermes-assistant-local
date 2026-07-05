@@ -108,3 +108,11 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   google-workspace skill (identical key set, Credentials.from_authorized_user_file parses). What works
   once user connects: gmail search/get/labels, calendar list/create/delete, contacts; send/drive/docs
   403 at Google. User steps in NEEDS-YOU.md.
+- `<midday+breaking>` Midday Pulse + Breaking alerts (user-directed) — aux_watchtower.py →2572L, .js →617L.
+  Midday: once/day ~3PM (configurable 11-17h), fires ONLY when ≥2 buckets of genuinely-new content since
+  8am (intraday movers ≥1.5% in live sessions only / fresh news / fires), skipped silently otherwise,
+  catch-up till 6PM, deterministic + linked. Breaking: 60s scan of cached data, 3 high-bar classes
+  (index ≥2.5% / ticker ≥8% live-session only; severe news corroborated by ≥2 sources; AI-lab major
+  event), per-story dedupe + 90min class cooldown + daily cap 5 + quiet-hours override (configurable).
+  Agent web_search confirmed feeding intel (30→43 items, curated before the brief). All gates
+  unit-verified offline; zero real sends during build. Midday armed for today ~3PM.

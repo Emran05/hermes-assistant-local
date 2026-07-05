@@ -222,7 +222,7 @@
     var tiny = rules.length + (rules.length === 1 ? " rule · " : " rules · ") + enabledCount + " on";
 
     var html = "";
-    html += controlsHtml(brief, qh, data.daily_cap);
+    html += controlsHtml(brief, qh, data.daily_cap, data.midday || {}, data.breaking || {});
     html += '<div class="wt-eb" id="wt-ctl-eb"></div>';
     html += '<div class="wt-band">Watches<span class="wt-brule"></span></div>';
     html += rulesHtml(rules, stats);
@@ -242,15 +242,27 @@
     } catch (e) {}
   }
 
-  function controlsHtml(brief, qh, cap) {
+  function controlsHtml(brief, qh, cap, midday, breaking) {
     var briefOn = brief.enabled !== false;
     var h = num(brief.hour, 8), m = num(brief.minute, 0);
     var hh = (h < 10 ? "0" : "") + h, mm = (m < 10 ? "0" : "") + m;
+    var midOn = midday.enabled !== false;
+    var mh = num(midday.hour, 15), mmin = num(midday.minute, 0);
+    var mhh = (mh < 10 ? "0" : "") + mh, mmm = (mmin < 10 ? "0" : "") + mmin;
+    var brkOn = breaking.enabled !== false;
     return '<div class="wt-controls">' +
       '<div class="wt-ctl"><label>8am World Brief</label><div class="wt-row2">' +
       toggle("wt-brief-on", briefOn) +
       '<input class="wt-inp wt-time" id="wt-brief-time" value="' + E(hh + ":" + mm) +
       '" placeholder="08:00"></div></div>' +
+      '<div class="wt-ctl"><label>Midday pulse</label><div class="wt-row2">' +
+      toggle("wt-mid-on", midOn) +
+      '<input class="wt-inp wt-time" id="wt-mid-time" value="' + E(mhh + ":" + mmm) +
+      '" placeholder="15:00" title="Sends only when something noteworthy changed"></div></div>' +
+      '<div class="wt-ctl"><label>Breaking alerts</label><div class="wt-row2">' +
+      toggle("wt-brk-on", brkOn) +
+      '<span class="tiny" style="color:var(--faint)">cap ' +
+      E(String(num(breaking.daily_cap, 5))) + "/day</span></div></div>" +
       '<div class="wt-ctl"><label>Quiet hours</label><div class="wt-row2">' +
       '<input class="wt-inp wt-time" id="wt-qh-start" value="' + E(qh.start || "22:00") + '">' +
       '<span class="tiny" style="color:var(--faint)">to</span>' +
@@ -431,6 +443,30 @@
       var m = /^(\d{1,2}):(\d{2})$/.exec(briefTime.value.trim());
       if (!m) { ctlErr(card, "Time must be HH:MM"); return; }
       op({ op: "set_brief", hour: Number(m[1]), minute: Number(m[2]) }).catch(function () {});
+    });
+
+    // midday pulse toggle + time
+    var midTog = card.querySelector("#wt-mid-on");
+    if (midTog) midTog.addEventListener("click", function () {
+      var on = !midTog.classList.contains("on");
+      setTog(midTog, on);
+      op({ op: "set_midday", enabled: on }).catch(function () {});
+    });
+    var midTime = card.querySelector("#wt-mid-time");
+    if (midTime) midTime.addEventListener("change", function () {
+      var m = /^(\d{1,2}):(\d{2})$/.exec(midTime.value.trim());
+      if (!m) { ctlErr(card, "Time must be HH:MM"); return; }
+      op({ op: "set_midday", hour: Number(m[1]), minute: Number(m[2]) })
+        .then(function (r) { if (!r || r.ok === false) ctlErr(card, (r && r.error) || "bad time"); })
+        .catch(function () {});
+    });
+
+    // breaking alerts toggle
+    var brkTog = card.querySelector("#wt-brk-on");
+    if (brkTog) brkTog.addEventListener("click", function () {
+      var on = !brkTog.classList.contains("on");
+      setTog(brkTog, on);
+      op({ op: "set_breaking", enabled: on }).catch(function () {});
     });
 
     // quiet hours

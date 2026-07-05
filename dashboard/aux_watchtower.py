@@ -308,6 +308,20 @@ def _wt_load():
                   "hour": _clamp_int(br.get("hour", 8), 0, 23, 8),
                   "minute": _clamp_int(br.get("minute", 0), 0, 59, 0),
                   "channels": _valid_channels(br.get("channels"), ["telegram", "hub"])}
+    md = d.get("midday") if isinstance(d.get("midday"), dict) else {}
+    d["midday"] = {"enabled": bool(md.get("enabled", True)),
+                   "hour": _clamp_int(md.get("hour", 15), 11, 17, 15),
+                   "minute": _clamp_int(md.get("minute", 0), 0, 59, 0),
+                   "min_items": _clamp_int(md.get("min_items", 2), 1, 6, 2),
+                   "mover_pct": _clamp_float(md.get("mover_pct", 1.5), 0.5, 10.0) or 1.5,
+                   "channels": _valid_channels(md.get("channels"), ["telegram", "hub"])}
+    bk = d.get("breaking") if isinstance(d.get("breaking"), dict) else {}
+    d["breaking"] = {"enabled": bool(bk.get("enabled", True)),
+                     "override_quiet": bool(bk.get("override_quiet", True)),
+                     "daily_cap": _clamp_int(bk.get("daily_cap", 5), 1, 10, 5),
+                     "index_pct": _clamp_float(bk.get("index_pct", 2.5), 1.0, 10.0) or 2.5,
+                     "ticker_pct": _clamp_float(bk.get("ticker_pct", 8.0), 3.0, 20.0) or 8.0,
+                     "cooldown_min": _clamp_int(bk.get("cooldown_min", 90), 15, 360, 90)}
     rules = []
     for r in (d.get("rules") or []):
         clean, e = _wt_validate_rule(r, existing_id=(r or {}).get("id"))
@@ -323,11 +337,17 @@ def _wt_state_load():
         s = {}
     s["version"] = 1
     s.setdefault("last_brief_date", "")
+    s.setdefault("last_midday_date", "")
     day = s.get("day") if isinstance(s.get("day"), dict) else {}
     s["day"] = {"date": day.get("date", ""), "sent": int(day.get("sent", 0) or 0)}
     s.setdefault("fires", {})
     if not isinstance(s["fires"], dict):
         s["fires"] = {}
+    bk = s.get("breaking") if isinstance(s.get("breaking"), dict) else {}
+    s["breaking"] = {
+        "date": bk.get("date", ""), "sent": int(bk.get("sent", 0) or 0),
+        "sigs": bk.get("sigs") if isinstance(bk.get("sigs"), dict) else {},
+        "last_class": bk.get("last_class") if isinstance(bk.get("last_class"), dict) else {}}
     return s
 
 
@@ -1630,6 +1650,337 @@ def intel_loop():
         time.sleep(300)                  # check every 5 min
 
 
+# ==========================================================================
+# MIDDAY PULSE (~3pm) + BREAKING ALERTS
+#
+# GUIDELINES (author-defined per the user's ask):
+#
+# Midday pulse — a light, optional update, NOT a second full brief:
+#   * Fires once/day at ~3:00 PM local (configurable 11:00-17:00), date-guarded
+#     (last_midday_date), catch-up-on-wake until 6 PM — after that the day is
+#     marked done (a 7 PM "midday" update is noise).
+#   * ONLY sends when there is something noteworthy: intraday movers >=1.5%
+#     (only when the market session is live/extended — honest), fresh AI/news
+#     items since the morning brief, and Watchtower fires since morning. Fewer
+#     than `min_items` (default 2) buckets of content => skipped silently
+#     (logged suppressed:"not_noteworthy"). "Not a must" by design.
+#   * Compact, deterministic (no model pass), links on every item, zero emoji,
+#     12-hour times. Composed 100% from cached data + the intel store.
+#
+# Breaking alerts — reserved for genuinely urgent, pushed immediately:
+#   * Scanned every loop pass (60s) against CACHED data only, so detection
+#     latency is bounded by cache freshness (markets ~5 min, news <=15 min,
+#     AI intel <=1 h) with zero extra network.
+#   * Three trigger classes, each with a high bar:
+#       market — an index moves >=2.5% or a watchlist ticker >=8% intraday,
+#                only during a live/extended session (never stale weekend data);
+#       news   — a severe-event keyword (war/disaster/market-halt class) in a
+#                fresh (<2 h) headline CORROBORATED by >=2 distinct sources
+#                (one outlet's clickbait never pages the phone);
+#       ai     — a fresh (<3 h) intel item matching an AI-lab name AND a
+#                major-action verb (releases/acquires/resigns/breach/...).
+#   * Anti-spam, in order: per-story signature dedupe (never the same story
+#     twice; market sigs re-arm only on a materially deeper move), per-class
+#     cooldown (default 90 min), its own daily cap (default 5), and by default
+#     it OVERRIDES quiet hours (that is its purpose) — set override_quiet:false
+#     to keep nights silent. Every push/suppression is logged; Useful/Noise
+#     reactions in the Mind card tune it.
+#   * Notify-only, same as everything here: no tools, no approvals, no chat_id.
+# ==========================================================================
+def _today_at(hour, minute=0, ts=None):
+    lt = time.localtime(ts if ts is not None else time.time())
+    return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, int(hour), int(minute),
+                        0, lt.tm_wday, lt.tm_yday, -1))
+
+
+def _midday_compose(cfg):
+    """Deterministic 'what changed since this morning' pulse.  Always builds
+    text; `noteworthy` says whether the scheduler should actually send it."""
+    md = cfg.get("midday", {})
+    cutoff = _today_at((cfg.get("brief") or {}).get("hour", 8))
+    now = time.time()
+    items_count = 0
+    lines = ["Midday pulse — %s" % _t12(now)]
+
+    # markets: only when a session is live/extended (weekend/closed => nothing
+    # has changed since the morning brief, so say nothing)
+    mk = _markets_data()
+    state = mk.get("state")
+    if state in ("REGULAR", "PRE", "POST") and not mk.get("error"):
+        tag = {"REGULAR": "live", "PRE": "pre-market", "POST": "after hours"}[state]
+        idx = [q for q in (mk.get("indices") or []) if not q.get("error")]
+        if idx:
+            lines.append("Markets (%s): " % tag + " · ".join(
+                "%s %s" % (_md_link(q.get("friendly") or q.get("symbol"),
+                                    _quote_url(q.get("symbol"))), _fmt_pct(q.get("pct")))
+                for q in idx))
+        wl = [q for q in (mk.get("watchlist") or [])
+              if not q.get("error") and q.get("pct") is not None]
+        movers = [q for q in wl
+                  if abs(float(q.get("pct") or 0)) >= float(md.get("mover_pct", 1.5))]
+        movers.sort(key=lambda q: abs(float(q.get("pct") or 0)), reverse=True)
+        if movers:
+            lines.append("Movers now:")
+            for q in movers[:4]:
+                lines.append("• %s %s · %s" % (
+                    _md_link(q.get("symbol"), _quote_url(q.get("symbol"))),
+                    _fmt_pct(q.get("pct")), _fmt_price(q.get("price"))))
+            items_count += len(movers[:4])
+
+    # fresh AI intel + headlines since the morning brief
+    fresh = []
+    for it in (_intel_load().get("items") or []):
+        if (it.get("ts") or 0) >= cutoff:
+            fresh.append(("AI", it))
+    for sec in (_rss_data().get("sections") or []):
+        for it in (sec.get("items") or []):
+            if (it.get("ts") or 0) >= cutoff:
+                fresh.append((sec.get("name", "News"), it))
+    fresh.sort(key=lambda p: p[1].get("ts") or 0, reverse=True)
+    seen, picked = set(), []
+    for tag, it in fresh:
+        k = _intel_norm_url(it.get("url"))
+        if k and k not in seen:
+            seen.add(k)
+            picked.append((tag, it))
+        if len(picked) >= 5:
+            break
+    if picked:
+        lines.append("New since this morning:")
+        for tag, it in picked:
+            lines.append("• %s: %s (%s)" % (
+                tag, _md_link(it.get("title", ""), it.get("url")), it.get("source", "")))
+        items_count += len(picked)
+
+    # watchtower fires since morning (delivered only; skip midday's own rows)
+    fires = [r for r in _wt_log_read(200)
+             if (r.get("ts") or 0) >= cutoff and not r.get("suppressed")
+             and r.get("type") != "midday_brief"]
+    if fires:
+        lines.append("Watchtower flags:")
+        for r in fires[-3:]:
+            lines.append("• %s — %s" % (r.get("label") or r.get("type", ""),
+                                        _t12(r.get("ts"))))
+        items_count += len(fires[-3:])
+
+    noteworthy = items_count >= int(md.get("min_items", 2))
+    return {"noteworthy": noteworthy, "items": items_count,
+            "text": _strip_emoji("\n".join(lines)), "since": cutoff}
+
+
+def _midday_tick(cfg, state, now_ts):
+    """Once/day at ~3pm: send the pulse only if noteworthy; date-guarded."""
+    md = cfg.get("midday", {})
+    if not md.get("enabled", True):
+        return
+    today = _today_str(now_ts)
+    if state.get("last_midday_date") == today:
+        return
+    lt = time.localtime(now_ts)
+    cur_min = lt.tm_hour * 60 + lt.tm_min
+    if cur_min < md.get("hour", 15) * 60 + md.get("minute", 0):
+        return
+    if cur_min >= 18 * 60:               # slept through the window — skip today
+        _wt_save_state(lambda s: s.__setitem__("last_midday_date", today))
+        state["last_midday_date"] = today
+        return
+    try:
+        comp = _midday_compose(cfg)
+    except Exception as e:
+        _wt_log_err("midday compose failed: %r" % e)
+        comp = {"noteworthy": False, "items": 0, "text": ""}
+    row = {"ts": now_ts, "rule_id": "", "type": "midday_brief",
+           "label": "Midday pulse", "signature": "midday:" + today,
+           "context": {"items": comp["items"]},
+           "channels": md.get("channels", ["telegram", "hub"]),
+           "delivered": [], "suppressed": "", "reaction": ""}
+    if not comp["noteworthy"]:
+        row["suppressed"] = "not_noteworthy"
+    else:
+        ok, det = True, ""
+        if "telegram" in row["channels"]:
+            ok, det = _wt_send_telegram(comp["text"])
+        if ok:
+            row["delivered"] = list(row["channels"])
+            row["text"] = comp["text"]
+        else:
+            row["suppressed"] = "deliver_failed"
+            row["detail"] = det
+    _wt_log_append(row)
+    # date flips after one attempt either way — no afternoon retry storm
+    _wt_save_state(lambda s: s.__setitem__("last_midday_date", today))
+    state["last_midday_date"] = today
+
+
+# ---- breaking: severity keyword tables (curated tight to keep the bar high) --
+_BREAK_NEWS_KW = [
+    "declares war", "invasion of", "invades", "airstrike", "air strike",
+    "missile strike", "nuclear", "assassinat", "coup ", "state of emergency",
+    "earthquake", "tsunami", "hurricane", "mass shooting", "explosion",
+    "market crash", "flash crash", "trading halted", "circuit breaker",
+    "defaults on", "files for bankruptcy", "bank run", "hijack", "shot down",
+    "cyberattack", "ransomware", "evacuation order", "outbreak of",
+]
+_AI_LABS = ["anthropic", "claude", "openai", "chatgpt", "gpt-5", "gpt-6",
+            "deepmind", "gemini", "meta ai", "llama", "mistral", "xai", "grok"]
+_AI_ACTIONS = ["releases", "released", "launches", "launched", "announces",
+               "announced", "unveils", "acquires", "acquired", "acquisition",
+               "resigns", "steps down", "ousted", "breach", "hacked",
+               "lawsuit", "sues", "sued", "bans", "banned", "shuts down",
+               "outage", "raises $"]
+
+
+def _breaking_scan(cfg):
+    """Candidates from cached data only.  Never raises; returns a list of
+    {class, sig, text, context}."""
+    bc = cfg.get("breaking", {})
+    now = time.time()
+    cands = []
+
+    # 1) market shock — live/extended sessions only (never stale weekend data)
+    try:
+        mk = _markets_data()
+        state = mk.get("state")
+        if state in ("REGULAR", "PRE", "POST") and not mk.get("error"):
+            phase = {"REGULAR": "live", "PRE": "pre-market", "POST": "after hours"}[state]
+            for pool, thr in ((mk.get("indices") or [], float(bc.get("index_pct", 2.5))),
+                              (mk.get("watchlist") or [], float(bc.get("ticker_pct", 8.0)))):
+                for q in pool:
+                    if q.get("error") or q.get("pct") is None:
+                        continue
+                    pct = float(q["pct"])
+                    if abs(pct) < thr:
+                        continue
+                    bucket = int(abs(pct) // 2) * 2   # re-arm only on deeper moves
+                    d = "up" if pct > 0 else "down"
+                    sig = "mkt:%s:%s:%d" % (q.get("symbol"), d, bucket)
+                    nm = q.get("friendly") or q.get("symbol")
+                    cands.append({
+                        "class": "market", "sig": sig,
+                        "text": _strip_emoji(
+                            "BREAKING — Markets\n%s %s intraday at %s (%s)" % (
+                                _md_link(nm, _quote_url(q.get("symbol"))),
+                                _fmt_pct(pct), _fmt_price(q.get("price")), phase)),
+                        "context": {"symbol": q.get("symbol"), "pct": pct,
+                                    "price": q.get("price"), "state": state}})
+    except Exception as e:
+        _wt_log_err("breaking market scan: %r" % e)
+
+    # 2) corroborated severe news — fresh <2h + >=2 distinct sources per keyword
+    try:
+        matches = {}
+        for sec in (_rss_data().get("sections") or []):
+            for it in (sec.get("items") or []):
+                ts = it.get("ts") or 0
+                if not ts or now - ts > 2 * 3600:
+                    continue
+                hay = str(it.get("title", "")).lower()
+                for kw in _BREAK_NEWS_KW:
+                    if kw in hay:
+                        matches.setdefault(kw, []).append((it, sec.get("name", "")))
+                        break
+        for kw, hits in matches.items():
+            sources = {h[0].get("source") for h in hits}
+            if len(sources) < 2:
+                continue                     # single outlet != breaking
+            hits.sort(key=lambda h: h[0].get("ts") or 0, reverse=True)
+            it, secname = hits[0]
+            others = sorted(s for s in sources if s != it.get("source"))
+            sig = "news:%s:%s" % (kw.strip().replace(" ", "_"), _today_str(now))
+            cands.append({
+                "class": "news", "sig": sig,
+                "text": _strip_emoji(
+                    "BREAKING — %s (%d sources)\n%s (%s)%s" % (
+                        secname or "News", len(sources),
+                        _md_link(it.get("title", ""), it.get("url")),
+                        it.get("source", ""),
+                        ("\nAlso reported by " + ", ".join(others[:3])) if others else "")),
+                "context": {"keyword": kw, "sources": sorted(sources),
+                            "url": it.get("url")}})
+    except Exception as e:
+        _wt_log_err("breaking news scan: %r" % e)
+
+    # 3) major AI-lab event — fresh <3h intel item, lab name + action verb
+    try:
+        for it in (_intel_load().get("items") or []):
+            ts = it.get("ts") or 0
+            if not ts or now - ts > 3 * 3600:
+                continue
+            hay = (str(it.get("title", "")) + " " + str(it.get("summary", ""))).lower()
+            if any(l in hay for l in _AI_LABS) and any(a in hay for a in _AI_ACTIONS):
+                sig = "ai:" + hashlib.sha1(
+                    _intel_norm_url(it.get("url")).encode("utf-8")).hexdigest()[:12]
+                cands.append({
+                    "class": "ai", "sig": sig,
+                    "text": _strip_emoji("BREAKING — AI\n%s (%s)" % (
+                        _md_link(it.get("title", ""), it.get("url")),
+                        it.get("source", ""))),
+                    "context": {"title": it.get("title"), "url": it.get("url"),
+                                "source": it.get("source")}})
+    except Exception as e:
+        _wt_log_err("breaking ai scan: %r" % e)
+    return cands
+
+
+def _breaking_pass(cfg, state, now_ts):
+    """Gate + deliver + log breaking candidates.  Runs every loop pass; the
+    signature store makes re-scans of the same story silent (no log flood)."""
+    bc = cfg.get("breaking", {})
+    if not bc.get("enabled", True):
+        return
+    cands = _breaking_scan(cfg)
+    if not cands:
+        return
+    today = _today_str(now_ts)
+    br = dict(state.get("breaking") or {})
+    if br.get("date") != today:
+        br = {"date": today, "sent": 0,
+              "sigs": br.get("sigs") or {}, "last_class": br.get("last_class") or {}}
+    br["sigs"] = {k: v for k, v in (br.get("sigs") or {}).items()
+                  if now_ts - v < 48 * 3600}
+    changed = False
+    for c in cands:
+        if c["sig"] in br["sigs"]:
+            continue                        # already alerted/handled — silent
+        cd = int(bc.get("cooldown_min", 90)) * 60
+        if now_ts - (br.get("last_class", {}).get(c["class"]) or 0) < cd:
+            continue                        # class cooling down — retry later
+        row = {"ts": now_ts, "rule_id": "", "type": "breaking_" + c["class"],
+               "label": "Breaking · " + c["class"], "signature": c["sig"],
+               "context": c.get("context") or {}, "channels": ["telegram", "hub"],
+               "delivered": [], "suppressed": "", "reaction": ""}
+        if (not bc.get("override_quiet", True)) and \
+                _in_quiet(now_ts, cfg.get("quiet_hours", {})):
+            row["suppressed"] = "quiet_hours"
+            br["sigs"][c["sig"]] = now_ts
+            changed = True
+            _wt_log_append(row)
+            continue
+        if int(br.get("sent", 0)) >= int(bc.get("daily_cap", 5)):
+            row["suppressed"] = "daily_cap"
+            br["sigs"][c["sig"]] = now_ts
+            changed = True
+            _wt_log_append(row)
+            continue
+        ok, det = _wt_send_telegram(c["text"])
+        br.setdefault("last_class", {})[c["class"]] = now_ts   # even on failure:
+        changed = True                                         # 90-min retry space
+        if ok:
+            row["delivered"] = ["telegram", "hub"]
+            row["text"] = c["text"]
+            br["sigs"][c["sig"]] = now_ts
+            br["sent"] = int(br.get("sent", 0)) + 1
+        else:
+            row["suppressed"] = "deliver_failed"
+            row["detail"] = det
+        _wt_log_append(row)
+    if changed:
+        def _mut(s):
+            s["breaking"] = br
+        _wt_save_state(_mut)
+        state["breaking"] = br
+
+
 # --------------------------------------------------------------------------
 # REBIND — the widget refresh path writes the world brief (no Telegram send).
 # briefing_loop() + /api/briefing + /api/briefing/refresh call these globals by
@@ -1732,6 +2083,8 @@ def watchtower_loop():
             state = _wt_state_load()
             now_ts = time.time()
             _brief_tick(cfg, state, now_ts)
+            _midday_tick(cfg, state, now_ts)
+            _breaking_pass(cfg, state, now_ts)
             _rule_pass(cfg, state, now_ts)
         except Exception as e:
             _wt_log_err("loop: %r" % e)
@@ -1747,6 +2100,16 @@ def _brief_sections_public(sections):
 
 
 def brief_preview_handler(ctx):
+    kind = ctx.q1("kind", "morning")
+    if kind == "midday":
+        try:
+            comp = _midday_compose(_wt_load())
+            return {"ok": True, "kind": "midday", "noteworthy": comp["noteworthy"],
+                    "items": comp["items"], "text": comp["text"],
+                    "since": comp["since"]}
+        except Exception as e:
+            return {"ok": False, "kind": "midday",
+                    "error": type(e).__name__ + ": " + str(e)}
     try:
         comp = _brief_compose(run_synthesis=False)
         return {"ok": True, "sections": _brief_sections_public(comp["sections"]),
@@ -1760,6 +2123,35 @@ def brief_preview_handler(ctx):
 def brief_send_handler(ctx):
     b = ctx.body or {}
     dry_run = bool(b.get("dry_run", True))
+    kind = str(b.get("kind", "morning"))
+
+    if kind == "midday":
+        cfg = _wt_load()
+        try:
+            comp = _midday_compose(cfg)
+        except Exception as e:
+            return _err("compose_failed: " + str(e), 500)
+        if dry_run:
+            return {"ok": True, "kind": "midday", "noteworthy": comp["noteworthy"],
+                    "items": comp["items"], "text": comp["text"],
+                    "delivered": [], "dry_run": True}
+        # manual send: the user asked, so send even below the noteworthy bar;
+        # does NOT flip last_midday_date (the scheduler owns the 3pm push)
+        ok, detail = _wt_send_telegram(comp["text"])
+        row = {"ts": time.time(), "rule_id": "", "type": "midday_brief",
+               "label": "Midday pulse (manual)", "signature": "",
+               "context": {"items": comp["items"]}, "channels": ["telegram", "hub"],
+               "delivered": ["telegram", "hub"] if ok else [],
+               "suppressed": "" if ok else "deliver_failed", "reaction": ""}
+        if ok:
+            row["text"] = comp["text"]
+        _wt_log_append(row)
+        if not ok:
+            return ({"ok": False, "error": "send_failed", "detail": detail,
+                     "text": comp["text"], "dry_run": False}, 502)
+        return {"ok": True, "kind": "midday", "text": comp["text"],
+                "delivered": ["telegram", "hub"], "dry_run": False}
+
     try:
         comp = _brief_compose(run_synthesis=True)
     except Exception as e:
@@ -1786,6 +2178,36 @@ def brief_send_handler(ctx):
                  "delivered": delivered, "dry_run": False}, 502)
     return {"ok": True, "text": comp["text"], "synthesized": comp["synthesized"],
             "delivered": delivered, "dry_run": False}
+
+
+def breaking_preview_handler(ctx):
+    """Dry-run scan: what WOULD page the phone right now, with per-candidate
+    gate verdicts.  Never sends, never mutates state."""
+    cfg = _wt_load()
+    state = _wt_state_load()
+    now_ts = time.time()
+    bc = cfg.get("breaking", {})
+    br = state.get("breaking") or {}
+    today = _today_str(now_ts)
+    sent_today = int(br.get("sent", 0)) if br.get("date") == today else 0
+    out = []
+    for c in _breaking_scan(cfg):
+        if c["sig"] in (br.get("sigs") or {}):
+            verdict = "already_alerted"
+        elif now_ts - ((br.get("last_class") or {}).get(c["class"]) or 0) \
+                < int(bc.get("cooldown_min", 90)) * 60:
+            verdict = "class_cooldown"
+        elif (not bc.get("override_quiet", True)) and \
+                _in_quiet(now_ts, cfg.get("quiet_hours", {})):
+            verdict = "quiet_hours"
+        elif sent_today >= int(bc.get("daily_cap", 5)):
+            verdict = "daily_cap"
+        else:
+            verdict = "would_push"
+        out.append({"class": c["class"], "sig": c["sig"], "verdict": verdict,
+                    "text": c["text"]})
+    return {"ok": True, "candidates": out, "sent_today": sent_today,
+            "config": bc}
 
 
 def _rule_stats():
@@ -1818,6 +2240,7 @@ def watchtower_get_handler(ctx):
         recent = list(reversed(_wt_log_read(RECENT_N)))
         return {"ok": True, "quiet_hours": cfg["quiet_hours"],
                 "daily_cap": cfg["daily_cap"], "brief": cfg["brief"],
+                "midday": cfg["midday"], "breaking": cfg["breaking"],
                 "rules": cfg["rules"], "stats": _rule_stats(),
                 "recent": recent, "live_types": list(LIVE_TYPES),
                 "stub_types": list(STUB_TYPES)}
@@ -1932,6 +2355,53 @@ def _op_set_brief(b):
     return {"ok": True, "brief": d["brief"]}
 
 
+def _op_set_midday(b):
+    def _mut(d):
+        md = dict(d.get("midday", {}))
+        if "enabled" in b:
+            md["enabled"] = bool(b["enabled"])
+        if "hour" in b:
+            md["hour"] = _clamp_int(b["hour"], 11, 17, md.get("hour", 15))
+        if "minute" in b:
+            md["minute"] = _clamp_int(b["minute"], 0, 59, md.get("minute", 0))
+        if "min_items" in b:
+            md["min_items"] = _clamp_int(b["min_items"], 1, 6, md.get("min_items", 2))
+        if "mover_pct" in b:
+            v = _clamp_float(b["mover_pct"], 0.5, 10.0)
+            if v is not None:
+                md["mover_pct"] = v
+        if "channels" in b:
+            md["channels"] = _valid_channels(b["channels"], ["telegram", "hub"])
+        d["midday"] = md
+    d = _wt_save_config(_mut)
+    return {"ok": True, "midday": d["midday"]}
+
+
+def _op_set_breaking(b):
+    def _mut(d):
+        bk = dict(d.get("breaking", {}))
+        if "enabled" in b:
+            bk["enabled"] = bool(b["enabled"])
+        if "override_quiet" in b:
+            bk["override_quiet"] = bool(b["override_quiet"])
+        if "daily_cap" in b:
+            bk["daily_cap"] = _clamp_int(b["daily_cap"], 1, 10, bk.get("daily_cap", 5))
+        if "index_pct" in b:
+            v = _clamp_float(b["index_pct"], 1.0, 10.0)
+            if v is not None:
+                bk["index_pct"] = v
+        if "ticker_pct" in b:
+            v = _clamp_float(b["ticker_pct"], 3.0, 20.0)
+            if v is not None:
+                bk["ticker_pct"] = v
+        if "cooldown_min" in b:
+            bk["cooldown_min"] = _clamp_int(b["cooldown_min"], 15, 360,
+                                            bk.get("cooldown_min", 90))
+        d["breaking"] = bk
+    d = _wt_save_config(_mut)
+    return {"ok": True, "breaking": d["breaking"]}
+
+
 def _latest_delivered_ts(rid):
     """ts of the most recent delivered (non-suppressed) fire for a rule, or None."""
     latest = None
@@ -2016,7 +2486,8 @@ _WT_OPS = {
     "add_rule": _op_add_rule, "update_rule": _op_update_rule,
     "toggle_rule": _op_toggle_rule, "delete_rule": _op_delete_rule,
     "set_quiet_hours": _op_set_quiet, "set_daily_cap": _op_set_cap,
-    "set_brief": _op_set_brief, "mark_reaction": _op_mark_reaction,
+    "set_brief": _op_set_brief, "set_midday": _op_set_midday,
+    "set_breaking": _op_set_breaking, "mark_reaction": _op_mark_reaction,
     "mute_rule": _op_mute_rule, "test_rule": _op_test_rule,
 }
 
@@ -2073,6 +2544,7 @@ register_post("/api/brief/send", brief_send_handler)
 register_get("/api/watchtower", watchtower_get_handler)
 register_post("/api/watchtower", watchtower_post_handler)
 register_get("/api/watchtower/feed", watchtower_feed_handler)
+register_get("/api/watchtower/breaking", breaking_preview_handler)
 register_get("/api/intel", intel_handler)
 
 if not globals().get("_watchtower_thread_started"):
