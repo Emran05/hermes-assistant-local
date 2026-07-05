@@ -233,6 +233,7 @@ def run_turn(job, chat_meta, prompt, save_meta):
 
         srv.call("prompt.submit", {"session_id": sid, "text": prompt},
                  timeout=30)
+        job["_submitted_ts"] = time.time()   # metrics P1.5: setup/serve TTFT split
 
         text, status = "", ""
         deadline = time.time() + TURN_TIMEOUT
