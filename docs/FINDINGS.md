@@ -37,3 +37,16 @@ need approval don't execute (the model narrates fake success). This is expected.
 P1.4 live drills run through the *hub chat* surface (where the dashboard/Telegram can approve),
 not `-z`. Also why `--yolo` is refused: it would blanket-disable the approval gate (a safety
 invariant), so it's never used.
+
+## Shortcuts bus — residual risk R1 (2026-07-05, P3.1)
+`shortcuts run <name>` matches NO hermes DANGEROUS_PATTERN, so a raw terminal
+invocation runs UNGATED (it never emits an approval.request, so permissions.decide()
+never sees it). The dashboard action-bus (/api/shortcuts/run) DOES gate every run
+(allowlist + ticket + tier), and aux_shortcuts rebinds access_preamble to instruct the
+agent "run Shortcuts through the bus, never raw `shortcuts run` in terminal." This is a
+SOFT (instruction-based) mitigation — a prompt-injected agent could still bypass it via
+terminal. Hard fix would need a terminal-side dangerous-pattern (an upstream hermes-agent
+edit we don't make) or a shell shim. Acceptable for v1 because: (a) the bus is the only
+sanctioned/discoverable path, (b) any genuinely destructive shortcut step (rm, etc.) still
+hits the terminal dangerous-patterns on its own, (c) nothing is exposed by default.
+Revisit if we ever add a terminal wrapper or upstream contributes a `shortcuts run` pattern.

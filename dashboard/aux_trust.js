@@ -3,7 +3,7 @@
 // Auto-served at /aux_trust.js.  Loaded AFTER /expand.js so it can wrap the
 // existing Mind-extras entry point (window.mindExtras) instead of editing
 // index.html.  Renders one card (#mind-extra-trust) into #view-mind showing the
-// 17 permission classes with a 3-state Auto/Ask/Never control, floor locks, an
+// 18 permission classes with a 3-state Auto/Ask/Never control, floor locks, an
 // untrusted-policy banner, and recent policy decisions.
 //
 // Reuses the global helpers defined in index.html: esc(), animate() (Motion

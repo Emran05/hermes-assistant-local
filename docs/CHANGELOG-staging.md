@@ -136,3 +136,15 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   Analysis + repeatable bench in docs/plans/b3-*. Applied to files; restart-verify deferred until the
   promotion-gate agent finishes swapping models (avoids collision). Hermes system prompt already
   prefix-stable (no upstream change).
+- `<p3.1>` P3.1 Shortcuts action-bus — aux_shortcuts.py (29K) + .js (18K) + permissions.py 18th class
+  "shortcuts-run" (floor ask) + 2 index.html tags + aux_trust "18 classes". Allowlist model (NOTHING
+  agent-visible until user exposes it in the Mind Shortcuts card), /api/shortcuts/run gates every run
+  through permissions.decide (ask→single-use 5min ticket → confirm → run; never→deny; unexposed→403),
+  recorder rows per attempt, risk chips (Spam Text/Text Last Image flagged as messaging). access_preamble
+  rebind steers the agent to the bus. VERIFIED live: unexposed→403, exposed→needs_approval+ticket.
+  Residual risk R1 (raw terminal shortcuts run ungated) documented in FINDINGS.md.
+- `<p3-b2>` P3 B2 model promotion gate — aux_promotion.py (26K) + .js (9K). /api/models/drill runs a
+  6-case tool-calling eval DIRECTLY against the mlx server (no agent), stores promotion.json, decorates
+  the roster with drill badges + license notes ("Built with Llama" attribution). switch_model wrapper
+  warns when switching to a failed/undrilled model (never blocks). PROVEN: Qwen3-30B 6/6 PASS,
+  Hermes-3-8B 1/6 FAIL — the gate discriminates exactly as FINDINGS predicted (8B can't tool-call).

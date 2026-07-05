@@ -54,7 +54,8 @@ _RANK = {"auto": 0, "ask": 1, "never": 2}     # most-restrictive wins
 SHIPPED_DEFAULT = "ask"                        # the fail-safe fallback tier
 
 # --------------------------------------------------------------------------
-# class taxonomy — 17 canonical action classes
+# class taxonomy — 18 canonical action classes
+# (17 hermes-pattern classes + shortcuts-run, the P3.1 dashboard action bus)
 # CLASS_META[id] = {label, risk, default, floor, desc}
 #   * default : the DOCUMENTED per-class default from the spec table (display
 #               reference only — the ACTUAL shipped fallback is _shipped_tier()).
@@ -91,6 +92,10 @@ CLASS_META = {
         "label": "MCP elicitation consent", "risk": "med",
         "default": "ask", "floor": "ask",
         "desc": "An MCP elicitation is a question — auto-answering it silently consents."},
+    "shortcuts-run": {
+        "label": "macOS Shortcuts runs", "risk": "med",
+        "default": "ask", "floor": "ask",
+        "desc": "Runs a user-exposed macOS Shortcut through the dashboard action bus — allowlisted per shortcut, never silent."},
     "destructive-delete": {
         "label": "Destructive deletes", "risk": "high",
         "default": "ask", "floor": "ask",
@@ -139,7 +144,7 @@ CLASS_ORDER = [
     "destructive-delete", "sql-destructive", "arbitrary-exec", "execute-code",
     "system-config", "unknown",
     "git-destructive", "file-perms", "project-config", "process-control",
-    "container-lifecycle", "mcp-consent",
+    "container-lifecycle", "mcp-consent", "shortcuts-run",
     "read-only",
 ]
 
@@ -300,6 +305,8 @@ def _heuristic(key):
 
 
 def _class_of(key):
+    if key.startswith("shortcuts-run:"):   # dashboard action bus (aux_shortcuts)
+        return "shortcuts-run"
     return PATTERN_CLASS.get(key) or _heuristic(key)
 
 
@@ -598,7 +605,7 @@ def _recent_stats(entries):
 # HTTP-facing surface (called by aux_permissions.py handlers)
 # --------------------------------------------------------------------------
 def permissions_payload():
-    """GET /api/permissions — 17 classes ordered critical->low + recent audit."""
+    """GET /api/permissions — 18 classes ordered critical->low + recent audit."""
     policy, trusted, error = _load()
     entries = _tail_entries(500)
     stats = _recent_stats(entries)
