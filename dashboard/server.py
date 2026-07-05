@@ -2016,16 +2016,59 @@ def add_model(mid, label=None):
     return {"ok": True}
 
 
+# --------------------------------------------------------------------------
+# Aux-module route registry.  Phase-1+ features live in self-contained
+# exec-included modules (aux_*.py) that register their own HTTP routes here
+# instead of editing the 2400-line dispatch chain below.  A module calls
+# register_get("/api/foo", handler) / register_post("/api/bar", handler);
+# handlers receive (ctx) with .query (parsed GET query dict), .body (parsed
+# JSON for POST), and return a (obj[, status]) tuple or a plain dict.
+# --------------------------------------------------------------------------
+GET_ROUTES = {}
+POST_ROUTES = {}
+
+
+def register_get(path, fn):
+    GET_ROUTES[path] = fn
+
+
+def register_post(path, fn):
+    POST_ROUTES[path] = fn
+
+
+class RouteCtx:
+    """Passed to aux route handlers — thin, avoids leaking the raw handler."""
+    __slots__ = ("query", "body", "raw_path")
+
+    def __init__(self, query=None, body=None, raw_path=""):
+        self.query = query or {}
+        self.body = body if body is not None else {}
+        self.raw_path = raw_path
+
+    def q1(self, key, default=""):
+        """First value of a GET query param."""
+        v = self.query.get(key)
+        return v[0] if isinstance(v, list) and v else default
+
+
 # Rich per-widget providers built by the widget agent wave live in a sibling
 # file, exec'd into THIS namespace so they can use all the helpers above.
 # It ends with EXPANDERS.update({...}), overriding e.g. markets with the
-# richer indices+watchlist version.
-try:
-    with open(os.path.join(HERE, "expanders_extra.py")) as _f:
-        exec(_f.read(), globals())
-except Exception as _e:  # never let an aux file take the hub down
-    print(f"[expanders_extra] failed to load: {type(_e).__name__}: {_e}",
-          file=sys.stderr)
+# richer indices+watchlist version.  aux_*.py modules (Phase-1 features) load
+# afterwards, in sorted order, and register their routes via register_get/post.
+_AUX_FILES = ["expanders_extra.py"] + sorted(
+    f for f in os.listdir(HERE)
+    if f.startswith("aux_") and f.endswith(".py"))
+for _auxf in _AUX_FILES:
+    _auxp = os.path.join(HERE, _auxf)
+    if not os.path.exists(_auxp):
+        continue
+    try:
+        with open(_auxp) as _f:
+            exec(_f.read(), globals())
+    except Exception as _e:  # never let an aux file take the hub down
+        print(f"[{_auxf}] failed to load: {type(_e).__name__}: {_e}",
+              file=sys.stderr)
 
 
 # --------------------------------------------------------------------------
@@ -2068,7 +2111,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
-        elif path in ("/motion.min.js", "/expand.js"):
+        elif path in ("/motion.min.js", "/expand.js") or \
+                (path.startswith("/aux_") and path.endswith(".js")
+                 and "/" not in path[1:]):
             try:
                 with open(os.path.join(HERE, path.lstrip("/")), "rb") as f:
                     body = f.read()
@@ -2156,12 +2201,33 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"messages": [], "title": ""})
                 return
             self._json(load_chat(sid))
+        elif path in GET_ROUTES:
+            self._dispatch_aux(GET_ROUTES[path],
+                               RouteCtx(query=urllib.parse.parse_qs(parsed.query),
+                                        raw_path=path))
         else:
             self.send_error(404)
+
+    def _dispatch_aux(self, fn, ctx):
+        """Run an aux route handler; normalise its return to a JSON response."""
+        try:
+            res = fn(ctx)
+        except Exception as e:
+            self._json({"ok": False, "error": type(e).__name__ + ": " + str(e)}, 500)
+            return
+        if isinstance(res, tuple) and len(res) == 2:
+            self._json(res[0], res[1])
+        else:
+            self._json(res if res is not None else {})
 
     # ---- POST ----
     def do_POST(self):
         path = urllib.parse.urlparse(self.path).path
+
+        if path in POST_ROUTES:
+            self._dispatch_aux(POST_ROUTES[path],
+                               RouteCtx(body=self._body_json(), raw_path=path))
+            return
 
         if path == "/api/briefing/refresh":
             threading.Thread(target=_generate_briefing, daemon=True).start()
