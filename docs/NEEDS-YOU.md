@@ -40,3 +40,17 @@ Sending is IMPOSSIBLE by design: only read scopes are ever requested.
 7. Browser will fail to load localhost:1 — EXPECTED. Copy the full address-bar URL.
 8. Paste it into the card → Finish. Chip flips to Connected · read-only.
 (Undo anytime: the card's Disconnect button.)
+
+# ═══ THE ONE SITTING (~25 min) — everything below in one pass ═══
+## 1. Message Center — Full Disk Access (2 min)
+   System Settings → Privacy & Security → Full Disk Access → + →
+   /Applications/Hermes Assistant.app (the APP, not python) → toggle ON →
+   quit & reopen Hermes Assistant. Real conversations appear within ~60s.
+   (Note: if we ever rebuild the app, macOS drops this grant — re-add takes 30s.)
+## 2. Google connect (~12 min) — steps in the "Connect Google" section above.
+## 3. Calendar TCC for launchd python (1 min, optional once Google connects):
+   run `icalBuddy calendars` if prompted, or grant Calendars to python in Settings.
+## 4. Quick eyeball QA (3 min): menu-bar spark glyph click → popover; ⌃⌥Space;
+   ⌘⇧V clipboard sheet; Mind → Trust panel / memory editor / Google card /
+   Watchtower card / Shortcuts card; hub → Claude Usage widget.
+## 5. Say "push it" → I push batch 1 (all staged commits + tags v0.1/v0.2).

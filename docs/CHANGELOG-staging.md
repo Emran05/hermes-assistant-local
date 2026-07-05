@@ -121,3 +121,10 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   clamped 7-90, 300s cache), busiest-day callout, in-place chart re-render with the exact expand.js
   idioms, sticky range, shimmer/error states. Phase 2 now HONESTLY complete (this was the forgotten
   half of DEVPLAN Phase-2 #6 the plan-judge caught).
+- `<p2.4>` P2.4 Message Center — aux_messages.py (317L) + aux_messages.js (206L) + main.swift +315L
+  (MessagesSync: FDA probe via open(2) EPERM, SQLite online-backup snapshot (no WAL locks), 14-convo
+  query, attributedBody byte-scan decode, apple-epoch convert, 60s POST w/ 0600 token guard). Dashboard:
+  token-guarded ingest (403/400/413/cap-200), 0600 store, provider/expander REBIND (no dup widget).
+  VERIFIED: full state matrix, guards, privacy (no bodies in logs), REAL app POSTed fda:false → grant
+  card renders from the live pipe. main.swift now FROZEN (rebuild drops the FDA grant — CLAUDE.md).
+  PHASE 2 COMPLETE pending user FDA grant.

@@ -63,6 +63,21 @@ and explicit agent tool calls (web search etc.) touch the internet.
   `messages.tool_calls`/`tool_name` JOIN `sessions.source` → a live timeline of
   every tool the agent runs across ALL surfaces (dashboard/Telegram/CLI), polled
   every 3s. This is the research-validated "watch it work" edge.
+- **Message Center (P2.4)** — the APP (holds FDA; launchd python cannot) reads
+  ~/Library/Messages/chat.db via MessagesSync in main.swift: SQLite online-backup
+  snapshot (no WAL locks), 60s timer, POSTs token-guarded /api/messages/ingest
+  (token ~/.hermes/dashboard/messages-token 0600). aux_messages.py rebinds
+  WIDGETS["messages"] provider + EXPANDERS["messages"].
+  * Apple epoch: message.date = NANOSECONDS since 2001-01-01 on modern macOS
+    (seconds pre-High-Sierra): unix = 978307200 + (d/1e9 if d > 1e11 else d).
+  * attributedBody: modern rows leave text NULL; body is an NSKeyedArchiver blob —
+    byte-scan: find b"NSString", skip to next '+', length prefix 0x81→u16LE /
+    0x82→u32LE / else 1 byte, slice UTF-8. Same logic in expand_messages (py) and
+    MessagesSync.decodeBody (Swift) — CHANGE BOTH OR NEITHER.
+  * FDA probe = open(2) on chat.db returns EPERM when denied.
+  * ⚠ REBUILDING THE APP DROPS THE FDA GRANT (ad-hoc cdhash changes) — after any
+    build-app.sh run, the user must re-add the app in Full Disk Access. main.swift
+    is FROZEN after P2.4 for this reason; batch Swift changes.
 - **AUX MODULE GOTCHA — never `from datetime import datetime` in an aux_*.py.**
   aux modules exec into shared server.py globals; `from datetime import datetime`
   rebinds the global name `datetime` to the CLASS, so any other code that later

@@ -8,6 +8,7 @@ import AppKit
 import WebKit
 import Carbon.HIToolbox        // RegisterEventHotKey — system-wide hotkey, no Accessibility TCC
 import ServiceManagement       // SMAppService.mainApp — open-at-login
+import SQLite3                 // P2.4 — read a snapshot of ~/Library/Messages/chat.db (FDA lives here)
 
 let DASH_URL = URL(string: "http://127.0.0.1:7788/")!
 let HEALTH_URL = URL(string: "http://127.0.0.1:7788/api/health")!
@@ -39,6 +40,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     var hotKeyRef: EventHotKeyRef?
     var quickLoaded = false
     var pendingResumeJS: String?      // a hand-off to run once the main window has loaded
+
+    // ---- P2.4 Message Center: the FDA-holding app feeds the dashboard ------
+    let messagesSync = MessagesSync()
 
     func applicationDidFinishLaunching(_ note: Notification) {
         buildMenu()
@@ -85,6 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
         showSplash()
         startRetry()
+        messagesSync.start()          // P2.4 — silent background chat.db → dashboard sync
     }
 
     // Stay alive in the menu bar when the main window is closed (a menu-bar
@@ -144,15 +149,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         if let w = window { a.beginSheetModal(for: w, completionHandler: done) }
         else { done(a.runModal()) }
     }
-    // Any direct navigation to a non-localhost http(s) URL also goes to the browser.
+    // Any direct navigation to a non-localhost http(s) URL also goes to the browser,
+    // and any external scheme (e.g. x-apple.systempreferences: from the Message
+    // Center's Full-Disk-Access grant card) is handed to the system.
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        if let url = navigationAction.request.url, let host = url.host,
-           (url.scheme == "http" || url.scheme == "https"),
-           host != "127.0.0.1", host != "localhost", host != "::1" {
-            NSWorkspace.shared.open(url)
-            decisionHandler(.cancel)
-            return
+        if let url = navigationAction.request.url {
+            let scheme = (url.scheme ?? "").lowercased()
+            if scheme == "http" || scheme == "https" {
+                if let host = url.host,
+                   host != "127.0.0.1", host != "localhost", host != "::1" {
+                    NSWorkspace.shared.open(url)
+                    decisionHandler(.cancel)
+                    return
+                }
+            } else if !scheme.isEmpty, !["about", "data", "blob", "file", "javascript"].contains(scheme) {
+                NSWorkspace.shared.open(url)
+                decisionHandler(.cancel)
+                return
+            }
         }
         decisionHandler(.allow)
     }
@@ -496,6 +511,307 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             }
         default: break
         }
+    }
+}
+
+// ==========================================================================
+// P2.4 — Message Center sync. The signed app is the only process that can
+// hold Full Disk Access, so IT reads ~/Library/Messages/chat.db and POSTs
+// decoded conversation previews to the dashboard's token-guarded loopback
+// ingest (/api/messages/ingest). The launchd python never opens chat.db.
+//
+// Flow (every 60 s + once ~10 s after launch, all off the main thread):
+//   1. FDA probe: open(2) chat.db read-only — TCC denies with EPERM/EACCES
+//      → POST {fda:false} so the widget shows the grant steps.
+//   2. Point-in-time snapshot via SQLite's online-backup API into the app's
+//      temp dir (no WAL locks held on the live db; SQLITE_BUSY → skip tick).
+//   3. Query the SNAPSHOT: last ~14 chats w/ last message, unread, today,
+//      participants, service; decode attributedBody (byte-scan); convert
+//      Apple-epoch dates (ns since 2001-01-01 → unix).
+//   4. POST JSON (with the shared messages-token) and unlink the snapshot.
+// Silent by design: no UI, failures just retry next tick.
+// ==========================================================================
+
+final class MessagesSync {
+    private let queue = DispatchQueue(label: "local.hermes.messages-sync", qos: .utility)
+    private var timer: Timer?
+    private let chatDB = (NSHomeDirectory() as NSString).appendingPathComponent("Library/Messages/chat.db")
+    private let tokenPath = (NSHomeDirectory() as NSString).appendingPathComponent(".hermes/dashboard/messages-token")
+    private let ingestURL = URL(string: "http://127.0.0.1:7788/api/messages/ingest")!
+    private let maxChats = 14
+    private let previewCap = 200
+
+    func start() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in self?.kick() }
+        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.kick() }
+        timer?.tolerance = 5
+    }
+
+    private func kick() { queue.async { [weak self] in self?.sync() } }
+
+    // Re-read every tick so a re-minted token self-heals without a relaunch.
+    private func token() -> String {
+        (try? String(contentsOfFile: tokenPath, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    // Apple epoch: ns since 2001-01-01 on modern macOS, seconds on pre-High-Sierra rows.
+    private func appleTS(_ d: Int64) -> Double {
+        if d == 0 { return 0 }
+        let v = Double(d)
+        return 978307200.0 + (v > 1e11 ? v / 1e9 : v)
+    }
+
+    private func sync() {
+        // 1. FDA probe — TCC denial surfaces as EPERM/EACCES on open(2).
+        let fd = open(chatDB, O_RDONLY)
+        if fd < 0 {
+            postFDADenied()
+            return
+        }
+        close(fd)
+
+        // 2. Consistent snapshot in temp (backup API — no locks left on the live db).
+        var src: OpaquePointer?
+        guard sqlite3_open_v2(chatDB, &src, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, src != nil else {
+            sqlite3_close(src)
+            postFDADenied()
+            return
+        }
+        let tmp = NSTemporaryDirectory() + "hermes-msgsnap-\(getpid()).db"
+        defer { for sfx in ["", "-wal", "-shm"] { unlink(tmp + sfx) } }   // snapshot never persists
+        var dst: OpaquePointer?
+        guard sqlite3_open(tmp, &dst) == SQLITE_OK, dst != nil else {
+            sqlite3_close(dst); sqlite3_close(src)
+            return
+        }
+        var copied = false
+        if let bk = sqlite3_backup_init(dst, "main", src, "main") {
+            copied = sqlite3_backup_step(bk, -1) == SQLITE_DONE
+            sqlite3_backup_finish(bk)
+        }
+        sqlite3_close(src)
+        if !copied {                  // SQLITE_BUSY etc. — keep last store, retry next tick
+            sqlite3_close(dst)
+            return
+        }
+
+        // 3+4. Query the snapshot, then POST.
+        let payload = buildPayload(dst!)
+        sqlite3_close(dst)
+        post(payload)
+    }
+
+    // ---- SQL helpers (C API) ----------------------------------------------
+    private func colText(_ st: OpaquePointer?, _ i: Int32) -> String? {
+        guard let c = sqlite3_column_text(st, i) else { return nil }
+        return String(cString: c)
+    }
+
+    private func colBlob(_ st: OpaquePointer?, _ i: Int32) -> Data? {
+        guard let p = sqlite3_column_blob(st, i) else { return nil }
+        let n = Int(sqlite3_column_bytes(st, i))
+        return n > 0 ? Data(bytes: p, count: n) : nil
+    }
+
+    private func scalarInt(_ db: OpaquePointer, _ sql: String, _ binds: [Int64]) -> Int {
+        var st: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &st, nil) == SQLITE_OK else { return 0 }
+        defer { sqlite3_finalize(st) }
+        for (i, v) in binds.enumerated() { sqlite3_bind_int64(st, Int32(i + 1), v) }
+        return sqlite3_step(st) == SQLITE_ROW ? Int(sqlite3_column_int64(st, 0)) : 0
+    }
+
+    // attributedBody byte-scan (port of the dashboard's proven decoder): find
+    // "NSString", skip to the next '+', read the length prefix (0x81 → u16 LE,
+    // 0x82 → u32 LE, else one byte), slice as UTF-8; fallback = first
+    // printable run after the marker.
+    private func decodeBody(_ blob: Data) -> String {
+        let raw = [UInt8](blob)
+        let needle = Array("NSString".utf8)
+        guard raw.count > needle.count else { return "" }
+        var marker = -1
+        if raw.count >= needle.count {
+            outer: for i in 0...(raw.count - needle.count) {
+                for j in 0..<needle.count where raw[i + j] != needle[j] { continue outer }
+                marker = i
+                break
+            }
+        }
+        guard marker >= 0 else { return "" }
+
+        var s = ""
+        if let plus = raw[(marker + needle.count)...].firstIndex(of: UInt8(ascii: "+")) {
+            var p = plus + 1
+            if p < raw.count {
+                var ln = Int(raw[p])
+                if ln == 0x81, p + 2 < raw.count {
+                    ln = Int(raw[p + 1]) | (Int(raw[p + 2]) << 8); p += 3
+                } else if ln == 0x82, p + 4 < raw.count {
+                    ln = Int(raw[p + 1]) | (Int(raw[p + 2]) << 8) |
+                         (Int(raw[p + 3]) << 16) | (Int(raw[p + 4]) << 24); p += 5
+                } else {
+                    p += 1
+                }
+                let end = min(raw.count, p + max(0, min(ln, 4000)))
+                if p < end {
+                    s = String(decoding: raw[p..<end], as: UTF8.self)
+                        .replacingOccurrences(of: "\0", with: "")
+                        .replacingOccurrences(of: "\u{FFFD}", with: "")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+            }
+        }
+        if !s.isEmpty { return s }
+
+        var out: [UInt8] = []
+        var started = false
+        for b in raw[min(marker + 8, raw.count)...].prefix(3000) {
+            if (32..<127).contains(b) || b == 9 || b == 10 { out.append(b); started = true }
+            else if started && out.count > 1 { break }
+        }
+        let t = String(decoding: out, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.count > 1 ? t : ""
+    }
+
+    // ---- build the ingest payload from the snapshot -------------------------
+    private func buildPayload(_ db: OpaquePointer) -> [String: Any] {
+        var convos: [[String: Any]] = []
+        var totalUnread = 0
+        var totalToday = 0
+
+        // local midnight → Apple-epoch nanoseconds (for the per-chat today count)
+        let midnight = Calendar.current.startOfDay(for: Date()).timeIntervalSince1970
+        let todayAppleNS = Int64((midnight - 978307200.0) * 1e9)
+
+        var chats: OpaquePointer?
+        let chatSQL = """
+            SELECT c.ROWID, c.chat_identifier, c.display_name, c.style, MAX(m.date) AS mx
+            FROM chat c
+            JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
+            JOIN message m ON m.ROWID = cmj.message_id
+            GROUP BY c.ROWID ORDER BY mx DESC LIMIT \(maxChats)
+            """
+        guard sqlite3_prepare_v2(db, chatSQL, -1, &chats, nil) == SQLITE_OK else {
+            return envelope(fda: true, convos: [], unread: 0, today: 0)
+        }
+        while sqlite3_step(chats) == SQLITE_ROW {
+            let cid = sqlite3_column_int64(chats, 0)
+            let ident = colText(chats, 1) ?? ""
+            let dname = (colText(chats, 2) ?? "").trimmingCharacters(in: .whitespaces)
+            let style = Int(sqlite3_column_int(chats, 3))
+
+            // last message in this chat
+            var last: OpaquePointer?
+            let lastSQL = """
+                SELECT m.text, m.attributedBody, m.is_from_me, m.date,
+                       m.cache_has_attachments, m.associated_message_type, h.id, m.service
+                FROM message m
+                LEFT JOIN handle h ON m.handle_id = h.ROWID
+                JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+                WHERE cmj.chat_id = ? ORDER BY m.date DESC LIMIT 1
+                """
+            guard sqlite3_prepare_v2(db, lastSQL, -1, &last, nil) == SQLITE_OK else { continue }
+            sqlite3_bind_int64(last, 1, cid)
+            guard sqlite3_step(last) == SQLITE_ROW else { sqlite3_finalize(last); continue }
+
+            var body = colText(last, 0) ?? ""
+            if body.isEmpty, let blob = colBlob(last, 1) { body = decodeBody(blob) }
+            let fromMe = sqlite3_column_int(last, 2) != 0
+            let date = sqlite3_column_int64(last, 3)
+            let hasAtt = sqlite3_column_int(last, 4) != 0
+            let isTapback = sqlite3_column_int(last, 5) != 0
+            let handle = colText(last, 6)
+            let service = colText(last, 7) ?? ""
+            sqlite3_finalize(last)
+
+            if body.isEmpty {
+                body = hasAtt ? "Attachment" : (isTapback ? "Reaction" : "")
+            }
+
+            let unread = scalarInt(db, """
+                SELECT COUNT(*) FROM message m
+                JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+                WHERE cmj.chat_id = ? AND m.is_from_me = 0 AND m.is_read = 0
+                """, [cid])
+            totalUnread += unread
+
+            let today = scalarInt(db, """
+                SELECT COUNT(*) FROM message m
+                JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+                WHERE cmj.chat_id = ? AND m.date >= ?
+                """, [cid, todayAppleNS])
+            totalToday += today
+
+            // participants (for group flag + naming)
+            var parts: [String] = []
+            var pst: OpaquePointer?
+            if sqlite3_prepare_v2(db, """
+                SELECT h.id FROM chat_handle_join chj
+                JOIN handle h ON h.ROWID = chj.handle_id WHERE chj.chat_id = ?
+                """, -1, &pst, nil) == SQLITE_OK {
+                sqlite3_bind_int64(pst, 1, cid)
+                while sqlite3_step(pst) == SQLITE_ROW {
+                    if let hid = colText(pst, 0), !hid.isEmpty { parts.append(hid) }
+                }
+            }
+            sqlite3_finalize(pst)
+
+            let isGroup = (style == 43) || parts.count > 1
+            // raw name — the dashboard prettifies phone handles
+            let name = !dname.isEmpty ? dname : (parts.first ?? (ident.isEmpty ? "Unknown" : ident))
+
+            convos.append([
+                "name": name,
+                "ident": ident,
+                "group": isGroup,
+                "participants": max(parts.count, 1),
+                "last": String(body.prefix(previewCap)),
+                "from_me": fromMe,
+                "sender": fromMe ? "You" : (handle ?? ident),
+                "ts": appleTS(date),
+                "unread": unread,
+                "attachment": hasAtt,
+                "reaction": isTapback,
+                "today_count": today,
+                "service": service,
+            ])
+        }
+        sqlite3_finalize(chats)
+
+        return envelope(fda: true, convos: convos, unread: totalUnread, today: totalToday)
+    }
+
+    private func envelope(fda: Bool, convos: [[String: Any]], unread: Int, today: Int,
+                          reason: String? = nil) -> [String: Any] {
+        var p: [String: Any] = [
+            "v": 1,
+            "generated_at": Date().timeIntervalSince1970,
+            "fda": fda,
+            "host": Host.current().localizedName ?? "Mac",
+            "conversations": convos,
+            "totals": ["unread": unread, "today": today],
+            "token": token(),
+        ]
+        if let r = reason { p["reason"] = r }
+        return p
+    }
+
+    private func postFDADenied() {
+        post(envelope(fda: false, convos: [], unread: 0, today: 0,
+                      reason: "Full Disk Access needed"))
+    }
+
+    private func post(_ payload: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        var req = URLRequest(url: ingestURL)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.timeoutInterval = 8
+        req.httpBody = data
+        // Fire and forget — a failed POST just means the widget keeps its last
+        // state until the next tick. Never log message content.
+        URLSession.shared.dataTask(with: req).resume()
     }
 }
 
