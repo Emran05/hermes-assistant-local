@@ -1,0 +1,25 @@
+// tabs.jxa  [READ]
+// JSON dump of every Safari window and tab (title + URL). Structured output —
+// no AppleScript comma-soup to parse. Seeds any future safari-concierge work.
+// Usage: scripts/osa.sh -l JavaScript -f scripts/tabs.jxa
+// Output: {"running":bool,"windows":[{"window":1,"tabs":[{"index":1,"title":"…","url":"…"}]}]}
+// First-ever run pops a one-time TCC consent dialog for Safari — run attended.
+function run(argv) {
+  const safari = Application('Safari');
+  if (!safari.running()) {
+    // App-state guard: don't launch Safari just to read tabs — report instead.
+    return JSON.stringify({ running: false, windows: [] });
+  }
+  const out = [];
+  const wins = safari.windows();
+  for (let i = 0; i < wins.length; i++) {
+    const tabs = [];
+    let ts = [];
+    try { ts = wins[i].tabs(); } catch (e) { /* non-tab window (e.g. downloads) */ }
+    for (let j = 0; j < ts.length; j++) {
+      tabs.push({ index: j + 1, title: ts[j].name(), url: ts[j].url() });
+    }
+    out.push({ window: i + 1, tabs: tabs });
+  }
+  return JSON.stringify({ running: true, windows: out });
+}

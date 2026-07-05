@@ -157,3 +157,10 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   kickstart -k, which doesn't reload the KeepAlive service) to free the balloon + clear cache. /api/model/
   mem_free = manual clear. models_payload surfaces {soft_gb,hard_gb,over,override}. VERIFIED e2e: at a
   10GB test-ceiling chat refused (16GB>10GB) with the message; override let it through; restored to 50.
+- `<capability-skills>` 8 agent-authored skills (arms & legs) — installed in ~/.hermes/skills, snapshotted
+  to repo skills-snapshot/ for version control. skill-forge (agent writes its own new skills),
+  hub-cartographer (masters its own dashboard API), mirror-check (post-task self-QA + nightly journal),
+  cron-conductor (safe scheduled autonomy), watchtower-author (turns 'tell me when' → live rules),
+  osascript-cookbook (control any Mac app), screen-oracle (vision 'what am I looking at'), deep-dive
+  (triangulated citation-locked research). All valid frontmatter, helper scripts, ride the P1 approval/
+  recorder rails. Roadmap (incl. later tiers) in docs/CAPABILITY-ROADMAP.md.
