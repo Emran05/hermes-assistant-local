@@ -63,6 +63,16 @@ and explicit agent tool calls (web search etc.) touch the internet.
   `messages.tool_calls`/`tool_name` JOIN `sessions.source` → a live timeline of
   every tool the agent runs across ALL surfaces (dashboard/Telegram/CLI), polled
   every 3s. This is the research-validated "watch it work" edge.
+- **MLX memory ceiling (stability)** — the KV/prompt cache can balloon under
+  concurrent load and take the Mac down. Two layers in server.py: `mlx_admission()`
+  (15s-cached footprint) makes /api/chat + _generate_briefing REFUSE new model work
+  at/above `MLX_SOFT_GB` (default 50); `memory_guard_loop` polls every 30s and above
+  `MLX_HARD_GB` (56) does a `_mlx_restart()` (bootout→bootstrap — NOT kickstart -k)
+  to free the balloon. User override: `/api/model/mem_override {allow}` touches
+  `~/.hermes/dashboard/mem-override`; `/api/model/mem_free` = manual cache-clear
+  restart. Surfaced in models_payload().mem + the model-menu memory row. When
+  running many model-drilling agents concurrently, expect the ceiling to engage —
+  that's it working, not a bug.
 - **Message Center (P2.4)** — the APP (holds FDA; launchd python cannot) reads
   ~/Library/Messages/chat.db via MessagesSync in main.swift: SQLite online-backup
   snapshot (no WAL locks), 60s timer, POSTs token-guarded /api/messages/ingest
