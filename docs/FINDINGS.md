@@ -50,3 +50,13 @@ edit we don't make) or a shell shim. Acceptable for v1 because: (a) the bus is t
 sanctioned/discoverable path, (b) any genuinely destructive shortcut step (rm, etc.) still
 hits the terminal dangerous-patterns on its own, (c) nothing is exposed by default.
 Revisit if we ever add a terminal wrapper or upstream contributes a `shortcuts run` pattern.
+
+## web_search works, web_extract does not (2026-07-05, skill drill)
+Confirmed live: the agent's `web_search` (ddgs backend) returns real cited results —
+a deep-dive drill produced 3 genuine sourced URLs. This powers the hourly intel loop,
+the deep-dive skill, and the AI & Labs brief section. GAP: `web_extract` (fetch full
+page content from a URL) has NO configured backend — the agent can search + read
+snippets but not deep-fetch a page. Workarounds: (a) the agent can `curl`/read URLs via
+its terminal tool for extraction (the deep-dive skill could teach this), (b) configure a
+web_extract backend later (Firecrawl key / Nous Portal). Not blocking — search + snippets
++ terminal curl cover most research. Note for a future skill tweak.
