@@ -100,3 +100,11 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   into the hermes venv (pre-approved) — web_search_tool returns real results; fixed the probe's
   multi-line-JSON parse bug → web_search_available:true → hourly `hermes -z` research pass active.
   Chunked >4096 Telegram sends (no truncation). Formatting polish deferred (TODO in code, per user).
+- `<p2.5>` P2.5 Google connect (grant-ready) — aux_google.py (562L) + aux_google.js (421L) + 1 tag.
+  PKCE OAuth wizard (paste client JSON → consent → paste redirect), scopes HARD-NARROWED to
+  gmail.readonly+calendar+contacts.readonly (Google has NO draft-without-send scope, so read-only IS
+  the no-send enforcement — at Google's auth layer, 3-deep: URL assertion, exchange scope-wall w/
+  auto-revoke on violation, include_granted_scopes=false). Token byte-compatible with the hermes
+  google-workspace skill (identical key set, Credentials.from_authorized_user_file parses). What works
+  once user connects: gmail search/get/labels, calendar list/create/delete, contacts; send/drive/docs
+  403 at Google. User steps in NEEDS-YOU.md.

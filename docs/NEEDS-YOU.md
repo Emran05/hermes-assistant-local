@@ -28,3 +28,15 @@ Items only you can do; grouped for 2-3 sittings. I keep this current.
 - [ ] ⌘⇧V or the "Clipboard" button → runs a local transform on your clipboard.
 - [ ] Optional: status-item right-click → "Open at Login".
       (Note: login-launch still opens the main window too — no clean API to suppress that.)
+
+## Connect Google (read-only Gmail + Calendar + Contacts) — ~10 min, one time
+Sending is IMPOSSIBLE by design: only read scopes are ever requested.
+1. Google Cloud Console → create/select a project: https://console.cloud.google.com/projectselector2/home/dashboard
+2. Enable exactly: **Gmail API**, **Google Calendar API**, **People API** (nothing else).
+3. OAuth consent screen: External, keep in Testing, add YOUR account as a Test user.
+4. Credentials → Create OAuth client ID → type **Desktop app** → Download JSON.
+5. Dashboard → Mind → **Google** card → paste the JSON contents → Save.
+6. Click **Open Google consent**, approve the three read-only items.
+7. Browser will fail to load localhost:1 — EXPECTED. Copy the full address-bar URL.
+8. Paste it into the card → Finish. Chip flips to Connected · read-only.
+(Undo anytime: the card's Disconnect button.)
