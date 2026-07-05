@@ -43,3 +43,49 @@ Push batches happen only on explicit go-ahead. `main` stays always-runnable
   NEVER→auto-denied; AUTO→auto-approved+command ran; command_allowlist unchanged (interop held);
   P1.2 ws-leg captured 3 origin=ws terminal rows. Audit log shows asked/user-deny/auto-denied/auto-approved.
   KEY FINDING: Hermes-3-8B does NOT reliably call tools (deflects); Qwen3-30B-A3B does. See docs/FINDINGS.md.
+- `<p1.5>` P1.5 Metrics Baseline — aux_metrics.py (732L) + aux_metrics.js (310L) + 1 index.html tag
+  + 1 hermes_rpc line (_submitted_ts for setup/serve TTFT split). Console "Vitals" strip: TTFT p50/p95,
+  turn latency, hub-API latency, RAM envelope via footprint(1), model load time, tokens/sec, approvals
+  (from permissions-log.jsonl), undo (from recorder.db). Ring buffers + JSONL persistence in ~/.hermes/metrics/.
+  TTFT measured via _new_job MeteredJob override (no run_turn surgery). VERIFIED live: TTFT p50 965ms
+  (<1.5s target) on Qwen3-30B, approvals {3,1,2} match the P1.4 drills, RAM via footprint, counters survive restart.
+- `<p1.6>` P1.6 Config-as-Code — aux_config.py (709L) + aux_config.js (458L) + 1 index.html tag
+  + docs/state-snapshot.json (tracked artifact). Export/import a deterministic snapshot of layout,
+  settings, model roster+active, and permission policy. STRICT allowlist + denylist; output secret-scan
+  HARD-REFUSES export if any token/key/home-path/secret shape is detected (proven: injected a token-shaped
+  quicklink → export 400, file untouched). Import fail-closed: approvals.mode!=manual refused, unknown
+  section/widget refused/dropped, schema-validated, pre-restore backup. VERIFIED: deterministic (identical
+  md5 across exports), secret-leak checks all clean, import round-trip reverts a drifted setting.
+
+## PHASE 1 "EARN TRUST" COMPLETE (2026-07-05)
+All 6 workstreams + foundation done & verified. 8 py modules compile, 5 aux JS served, 8 endpoints
+healthy, zero load errors. Trust surface: editable memory, flight recorder+undo, graduated permissions
+(live-drilled), metrics, config-as-code. Model on Qwen3-30B (8B can't tool-call — see FINDINGS.md).
+Staged locally, unpushed — awaiting go-ahead for a batched push.
+- `<p2.1>` P2.1 Watchtower + 8am World Brief — aux_watchtower.py (1642L) + aux_watchtower.js (581L)
+  + 1 index.html tag. World Brief: deterministic 5-section compose (your day / world & tech / market
+  movers w/ why / underground signal / look-ahead) from CACHED data + one tool-free synthesis pass,
+  rebinds _generate_briefing (no duplicate); 8am scheduler thread w/ date-guard + catch-up-on-wake;
+  Telegram via `hermes send --to telegram` (home channel, no chat_id, no LLM). Watchtower: notify-only
+  trigger engine, 5 live evaluators (ticker/index/crypto move, system_metric, rss_keyword) + 3 stubs,
+  quiet-hours/cooldown/dedupe/daily-cap, fire log w/ useful/noise precision, Mind card CRUD+test-preview.
+  Schema REFUSES action/command/chat_id/target (notify-only enforced structurally). VERIFIED dry-run only:
+  5-section brief renders (real headlines/movers, 12h, zero emoji), degrades to deterministic when model
+  paused, all 3 gate types, schema refusals. NO real Telegram sent (deferred to user). Today's 8am push
+  suppressed; auto-resumes 8am 2026-07-06.
+- `<p2.2+p2.3>` P2.2 Menu-bar Quick-Ask + P2.3 Clipboard Actions.
+  main.swift 241→506L (NSStatusItem template spark glyph, .transient NSPopover chat reusing /api/chat,
+  Carbon ⌃⌥Space global hotkey w/o Accessibility TCC, SMAppService login item, NSPasteboard bridge,
+  approval-hands-out-to-main-window) + build-app.sh (+Carbon +ServiceManagement).
+  aux_clip.py (250L, /api/clip/transform — DIRECT-to-model transforms, NO tools field = safe by
+  construction, loopback-only) + aux_clip.js (437L command sheet, ⌘⇧V) + aux_quickask.js (298L popover)
+  + 2 index.html tags. VERIFIED: Swift compiles+installs, real Qwen transform (summarize/translate/extract),
+  loopback+no-tools proven, guards (400/413), menubar chat multi-turn persists, app launches clean.
+  NEEDS human QA: menu-bar click, ⌃⌥Space hotkey, Open-at-Login (can't automate clicks).
+- `<claude-usage>` Claude Max usage/rate-limit tracker — aux_claude_usage.py (450L) + .js (299L)
+  + 1 index.html tag. Hub widget reading ~/.claude/**/*.jsonl (read-only, 60s cache, 8-day scan bound):
+  current 5-hour rolling window (ccusage-style blocks) w/ token split + reset countdown, today, 7-day
+  sparkline, per-model + per-project, ≈API-equivalent cost, optional soft-cap gauge (no official Max
+  cap published → shows usage vs your own busiest block). Registers via WIDGETS/EXPANDERS + RENDER/
+  EXPAND_RENDER/WICONS + layout inject. VERIFIED: today's output_tokens EXACT-match vs independent
+  tally, live numbers, all render cases. Fixed a shared-global datetime-rebind gotcha (now in CLAUDE.md).

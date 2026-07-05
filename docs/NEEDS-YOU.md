@@ -20,3 +20,11 @@ Items only you can do; grouped for 2-3 sittings. I keep this current.
 ## Trust panel eyeball (optional — functionally proven)
 - [ ] Mind view → "Trust & Permissions" card: the 17 action-classes with Auto/Ask/Never
       controls + floor padlocks. All three tiers are live-drilled and working; visual QA only.
+
+## Menu-bar Quick-Ask + Clipboard (P2.2/P2.3) — quick eyeball (functionally verified)
+- [ ] Look for the spark glyph in your menu bar; click it → chat popover opens.
+- [ ] Press ⌃⌥Space (Control-Option-Space) from any app → popover toggles (no Accessibility prompt).
+      Default hotkey is ⌃⌥Space (avoids Spotlight/Alfred) — tell me if you want a different combo.
+- [ ] ⌘⇧V or the "Clipboard" button → runs a local transform on your clipboard.
+- [ ] Optional: status-item right-click → "Open at Login".
+      (Note: login-launch still opens the main window too — no clean API to suppress that.)

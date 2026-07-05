@@ -63,6 +63,17 @@ and explicit agent tool calls (web search etc.) touch the internet.
   `messages.tool_calls`/`tool_name` JOIN `sessions.source` → a live timeline of
   every tool the agent runs across ALL surfaces (dashboard/Telegram/CLI), polled
   every 3s. This is the research-validated "watch it work" edge.
+- **AUX MODULE GOTCHA — never `from datetime import datetime` in an aux_*.py.**
+  aux modules exec into shared server.py globals; `from datetime import datetime`
+  rebinds the global name `datetime` to the CLASS, so any other code that later
+  calls `datetime.datetime(...)` / `datetime.timedelta(...)` silently breaks
+  (returns None / raises). Import under a private alias instead:
+  `import datetime as _mymod_datetime`. (aux_config/aux_recorder currently do the
+  bare import — tolerate it, but new modules must alias.)
+- **Adding a hub widget from an aux module**: mutate `WIDGETS[id]={title,icon,
+  size,cat,provider}` + `EXPANDERS[id]=fn` at module load, append `id` to the
+  layout order if absent, and in aux JS set `RENDER[id]` (body), `EXPAND_RENDER[id]`
+  (pop-out), and `WICONS[id]` (icon). See aux_claude_usage.py/.js.
 - **WKWebView JS dialogs** — the app implements `runJavaScriptAlert/Confirm/
   TextInputPanel` (NSAlert sheets). WITHOUT them WKWebView silently returns
   false/nil for `confirm()`/`alert()`/`prompt()` — which is why the model
