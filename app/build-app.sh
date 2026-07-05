@@ -13,7 +13,7 @@ rm -rf "$BUILD"; mkdir -p "$BIN" "$RES"
 
 echo "→ compiling"
 swiftc -O -o "$BIN/HermesAssistant" "$HERE/main.swift" \
-  -framework AppKit -framework WebKit
+  -framework AppKit -framework WebKit -framework Carbon -framework ServiceManagement
 
 echo "→ icon"
 swift "$HERE/render-icon.swift" "$BUILD/icon-1024.png" >/dev/null
