@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s http://127.0.0.1*)",
+      "Bash(curl -s -X POST http://127.0.0.1*)",
+      "Bash(curl -s -o /dev/null*)",
+      "Bash(curl -s --max-time*)",
+      "Bash(curl -s https://api.github.com/*)",
+      "Bash(curl -s https://registry.npmjs.org/*)",
+      "Bash(curl -s https://huggingface.co/*)",
+      "Bash(launchctl list*)",
+      "Bash(launchctl print gui*)",
+      "Bash(hermes config show*)",
+      "Bash(hermes gateway status)",
+      "Bash(hermes mcp list)",
+      "Bash(hermes doctor)",
+      "Bash(hermes --version)",
+      "Bash(python3 -m pip show *)",
+      "Bash(python3 -m pip list*)"
+    ]
+  }
+}

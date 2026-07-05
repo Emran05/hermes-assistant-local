@@ -1,0 +1,9 @@
+# build artifacts
+app/build/
+*.pyc
+__pycache__/
+.DS_Store
+# runtime state lives in ~/.hermes — never here, but belt & braces
+*.env
+.env*
+*.log
