@@ -24,6 +24,7 @@ SERVE_PORT = int(os.environ.get("HERMES_SERVE_PORT", "9119"))
 TOKEN_FILE = os.path.join(os.path.expanduser("~"), ".hermes", "dashboard",
                           "serve-token")
 TURN_TIMEOUT = int(os.environ.get("HUB_TURN_TIMEOUT", "600"))
+RECORDER_HOOK = None   # set by dashboard/aux_recorder.py; called (sid, etype, payload)
 
 
 def read_token():
@@ -247,6 +248,11 @@ def run_turn(job, chat_meta, prompt, save_meta):
                 continue
             etype = ev.get("type") or ""
             payload = ev.get("payload") or {}
+            if RECORDER_HOOK and etype in ("tool.start", "tool.complete"):
+                try:
+                    RECORDER_HOOK(sid, etype, payload)
+                except Exception:
+                    pass   # recorder must never break a turn
             if etype == "message.delta":
                 text += (payload.get("text") or payload.get("delta") or "")
                 job["text"] = text
