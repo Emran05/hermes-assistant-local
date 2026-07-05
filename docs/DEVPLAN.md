@@ -391,3 +391,12 @@ confidently roll back to*. Concretely:
 takes). Architecture facts reference `CLAUDE.md` as of 2026-07-05. Where the
 research corpus was stale against reality (e.g., it assumed we weren't passing
 `--prompt-cache-bytes`; we are), this plan follows reality.*
+
+---
+## Amendment (2026-07-05) — P3.2 reframe, recorded per EXECUTION-PLAN
+P3.2 "restraint router + MoE performance profile" is split: the **MoE profile half is
+shipped-by-decision** — Qwen3-30B-A3B is the drilled, user-confirmed default (FINDINGS.md:
+Hermes-8B cannot reliably tool-call; Qwen passed every live drill). The **sub-2B restraint
+router half is deferred** to the next runway: M-effort, routing bugs masquerade as model bugs,
+needs eval soak this runway lacks, zero felt delta at TTFT p50 965ms. P3.4 speculative decoding
+and P3.5 screenshot-grounded computer-use also deferred (EXECUTION-PLAN cut list #2/#3).
