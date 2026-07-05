@@ -1978,9 +1978,21 @@ def switch_model(mid):
         if agent_paused():          # switching while paused implies waking up
             agent_power("resume")
         else:
-            subprocess.run(["launchctl", "kickstart", "-k",
-                            f"gui/{os.getuid()}/{MLX_LABEL}"],
-                           capture_output=True, text=True, timeout=15)
+            # Reliable model swap: `kickstart -k` does NOT dependably reload a
+            # KeepAlive service — it kept serving the OLD model after the
+            # active-model file changed. bootout fully stops the server (freeing
+            # the old model's RAM), then bootstrap starts it fresh so
+            # mlx-server.sh re-reads active-model and loads the new one.
+            uid = os.getuid()
+            subprocess.run(["launchctl", "bootout", f"gui/{uid}/{MLX_LABEL}"],
+                           capture_output=True, timeout=15)
+            time.sleep(3)  # launchd needs a beat after bootout (avoids error 5)
+            r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", MLX_PLIST],
+                               capture_output=True, text=True, timeout=20)
+            if r.returncode != 0 and "already" not in (r.stderr or "").lower():
+                time.sleep(3)
+                subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", MLX_PLIST],
+                               capture_output=True, timeout=20)
     except Exception as e:
         return {"ok": False, "error": f"restart failed: {e}"}
     _widget_cache.pop("sys_live", None)

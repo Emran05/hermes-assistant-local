@@ -26,6 +26,11 @@ TOKEN_FILE = os.path.join(os.path.expanduser("~"), ".hermes", "dashboard",
 TURN_TIMEOUT = int(os.environ.get("HUB_TURN_TIMEOUT", "600"))
 RECORDER_HOOK = None   # set by dashboard/aux_recorder.py; called (sid, etype, payload)
 
+try:
+    import permissions as _perm   # P1.3 graduated permission tiers (policy engine)
+except Exception:                 # engine missing/broken must never kill a turn
+    _perm = None
+
 
 def read_token():
     try:
@@ -241,6 +246,12 @@ def run_turn(job, chat_meta, prompt, save_meta):
                     job["status"] = f"approval failed: {e}"
                 job["approval"] = None
                 job["state"] = "running"
+                if _perm and job.get("_approval_payload"):
+                    try:
+                        _perm.audit(job, job.pop("_approval_payload"),
+                                    {"tier": "ask"}, "user-" + str(choice))
+                    except Exception:
+                        pass
             ev = srv.next_event(timeout=1.0)
             if ev is None:
                 continue
@@ -265,8 +276,37 @@ def run_turn(job, chat_meta, prompt, save_meta):
                 job["status"] = (payload.get("text") or payload.get("kind")
                                  or "")
             elif etype == "approval.request":
+                # P1.3: consult the graduated-permission policy. Sends only
+                # "once"/"deny" upstream (never session/always), so hermes's
+                # own allowlists never grow. decide() never raises; every
+                # failure path falls through to ASK (fail-safe).
+                v = _perm.decide(payload) if _perm else {"tier": "ask", "reason": ""}
+                if v.get("tier") == "auto":
+                    try:
+                        srv.call("approval.respond",
+                                 {"session_id": sid, "choice": "once"}, timeout=15)
+                        job["status"] = "auto-approved · " + v.get("reason", "")
+                        if _perm:
+                            _perm.audit(job, payload, v, "auto-approved")
+                        continue
+                    except WSError:
+                        pass               # fail open to ASK
+                elif v.get("tier") == "never":
+                    try:
+                        srv.call("approval.respond",
+                                 {"session_id": sid, "choice": "deny"}, timeout=15)
+                        job["status"] = "blocked by policy · " + v.get("reason", "")
+                        if _perm:
+                            _perm.audit(job, payload, v, "auto-denied")
+                        continue
+                    except WSError:
+                        pass               # user can still deny by hand
+                payload["_policy"] = v
+                job["_approval_payload"] = payload
                 job["approval"] = payload
                 job["state"] = "approval"
+                if _perm:
+                    _perm.audit(job, payload, v, "asked")
             elif etype == "message.complete":
                 final = payload.get("text") or text
                 job.update(reply=final or "(empty response)", ok=True,
