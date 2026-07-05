@@ -116,3 +116,8 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   event), per-story dedupe + 90min class cooldown + daily cap 5 + quiet-hours override (configurable).
   Agent web_search confirmed feeding intel (30→43 items, curated before the brief). All gates
   unit-verified offline; zero real sends during build. Midday armed for today ~3PM.
+- `<p2.6a>` P2.6a Mind multi-day drill-downs — aux_mind_drill.py (188L) + .js (350L) + 1 tag.
+  14d/30d/60d range toggles on the Mind fuel + model-mix cards (/api/mind_drill, state.db mode=ro,
+  clamped 7-90, 300s cache), busiest-day callout, in-place chart re-render with the exact expand.js
+  idioms, sticky range, shimmer/error states. Phase 2 now HONESTLY complete (this was the forgotten
+  half of DEVPLAN Phase-2 #6 the plan-judge caught).
