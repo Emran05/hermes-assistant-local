@@ -1038,6 +1038,8 @@ def _generate_briefing():
             return
         _briefing_generating = True
     try:
+        if not mlx_admission()[0]:   # back off background work when memory is high
+            return
         for attempt in range(2):  # one retry if the model emits meta garbage
             ok, text = run_agent(access_preamble() + BRIEFING_PROMPT)
             if ok and _briefing_is_sane(text):
@@ -1080,25 +1082,77 @@ def _mlx_footprint_gb():
         return None
 
 
+# --------------------------------------------------------------------------
+# MLX memory ceiling — the KV/prompt cache can balloon under concurrent load
+# (several 20k-token prefills at ~2GB KV each) and take the whole Mac down.
+# Two-layer defence:
+#   1. ADMISSION CONTROL (mlx_admission): at/above MLX_SOFT_GB, the dashboard
+#      REFUSES new model work ("can't take more unless you allow it") so the
+#      balloon can't grow — new turns get a clear "memory high, try again"
+#      instead of piling on. The user can override (touch MEM_OVERRIDE_FILE via
+#      /api/model/mem_override) to force work through.
+#   2. HARD WATCHDOG (memory_guard_loop): polls every 30s; above MLX_HARD_GB it
+#      restarts the model server (reliable bootout→bootstrap, not kickstart -k)
+#      as a last resort — this is the cache-clear.
+# 64GB machine: soft 50 leaves 14GB for everything else; hard 56 is the floor
+# before the OS thrashes.  Tunable via env.
+# --------------------------------------------------------------------------
+MLX_SOFT_GB = float(os.environ.get("MLX_SOFT_GB", "50"))    # admission ceiling
+MLX_HARD_GB = float(os.environ.get("MLX_HARD_GB", "56"))    # last-resort restart
+MEM_OVERRIDE_FILE = os.path.join(DATA, "mem-override")
+
+
+def _mlx_restart():
+    """Reliable model-server restart (kickstart -k does NOT reload the KeepAlive
+    service — it kept the old process). bootout fully frees the balloon, then
+    bootstrap reloads the active model with a fresh, empty cache."""
+    uid = os.getuid()
+    try:
+        subprocess.run(["launchctl", "bootout", f"gui/{uid}/{MLX_LABEL}"],
+                       capture_output=True, timeout=15)
+        time.sleep(3)
+        r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", MLX_PLIST],
+                           capture_output=True, text=True, timeout=20)
+        if r.returncode != 0 and "already" not in (r.stderr or "").lower():
+            time.sleep(3)
+            subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", MLX_PLIST],
+                           capture_output=True, timeout=20)
+        return True
+    except Exception as e:
+        print(f"[memory_guard] restart failed: {e}", file=sys.stderr)
+        return False
+
+
+def mlx_admission():
+    """(ok, gb, limit). ok=False → at/over the soft memory ceiling: refuse NEW
+    model work so the KV cache can't overrun the machine. A present
+    MEM_OVERRIDE_FILE bypasses the gate (the user's 'allow it' escape hatch)."""
+    limit = MLX_SOFT_GB
+    if os.path.exists(MEM_OVERRIDE_FILE):
+        return True, None, limit
+    gb = _cached("mlx_ram_fast", 15, _mlx_footprint_gb)
+    if gb and gb >= limit:
+        return False, gb, limit
+    return True, gb, limit
+
+
 def memory_guard_loop():
-    """mlx_lm.server leaks over long uptime (prompt/KV cache accretes with the
-    64k context) — it grew to ~49GB once and thrashed the machine. Auto-restart
-    the model server when its footprint crosses a threshold to keep RAM sane."""
-    thresh = float(os.environ.get("MLX_RESTART_GB", "32"))
+    """Hard watchdog: mlx_lm.server's prompt/KV cache accretes under load and
+    once grew to ~49GB and thrashed the machine. Poll frequently; above the hard
+    ceiling, restart the model server (frees the balloon + clears the cache).
+    Admission control (mlx_admission) is the first line — this is the backstop."""
     while True:
-        time.sleep(300)
-        if agent_paused():          # user parked the model on purpose
+        time.sleep(30)             # was 300 — balloons spike faster than that
+        if agent_paused():         # user parked the model on purpose
             continue
         gb = _mlx_footprint_gb()
-        if gb and gb > thresh:
-            try:
-                subprocess.run(["launchctl", "kickstart", "-k",
-                                f"gui/{os.getuid()}/com.hermes.mlx-server"],
-                               capture_output=True, timeout=15)
-                print(f"[memory_guard] mlx footprint {gb:.0f}GB > {thresh:.0f}GB "
-                      "— restarted model server", file=sys.stderr)
-            except Exception as e:
-                print(f"[memory_guard] restart failed: {e}", file=sys.stderr)
+        if gb and gb > MLX_HARD_GB:
+            if _mlx_restart():
+                _widget_cache.pop("mlx_ram", None)
+                _widget_cache.pop("mlx_ram_fast", None)
+                print(f"[memory_guard] mlx footprint {gb:.0f}GB > "
+                      f"{MLX_HARD_GB:.0f}GB — restarted model server "
+                      "(freed the KV balloon)", file=sys.stderr)
 
 
 # --------------------------------------------------------------------------
@@ -1964,9 +2018,12 @@ def models_payload():
         out.append({**m, "active": m["id"] == active,
                     "downloaded": _model_downloaded(m["id"]),
                     "downloading": _model_dl.get(m["id"]) == "downloading"})
+    ram = None if agent_paused() else _cached("mlx_ram", 60, _mlx_footprint_gb)
     return {"active": active, "models": out, "paused": agent_paused(),
-            "ram_gb": None if agent_paused()
-            else _cached("mlx_ram", 60, _mlx_footprint_gb)}
+            "ram_gb": ram,
+            "mem": {"soft_gb": MLX_SOFT_GB, "hard_gb": MLX_HARD_GB,
+                    "over": bool(ram and ram >= MLX_SOFT_GB),
+                    "override": os.path.exists(MEM_OVERRIDE_FILE)}}
 
 
 def switch_model(mid):
@@ -2380,6 +2437,26 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/agent/resume":
             self._json(agent_power("resume"))
             return
+        if path == "/api/model/mem_override":
+            # user's "allow it" escape hatch: touch/remove the override file so
+            # mlx_admission stops refusing work while memory is over the ceiling.
+            allow = bool(self._body_json().get("allow"))
+            try:
+                if allow:
+                    open(MEM_OVERRIDE_FILE, "w").close()
+                elif os.path.exists(MEM_OVERRIDE_FILE):
+                    os.remove(MEM_OVERRIDE_FILE)
+            except OSError as e:
+                self._json({"ok": False, "error": str(e)}, 500)
+                return
+            self._json({"ok": True, "override": allow,
+                        "soft_gb": MLX_SOFT_GB, "hard_gb": MLX_HARD_GB})
+            return
+        if path == "/api/model/mem_free":
+            # manual "clear the cache now" — reliable restart frees the balloon.
+            threading.Thread(target=_mlx_restart, daemon=True).start()
+            self._json({"ok": True, "restarting": True})
+            return
         if path == "/api/models/switch":
             self._json(switch_model((self._body_json().get("id") or "").strip()))
             return
@@ -2411,6 +2488,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": False, "reply":
                             "The agent is paused to save memory. Resume it from "
                             "the model menu (top right), then send this again."})
+                return
+
+            _adm_ok, _adm_gb, _adm_lim = mlx_admission()
+            if not _adm_ok:
+                self._json({"ok": False, "reply":
+                            f"The model is using {_adm_gb:.0f}GB of memory "
+                            f"(ceiling {_adm_lim:.0f}GB), so I've paused new "
+                            "requests to keep your Mac stable. It should recover "
+                            "in a moment — resend shortly. To force it through, "
+                            "hit 'Allow over-limit' in the model menu."})
                 return
 
             chat = load_chat(session)

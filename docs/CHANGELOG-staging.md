@@ -148,3 +148,12 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   the roster with drill badges + license notes ("Built with Llama" attribution). switch_model wrapper
   warns when switching to a failed/undrilled model (never blocks). PROVEN: Qwen3-30B 6/6 PASS,
   Hermes-3-8B 1/6 FAIL — the gate discriminates exactly as FINDINGS predicted (8B can't tool-call).
+- `<mem-ceiling>` HARD MLX memory ceiling (user: "can't take more than ~50GB unless you allow it").
+  Two-layer: (1) ADMISSION CONTROL — mlx_admission() checks a 15s-cached footprint; at/over MLX_SOFT_GB
+  (default 50) /api/chat + _generate_briefing REFUSE new model work with a clear "memory high, resend"
+  message so the KV cache can't balloon the Mac down; user override via /api/model/mem_override {allow}
+  (touches ~/.hermes/dashboard/mem-override). (2) HARD WATCHDOG — memory_guard_loop now polls 30s (was
+  300s — balloons spike fast) and above MLX_HARD_GB (56) does a RELIABLE bootout→bootstrap restart (was
+  kickstart -k, which doesn't reload the KeepAlive service) to free the balloon + clear cache. /api/model/
+  mem_free = manual clear. models_payload surfaces {soft_gb,hard_gb,over,override}. VERIFIED e2e: at a
+  10GB test-ceiling chat refused (16GB>10GB) with the message; override let it through; restored to 50.
