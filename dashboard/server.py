@@ -957,8 +957,14 @@ def get_access():
 def access_preamble():
     dirs = get_access()["dirs"]
     now = time.strftime("%A %Y-%m-%d %H:%M %Z")
+    # Prefix-stability (P3.B3): the mlx prompt cache reuses the longest common
+    # TOKEN PREFIX between requests — the first changed byte busts every token
+    # after it. So stable lines go FIRST and volatile lines LAST, ordered
+    # least→most volatile (grants → invariant → tasks → calendar → wall-clock
+    # minute). Measured on the local Qwen3-30B: time-line-first re-prefilled
+    # 9,266 of ~9,280 tokens on a minute tick (TTFT 2.92s); time-line-last only
+    # 15 tokens (TTFT 0.26s). See docs/plans/b3-prefix-ttft-findings.md.
     lines = [
-        f"[context] Local time: {now}.",
         f"[context] Files the user drops in chat land in: {INBOX}",
     ]
     if dirs:
@@ -974,6 +980,10 @@ def access_preamble():
             "[context] The user has not granted any folder access yet; don't "
             "browse their files. They can grant folders in the dashboard sidebar."
         )
+    lines.append(
+        "[context] Never invent facts, events, or files you did not actually "
+        "read or verify. If you don't know, say so plainly."
+    )
     tasks = [t for t in get_tasks()["tasks"] if not t.get("done")][:10]
     if tasks:
         lines.append("[context] The user's open tasks (from their dashboard task "
@@ -983,10 +993,7 @@ def access_preamble():
         lines.append("[context] Today's events from the user's macOS Calendar: "
                      + "; ".join(f"{e['time']} {e['title']}".strip()
                                  for e in cal["events"]))
-    lines.append(
-        "[context] Never invent facts, events, or files you did not actually "
-        "read or verify. If you don't know, say so plainly."
-    )
+    lines.append(f"[context] Local time: {now}.")
     return "\n".join(lines) + "\n\n"
 
 

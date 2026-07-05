@@ -37,12 +37,16 @@ exec python3 -m mlx_lm server \
   --port "$PORT" \
   --max-tokens 4096 \
   --prompt-cache-size 6 \
-  --prompt-cache-bytes 6000000000 \
+  --prompt-cache-bytes 8000000000 \
   --trust-remote-code
 # --prompt-cache-* CAPS the in-memory KV/prompt cache so it can't grow
 # unbounded and thrash RAM (root cause of the 49GB blowup; the dashboard's
-# memory_guard is now just a backstop). 6GB is plenty of prefix-reuse headroom
-# for a handful of active sessions. "Resume later" is handled by Hermes's own
+# memory_guard is now just a backstop). Measured (P3.B3): each ~20k-token agent
+# sequence costs ~2GB of KV, so 6GB held only ~3 sequences while >=4 producers
+# (hub chats, menubar, briefing -z regens, watchtower/intel) insert them — LRU
+# churn kept re-paying the ~8s cold prefill. 8GB holds 4; steady footprint ~26GB
+# stays under the 32GB memory_guard restart line. Drop back to 6GB if switching
+# to GLM-4.5-Air (106B leaves no headroom). "Resume later" is Hermes's own
 # message-history restore (state.db) — KV-cache-to-disk isn't worth it here.
 # The server exposes http://127.0.0.1:8080/v1 (OpenAI-compatible), which is
 # exactly what config.yaml -> model.base_url points at.

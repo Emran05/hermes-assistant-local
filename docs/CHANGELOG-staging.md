@@ -128,3 +128,11 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   VERIFIED: full state matrix, guards, privacy (no bodies in logs), REAL app POSTed fda:false → grant
   card renders from the live pipe. main.swift now FROZEN (rebuild drops the FDA grant — CLAUDE.md).
   PHASE 2 COMPLETE pending user FDA grant.
+- `<p3-b3>` P3 B3 prefix-stable prompt + KV-cache sizing (TTFT). access_preamble() reordered:
+  stable lines first, volatile last (grants→invariant→tasks→calendar→wall-clock-minute) — measured
+  11× warm-prefill difference at 9.3k tok (2.92s volatile-first → 0.26s volatile-last). mlx-server.sh
+  --prompt-cache-bytes 6GB→8GB (each ~20k agent seq ≈2GB KV; 6GB held only 3 while ≥4 producers churn
+  the LRU re-paying ~8s cold prefill; 8GB holds 4, ~26GB footprint stays under the 32GB guard).
+  Analysis + repeatable bench in docs/plans/b3-*. Applied to files; restart-verify deferred until the
+  promotion-gate agent finishes swapping models (avoids collision). Hermes system prompt already
+  prefix-stable (no upstream change).
