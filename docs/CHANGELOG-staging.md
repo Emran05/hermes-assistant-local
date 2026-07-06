@@ -197,3 +197,15 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   loop at 2 wasted calls instead of 50. Durable (plugin, not an upstream edit). Unit-verified: allows 2,
   blocks 3rd+, resets per turn / new query. Snapshotted to skills-snapshot/_plugins/.
   + UI-RESTRUCTURE-PLAN.md (Hub·Agent·Settings design + agent-page show-in taxonomy + settings IA).
+- `<ui-restructure>` Hub·Agent·Settings restructure (B0-B3). aux_agent.js (940L) + aux_agent.py
+  (/api/agent/pulse join) = the flagship AGENT page: wraps setView (retab, alias console/desktop→agent,
+  hermes_view migration), re-parents the chat on enter/return-on-exit (Hub split-chat untouched),
+  status hero w/ the two-brain "Sigil" (splits on Claude escalation) + display-only brain badge (live
+  tok/s, /api/claude/bridge poll), SHOWIN_RENDER dispatcher wrapping setAgentState → inline tool cards
+  (streaming dark TERMINAL card marquee; 8 stubs for B4; unknown→fail-open), heartbeat ticker. NO approval
+  control in any show-in card (invariant held). aux_settings_shell.js (731L) = SETTINGS page: 236px nav
+  (5 groups/12 panels) + search + kill switch + a relocator that re-homes every Mind card into its panel
+  (wrap mindExtras + MutationObserver, unknown→System, idempotent, fail-open) — ZERO edits to existing
+  modules. index.html B0: Mind→Settings label+gear + 4 base-section ids + 2 tags. Rollback = remove a tag.
+  VERIFIED: both headless harnesses (agent 8/8, settings 91/91), all endpoints 200, JS clean. Needs ⌘R
+  visual QA. Console/Desktop fold into the Agent rails in B5 (built as stubs); tabs kept until parity.
