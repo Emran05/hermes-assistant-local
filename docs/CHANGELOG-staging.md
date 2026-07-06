@@ -169,3 +169,8 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   /api/models), refreshed 5s + on stream end. (2) Default to a FRESH conversation on every open (past
   chats stay reachable via the sidebar/dropdown) — was resuming the last session. Verified: JS clean,
   live turn populated 84 tok/s / TTFT, fresh-session init.
+- `<plans>` PROACTIVE-INTELLIGENCE-PLAN.md (the "think for me" north star — You-Model + reasoning loop
+  + warm-intro engine from the user's own network; Phase-1 build-first is grant-free) + agent-hands
+  design specs (Mac control / sandboxed self-upgrade / Agent Desktop) + adversarial SECURITY review
+  (dev-agent needs P0 fixes before build — deny-read secrets, egress-pin, orchestrator-commits,
+  out-of-band merge confirm; Mac control + panel building now).
