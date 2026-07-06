@@ -1147,17 +1147,39 @@ def _brief_lookahead():
     return _sec(lines)
 
 
-_BRIEF_HEADERS = [("day", "Your day"),
+_BRIEF_HEADERS = [("foryou", "For you — moves & people"),
+                  ("day", "Your day"),
                   ("world", "World & tech front page"),
                   ("ai", "AI & Labs"),
                   ("markets", "Market movers"),
                   ("underground", "Underground signal"),
                   ("lookahead", "Look-ahead")]
 
+FORYOU_FILE = os.path.join(DATA, "foryou.json")
+
+
+def _brief_foryou():
+    """The proactive-intelligence lead section: the top ranked 'moves for you'
+    (do X / meet Y / go Z) with the why-you reasoning. Empty (degraded, so the
+    render skips it) until the You-Model is onboarded — the brief then just
+    starts with 'Your day' as before."""
+    d = read_json(FORYOU_FILE, None)
+    if not d or not d.get("personalized"):
+        return _sec(note="run onboarding to personalize")
+    lines = []
+    for m in (d.get("moves") or [])[:3]:
+        why = (m.get("why_you") or "").strip()
+        act = (m.get("suggested_action") or "").strip()
+        head = _md_link(m.get("title", ""), m.get("url"))
+        tail = " · ".join([b for b in (act, ("because " + why) if why else "") if b])
+        lines.append("• %s%s" % (head, (" — " + tail) if tail else ""))
+    return _sec(lines=lines) if lines else _sec(note="no moves yet")
+
 
 def _brief_build_sections():
     """Deterministic structured brief.  Returns (sections, degraded)."""
-    builders = {"day": _brief_day, "world": _brief_world, "ai": _brief_ai_labs,
+    builders = {"foryou": _brief_foryou,
+                "day": _brief_day, "world": _brief_world, "ai": _brief_ai_labs,
                 "markets": _brief_markets, "underground": _brief_underground,
                 "lookahead": _brief_lookahead}
     sections, degraded = {}, []

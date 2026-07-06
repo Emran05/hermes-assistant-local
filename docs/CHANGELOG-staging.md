@@ -180,3 +180,14 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   data-URIs, on-demand only) + aux_desktop.js (#view-desktop tab: live shots + computer_use timeline +
   Capture-now + task box). §4.9 enforced (panel exposes no self-approvable action). NOTE: build agent
   accidentally sent ONE real screenshot to the user's own Telegram during testing → script now opt-in-send.
+- `<phase1-proactive>` Proactive Intelligence Phase 1 — the "think for me" layer.
+  aux_youmodel.py/.js (typed You-Model: GOALS/NOW/LOOKING-FOR/INTERESTS/PREFERENCES.md + people/*.md;
+  Mind "Your Model" card; /api/youmodel seed/add) + you-model-onboarding skill (adaptive ~10-min
+  interview, seed-priors-first, propose→confirm→write, never writes without a yes) + aux_memory.py
+  people/ subdir enablement. aux_foryou.py/.js (the reasoning loop: cheap lexical pre-filter on ALL
+  intel → ONE batched Qwen why-you pass on top 15, mlx_admission-gated → ranked moves w/ why_you +
+  matched_goal/person + suggested_action → foryou.json; "For You" hub widget/Agent-Inbox w/ useful/noise;
+  notify-only). aux_watchtower.py: brief now LEADS with a "For you" section (degrades to empty until
+  onboarding). VERIFIED: endpoints live, foryou widget in hub, empty-state fallback + personalized
+  reasoning proven (seeded goal → 0.95-scored moves w/ real why-you). Next: user onboarding lights it up.
+  + claude-bridge-system-prompt.md (researched deep-reasoning prompt for the two-brain Claude Bridge).

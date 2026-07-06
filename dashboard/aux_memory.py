@@ -67,7 +67,8 @@ class _MemLocked(Exception):
 # --------------------------------------------------------------------------
 # module-load side effects (never let them take the hub down)
 # --------------------------------------------------------------------------
-for _d in (MEM_TRASH, MEM_SNAP, os.path.dirname(MEM_RECORDER)):
+for _d in (MEM_TRASH, MEM_SNAP, os.path.dirname(MEM_RECORDER),
+           os.path.join(MEM_DIR, "people")):   # People-graph cards (proactive-intel)
     try:
         os.makedirs(_d, mode=0o700, exist_ok=True)
     except Exception as _e:                               # pragma: no cover
@@ -89,11 +90,16 @@ except OSError:
 def _mem_valid_name(name):
     if not isinstance(name, str) or not name:
         return False
-    if ".." in name or "/" in name or "\\" in name:
+    if ".." in name or "\\" in name:
         return False
     if name.endswith(".lock") or name.endswith(".tmp"):
         return False
-    return bool(MEM_NAME_RE.match(name))
+    # allow exactly one optional "people/" subdir (People-graph cards); the
+    # remainder must be a plain <slug>.md with no further path separators.
+    base = name[len("people/"):] if name.startswith("people/") else name
+    if "/" in base:
+        return False
+    return bool(MEM_NAME_RE.match(base))
 
 
 def _mem_path(name):
