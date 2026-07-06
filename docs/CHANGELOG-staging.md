@@ -164,3 +164,8 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   osascript-cookbook (control any Mac app), screen-oracle (vision 'what am I looking at'), deep-dive
   (triangulated citation-locked research). All valid frontmatter, helper scripts, ride the P1 approval/
   recorder rails. Roadmap (incl. later tiers) in docs/CAPABILITY-ROADMAP.md.
+- `<chat-ui>` Fullscreen chat: (1) "Local AI" panel in the tools sidebar — live tokens/sec (ticks up
+  during generation, chars/3.6 est), TTFT p50, and Memory X/50GB with a bar (from /api/metrics +
+  /api/models), refreshed 5s + on stream end. (2) Default to a FRESH conversation on every open (past
+  chats stay reachable via the sidebar/dropdown) — was resuming the last session. Verified: JS clean,
+  live turn populated 84 tok/s / TTFT, fresh-session init.

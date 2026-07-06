@@ -256,6 +256,14 @@
   .cs-item .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .cs-foot{padding:9px 12px;border-top:1px solid var(--hairline);font-size:11px;color:var(--muted);
     display:flex;align-items:center;gap:7px;flex:none}
+  .cs-ai{padding:2px 12px 8px;flex:none}
+  .cs-ai-row{display:flex;justify-content:space-between;align-items:baseline;padding:2.5px 0;font-size:11px}
+  .cs-ai-row .k{color:var(--muted)}
+  .cs-ai-row .v{font-variant-numeric:tabular-nums;font-weight:600;color:var(--ink);font-size:11.5px}
+  .cs-ai-row .v.live{color:var(--ok)}
+  .cs-ai-membar{height:3px;border-radius:99px;background:var(--hairline);overflow:hidden;margin-top:3px}
+  .cs-ai-membar i{display:block;height:100%;width:0;background:var(--iris);transition:width .4s}
+  .cs-ai-membar i.warn{background:var(--warn)}.cs-ai-membar i.bad{background:var(--bad)}
   #chat-restore{position:fixed;right:16px;bottom:18px;z-index:45;width:46px;height:46px;border-radius:50%;
     display:none;align-items:center;justify-content:center;padding:0;border:none;
     background:linear-gradient(180deg,var(--iris-2),var(--iris));color:var(--iris-ink);
@@ -821,7 +829,14 @@
     </div>
     <div class="cs-sec grow" id="cs-convos"></div>
     <div class="cs-lab" style="padding-left:14px">Tools</div>
-    <div class="cs-sec" id="cs-tools" style="max-height:38%"></div>
+    <div class="cs-sec" id="cs-tools" style="max-height:30%"></div>
+    <div class="cs-lab" style="padding-left:14px">Local AI</div>
+    <div class="cs-ai" id="cs-ai">
+      <div class="cs-ai-row"><span class="k">Speed</span><span class="v" id="ai-tps">—</span></div>
+      <div class="cs-ai-row"><span class="k">TTFT</span><span class="v" id="ai-ttft">—</span></div>
+      <div class="cs-ai-row"><span class="k">Memory</span><span class="v" id="ai-ram">—</span></div>
+      <div class="cs-ai-membar"><i id="ai-membar"></i></div>
+    </div>
     <div class="cs-foot"><span class="pdot on" id="cs-dot"></span><span id="cs-model">local model</span></div>
   </aside>
   <div class="stage">
@@ -1068,7 +1083,29 @@ async function renderChatSide(){
   // status foot
   $('cs-model').textContent=$('p-model-t').textContent;
   $('cs-dot').className=$('p-model').className.replace('pdot','pdot').trim()||'pdot';
+  renderAIInfo();
 }
+window.__liveTps=null;   // set live by streamJob during generation; null when idle
+async function renderAIInfo(){
+  if(!$('ai-tps'))return;
+  let mt={},md={};
+  try{[mt,md]=await Promise.all([
+    fetch('/api/metrics').then(r=>r.json()).catch(()=>({})),
+    fetch('/api/models').then(r=>r.json()).catch(()=>({}))]);}catch(e){}
+  const t=mt.turns||{};
+  const live=window.__liveTps;
+  const est=(t.est_tok_per_sec||{}).p50;
+  const tpsEl=$('ai-tps');
+  if(live!=null){tpsEl.textContent=live.toFixed(1)+' tok/s';tpsEl.classList.add('live');}
+  else{tpsEl.textContent=est?Math.round(est)+' tok/s':'—';tpsEl.classList.remove('live');}
+  const ttft=(t.ttft_ms||{}).p50;
+  $('ai-ttft').textContent=ttft?(ttft<1000?Math.round(ttft)+' ms':(ttft/1000).toFixed(1)+' s'):'—';
+  const ram=md.ram_gb, soft=(md.mem||{}).soft_gb||50;
+  $('ai-ram').textContent=md.paused?'paused':(ram!=null?(Math.round(ram*10)/10)+' / '+Math.round(soft)+' GB':'—');
+  const bar=$('ai-membar'),pct=(ram!=null&&!md.paused)?Math.min(100,Math.round(100*ram/soft)):0;
+  bar.style.width=pct+'%';bar.className=pct>=100?'bad':pct>=85?'warn':'';
+}
+setInterval(()=>{if((document.querySelector('.deck')||{}).dataset&&document.querySelector('.deck').dataset.chat==='full')renderAIInfo();},5000);
 $('cs-new').onclick=()=>{$('newchat').click();setTimeout(renderChatSide,300);};
 $('chat-hide').onclick=()=>setChatMode('hidden');
 $('chat-max').onclick=()=>setChatMode((document.querySelector('.deck').dataset.chat==='full')?'normal':'full');
@@ -2023,6 +2060,7 @@ async function sendMsg(text){
 }
 async function streamJob(jid,thinking){
   let bubble=null, approvalBox=null;
+  let firstTokTs=null;   // live tok/s: time the first token lands + running char count
   setAgentState('thinking…');
   const ensureBubble=()=>{if(!bubble){thinking.remove();bubble=addBubble('','bot',true);}return bubble;};
   while(true){
@@ -2031,7 +2069,12 @@ async function streamJob(jid,thinking){
     catch(e){await new Promise(r=>setTimeout(r,1500));continue;}
     if(d.gone){thinking.remove();addBubble('The agent job was lost (dashboard restarted?).','bot',false).classList.add('err');setAgentState(null);return;}
     if(d.text){const b=ensureBubble();b.querySelector('.md').innerHTML=renderMd(d.text)+(d.done?'':' <span class="caret">▌</span>');
-      $('msgs').scrollTop=$('msgs').scrollHeight;}
+      $('msgs').scrollTop=$('msgs').scrollHeight;
+      // live tokens/sec — chars≈token*3.6 for English; update the Local AI panel live
+      if(firstTokTs==null)firstTokTs=performance.now();
+      const secs=(performance.now()-firstTokTs)/1000;
+      if(secs>0.4){window.__liveTps=(d.text.length/3.6)/secs;const e=$('ai-tps');
+        if(e){e.textContent=window.__liveTps.toFixed(1)+' tok/s';e.classList.add('live');}}}
     if(!d.done)setAgentState(d.status?d.status:(d.text?'writing…':'thinking…'));
     if(d.status&&!d.done&&!bubble){thinking.innerHTML='<span class="dots" role="status"><i></i><i></i><i></i><small>'+
       esc(d.status)+'</small></span>';}
@@ -2060,6 +2103,8 @@ async function streamJob(jid,thinking){
       else b.querySelector('.md').innerHTML=renderMd(d.reply);
       $('msgs').scrollTop=$('msgs').scrollHeight;
       setAgentState(null);
+      window.__liveTps=null;   // freeze the live rate; panel reverts to the metrics avg
+      renderAIInfo();
       return;
     }
     await new Promise(r=>setTimeout(r,700));
@@ -2079,7 +2124,9 @@ $('input').addEventListener('input',function(){this.style.height='auto';this.sty
   }
   if((document.querySelector('.deck').dataset.chat||'')==='full')renderChatSide();
 })();
-(async()=>{await loadSessions(); await loadHistory();})();
+// Default to a FRESH conversation whenever the tool opens (past chats stay
+// reachable from the sidebar / conversation dropdown).
+(async()=>{session=newId();emptyState();await loadSessions();})();
 {const sv=localStorage.getItem('hermes_view');if(sv&&sv!=='hub')setView(sv);}
 </script>
 <script src="/expand.js"></script>
