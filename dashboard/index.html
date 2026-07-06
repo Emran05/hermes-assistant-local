@@ -808,7 +808,7 @@
   </div>
   <div class="seg" role="tablist" aria-label="View">
     <b id="tab-hub" class="on" role="tab" aria-selected="true"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>Hub</b>
-    <b id="tab-mind" role="tab" aria-selected="false"><svg class="ic" viewBox="0 0 24 24"><path d="M12 3a4 4 0 0 0-4 4 4 4 0 0 0-1 7.9V17a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2v-2.1A4 4 0 0 0 16 7a4 4 0 0 0-4-4z"/><path d="M12 7v12"/></svg>Mind</b>
+    <b id="tab-mind" role="tab" aria-selected="false"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Settings</b>
     <b id="tab-console" role="tab" aria-selected="false"><svg class="ic" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="18" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></svg>Console</b>
   </div>
   <div class="modelwrap">
@@ -847,7 +847,7 @@
 
     <!-- ============ MIND VIEW ============ -->
     <div class="view" id="view-mind" role="tabpanel" hidden>
-      <section class="hero glass span2">
+      <section class="hero glass span2" id="mind-base-hero">
         <div class="greet">
           <div class="eyebrow">Self-improving &middot; local</div>
           <div class="line" id="mind-line">Getting to know your assistant&hellip;</div>
@@ -860,20 +860,20 @@
         </div>
       </section>
 
-      <section class="card glass span2">
+      <section class="card glass span2" id="mind-base-skills">
         <h2><svg class="ic" viewBox="0 0 24 24"><path d="M12 2l2.4 7.4H22l-6 4.6 2.3 7.4-6.3-4.6-6.3 4.6L8 14 2 9.4h7.6z"/></svg>
           Learned Skills <span class="tiny" id="skill-count" style="margin-left:auto"></span></h2>
         <div class="catbar" id="skill-cats"></div>
         <div class="body"><div class="skills" id="skill-list"><div class="skel"><i></i><i></i><i></i><i></i></div></div></div>
       </section>
 
-      <section class="card glass">
+      <section class="card glass" id="mind-base-memory">
         <h2><svg class="ic" viewBox="0 0 24 24"><path d="M12 3a4 4 0 0 0-4 4 4 4 0 0 0-1 7.9V17a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2v-2.1A4 4 0 0 0 16 7a4 4 0 0 0-4-4z"/></svg>
           What it remembers <span class="tiny" id="mem-updated" style="margin-left:auto"></span></h2>
         <div class="body" id="mem-list"><div class="skel"><i></i><i></i></div></div>
       </section>
 
-      <section class="card glass">
+      <section class="card glass" id="mind-base-activity">
         <h2><svg class="ic" viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="M7 14l3-4 3 3 4-6"/></svg>
           Activity <span class="tiny" style="margin-left:auto">last 14 days</span></h2>
         <div class="body">
