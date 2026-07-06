@@ -269,6 +269,64 @@
       "#agent-rail .railpane{flex:1;min-height:0;overflow-y:auto}",
       "#agent-rail .railpane[hidden]{display:none}",
       "#agent-rail .railstub{font-size:12px;color:var(--muted);padding:16px 4px;text-align:center;line-height:1.5}",
+      /* Screen rail = watch-only: hide the desktop panel's task-compose card */
+      "#agent-rail #desk-ctl-card{display:none}",
+      "#agent-rail #recorder-card{border:none;background:transparent;box-shadow:none}",
+      "#agent-rail #recorder-card>h2{font-size:12.5px;padding:0 2px 6px}",
+      "#agent-rail .desk-card{margin-bottom:8px}",
+      /* red LIVE dot on the Screen tab while computer_use runs */
+      '#agent-rail .railtabs b[data-rail="screen"].live .udot{display:block;background:var(--bad);'
+        + "box-shadow:0 0 0 3px color-mix(in srgb,var(--bad) 26%,transparent);animation:lpulse 1.1s infinite}",
+
+      /* B5-hide the now-redundant top tabs (DOM kept; views reachable via setView).
+         Net top bar: Hub · Agent. Settings/Console/Desktop fold into rails/prefs. */
+      "#tab-mind,#tab-console,#tab-desktop{display:none!important}",
+
+      /* ---------- Deep-thinking affordance + Claude-dialogue viewer ---------- */
+      ".deepbtn{display:none;align-items:center;gap:5px;flex:none;font-size:11px;font-weight:600;"
+        + "padding:4px 10px;border-radius:99px;cursor:pointer;color:var(--claude);"
+        + "background:color-mix(in srgb,var(--claude) 13%,transparent);border:1px solid color-mix(in srgb,var(--claude) 30%,transparent)}",
+      ".deepbtn.show{display:inline-flex}",
+      ".deepbtn .ic{width:13px;height:13px}",
+      "#ag-deep{position:fixed;inset:0;z-index:60;display:none;align-items:center;justify-content:center;"
+        + "background:color-mix(in srgb,var(--ground) 55%,transparent);backdrop-filter:blur(3px)}",
+      "#ag-deep.open{display:flex}",
+      "#ag-deep .dsheet{width:min(680px,92vw);max-height:82vh;display:flex;flex-direction:column;"
+        + "border-radius:var(--radius);padding:16px 18px;overflow:hidden}",
+      "#ag-deep .dhead{display:flex;align-items:center;gap:9px;font-size:14px;font-weight:640;color:var(--ink);margin-bottom:4px}",
+      "#ag-deep .dhead .ic{width:17px;height:17px;color:var(--claude)}",
+      "#ag-deep .dsub{font-size:11.5px;color:var(--muted);margin-bottom:12px}",
+      "#ag-deep .dclose{margin-left:auto;cursor:pointer;color:var(--muted);background:none;border:none;padding:4px}",
+      "#ag-deep .dlist{overflow-y:auto;min-height:0;display:flex;flex-direction:column;gap:8px}",
+      ".dcall{border:1px solid var(--hairline);border-radius:var(--radius-sm);background:var(--glass-2);overflow:hidden}",
+      ".dcall .dc-head{display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer}",
+      ".dcall .dc-task{font-size:12.5px;font-weight:560;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}",
+      ".dcall .dc-model{font-size:10px;font-weight:640;padding:2px 7px;border-radius:99px;flex:none;"
+        + "background:color-mix(in srgb,var(--claude) 15%,transparent);color:var(--claude);text-transform:capitalize}",
+      ".dcall .dc-meta{font-size:10.5px;color:var(--faint);flex:none;font-variant-numeric:tabular-nums}",
+      ".dcall .dc-body{display:none;border-top:1px solid var(--hairline);padding:10px 12px;font-size:12.5px;line-height:1.55}",
+      ".dcall.open .dc-body{display:block}",
+      ".dcall .dc-k{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--faint);margin:2px 0 4px}",
+      ".dcall .dc-q{color:var(--muted);white-space:pre-wrap;margin-bottom:10px}",
+      ".dcall .dc-a{color:var(--ink);white-space:pre-wrap}",
+      ".dcall.err .dc-model{background:color-mix(in srgb,var(--bad) 15%,transparent);color:var(--bad)}",
+
+      /* on-demand escalate button under a bot reply + the deep-answer card */
+      ".esc-row{margin-top:6px}",
+      ".esc-btn{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;cursor:pointer;"
+        + "padding:4px 10px;border-radius:99px;color:var(--claude);background:color-mix(in srgb,var(--claude) 12%,transparent);"
+        + "border:1px solid color-mix(in srgb,var(--claude) 28%,transparent)}",
+      ".esc-btn[disabled]{opacity:.55;cursor:default}",
+      ".esc-btn .ic{width:12px;height:12px}",
+      ".deepcard{margin-top:8px;border:1px solid color-mix(in srgb,var(--claude) 30%,transparent);"
+        + "border-radius:var(--radius-sm);background:color-mix(in srgb,var(--claude) 7%,transparent);overflow:hidden}",
+      ".deepcard .dk-head{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--hairline)}",
+      ".deepcard .dk-head .ic{width:14px;height:14px;color:var(--claude)}",
+      ".deepcard .dk-lab{font-size:11.5px;font-weight:640;color:var(--claude)}",
+      ".deepcard .dk-meta{margin-left:auto;font-size:10.5px;color:var(--faint);font-variant-numeric:tabular-nums}",
+      ".deepcard .dk-body{padding:11px 13px;font-size:13.5px;line-height:1.6;color:var(--ink)}",
+      ".deepcard.err .dk-lab{color:var(--bad)}",
+      ".deepcard.err .dk-head .ic{color:var(--bad)}",
 
       /* ---------- heartbeat ticker ---------- */
       "#agent-ticker{display:flex;align-items:center;gap:9px;height:28px;padding:0 14px;margin-top:8px;"
@@ -307,6 +365,8 @@
       + '    <div class="sig">' + sigilSvg() + '</div>'
       + '    <div class="state"><div class="s1" id="ag-s1">Watching</div>'
       + '      <div class="s2" id="ag-s2">Ask, or just watch — your assistant is on watch.</div></div>'
+      + '    <button class="deepbtn" id="ag-deepbtn" title="See the full dialogues the agent had with Claude">'
+      + svg("bridge") + '<span id="ag-deepbtn-t">Claude dialogues</span></button>'
       + '    ' + brainBadgeHtml()
       + '  </div>'
       + '  <div id="agent-stream"></div>'
@@ -319,26 +379,32 @@
       + '    <b data-rail="screen" role="tab">' + svg("screen") + 'Screen<span class="udot"></span></b>'
       + '    <b data-rail="pulse" role="tab">' + svg("pulse") + 'Pulse<span class="udot"></span></b>'
       + '  </div>'
-      + '  <div class="railpane" data-rail="record"><div class="railstub">The Flight Recorder folds in here — every tool the agent runs, grouped by turn. (B5)</div></div>'
-      + '  <div class="railpane" data-rail="screen" hidden><div class="railstub">Watch computer-use live. The Screen panel mounts here. (B5)</div></div>'
-      + '  <div class="railpane" data-rail="pulse" hidden><div class="railstub" id="ag-pulse-stub">The autonomous feed — what the agent did while you were away.</div></div>'
+      + '  <div class="railpane" data-rail="record" id="rail-record"><div class="railstub">Loading the Flight Recorder…</div></div>'
+      + '  <div class="railpane" data-rail="screen" id="rail-screen" hidden><div class="railstub">Loading the Screen panel…</div></div>'
+      + '  <div class="railpane" data-rail="pulse" id="rail-pulse" hidden><div class="railstub" id="ag-pulse-stub">The autonomous feed — what the agent did while you were away.</div></div>'
       + '</div>';
     stage.appendChild(v);
+
+    // Claude-dialogue viewer overlay (display-only; read-only transcript list)
+    var dm = document.createElement("div");
+    dm.id = "ag-deep";
+    dm.innerHTML =
+      '<section class="dsheet glass">'
+      + '<div class="dhead">' + svg("bridge") + 'Claude dialogues'
+      + '<button class="dclose" id="ag-deep-x" aria-label="Close">' + svg("chevron") + '</button></div>'
+      + '<div class="dsub">Every time the agent escalated to Claude — the exact question it asked and Claude\'s full response. Display only.</div>'
+      + '<div class="dlist" id="ag-deep-list"><div class="railstub">No deep escalations yet.</div></div>'
+      + '</section>';
+    (document.body || document.documentElement).appendChild(dm);
+    dm.addEventListener("click", function (e) { if (e.target === dm) closeDeep(); });
+    var dx = $("ag-deep-x"); if (dx) dx.addEventListener("click", closeDeep);
+    var db = $("ag-deepbtn"); if (db) db.addEventListener("click", openDeep);
 
     // rail tab switching (local, no view change)
     var tabs = v.querySelectorAll(".railtabs b");
     for (var i = 0; i < tabs.length; i++) {
       tabs[i].addEventListener("click", function () {
-        var name = this.getAttribute("data-rail");
-        var bs = v.querySelectorAll(".railtabs b");
-        for (var j = 0; j < bs.length; j++) {
-          var on = bs[j].getAttribute("data-rail") === name;
-          bs[j].classList.toggle("on", on);
-          if (on) { var ud = bs[j].querySelector(".udot"); if (ud) ud.style.display = "none"; }
-        }
-        var ps = v.querySelectorAll(".railpane");
-        for (var k = 0; k < ps.length; k++) ps[k].hidden = ps[k].getAttribute("data-rail") !== name;
-        renderPulseRail();
+        openRail(this.getAttribute("data-rail"));
       });
     }
     $("agent-ticker").addEventListener("click", function () {
@@ -409,6 +475,7 @@
     document.documentElement.setAttribute("data-agentview", "1");
     _parked = true;
     try { if (typeof window.renderChatSide === "function") window.renderChatSide(); } catch (e) {}
+    try { mountRecordRail(); } catch (e) {}          // default rail = the flight recorder
     startAgentPolls();
   }
 
@@ -443,8 +510,10 @@
     if (window.__agentSetView) return;
     window.__agentSetView = true;
     var prev = window.setView;
-    window.setView = function (v) {
-      v = normView(v);
+    window.setView = function (raw) {
+      var v = normView(raw);
+      // aliased tabs open the matching rail pane (Console->Record, Desktop->Screen)
+      var wantRail = raw === "console" ? "record" : raw === "desktop" ? "screen" : null;
       if (v === "agent") {
         ["view-hub", "view-mind", "view-console", "view-desktop"].forEach(function (id) {
           var e = $(id); if (e) e.hidden = true;
@@ -458,6 +527,7 @@
         var hc = $("hubctl"); if (hc) hc.style.display = "none";
         try { localStorage.setItem("hermes_view", "agent"); } catch (e) {}
         enterAgent();
+        if (wantRail) { try { openRail(wantRail); } catch (e) {} }
         return;
       }
       // leaving Agent (or never in it): tear down our view, then delegate
@@ -758,14 +828,23 @@
   }
 
   function showinSettle(opts) {
-    if (_active && !_active.done) { try { _active.settle(opts || {}); } catch (e) {} }
+    if (_active && !_active.done) {
+      try { _active.settle(opts || {}); } catch (e) {}
+      if (_active.type === "computer_use") { try { screenLive(false); } catch (e) {} }
+    }
     _active = null;
   }
 
   // the dispatch: called for every setAgentState(txt). Returns nothing; throws
   // are swallowed by the wrapper so the stream never dies.
   function showinDispatch(txt) {
-    if (txt == null) { showinSettle({}); _grp = null; return; }
+    if (txt == null) {                               // turn done
+      showinSettle({}); _grp = null;
+      try { screenLive(false); } catch (e) {}
+      _screenAutoSwitched = false;                   // re-arm auto-switch for next turn
+      try { decorateEscalate(); } catch (e) {}       // offer on-demand deep-think
+      return;
+    }
     var low = String(txt).toLowerCase();
     if (low.indexOf("approv") >= 0) return;         // approval owns its own path
     var type = toolFromStatus(txt);
@@ -776,6 +855,7 @@
     if (_active && _active.type === type && !_active.done) return;  // same tool still running
     showinSettle({});                                // different tool -> settle old
     _active = showinBirth(type);
+    if (_active && type === "computer_use") { try { screenLive(true); } catch (e) {} }
     if (_active && type === "terminal") {
       // best-effort command text if the status carried one after "using shell"
       var extra = String(txt).replace(/^.*using\s+[a-z0-9_.\-]+\s*/i, "").trim();
@@ -879,6 +959,254 @@
   }
 
   // ==========================================================================
+  // B5 — fold Console (Record) and Desktop (Screen) into the right rail.
+  // Reuse the existing renderers/state; never rewrite them.
+  // ==========================================================================
+  function t12(ts) {
+    if (!ts) return "";
+    try {
+      return new Date(ts * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true });
+    } catch (e) { return ""; }
+  }
+
+  // switch the rail to a named pane (and lazily mount it)
+  function openRail(name) {
+    var v = $("view-agent"); if (!v) return;
+    var bs = v.querySelectorAll(".railtabs b");
+    for (var j = 0; j < bs.length; j++) {
+      var on = bs[j].getAttribute("data-rail") === name;
+      bs[j].classList.toggle("on", on);
+      // clear the *unread* dot on activate, but NOT the red LIVE state (that is
+      // owned by screenLive() while computer_use runs — CSS shows it via .live).
+      if (on) { var ud = bs[j].querySelector(".udot"); if (ud) ud.style.display = ""; }
+    }
+    var ps = v.querySelectorAll(".railpane");
+    for (var k = 0; k < ps.length; k++) ps[k].hidden = ps[k].getAttribute("data-rail") !== name;
+    if (name === "record") mountRecordRail();
+    else if (name === "screen") mountScreenRail(true);
+    else if (name === "pulse") renderPulseRail();
+  }
+
+  // ---- Record rail: relocate the existing Flight Recorder card -----------
+  // aux_recorder's recEnsureCard() returns #recorder-card wherever it lives and
+  // loadRecorder() repopulates it in place + keeps recState fresh (so detail/undo
+  // keep working). We create it, move it into our pane once, then ride our poll.
+  var _recMoved = false, _recTimer = null;
+  function mountRecordRail() {
+    var pane = $("rail-record"); if (!pane) return;
+    if (typeof window.loadRecorder !== "function") {
+      pane.innerHTML = '<div class="railstub">The flight recorder module is not loaded.</div>';
+      return;
+    }
+    try { window.loadRecorder(); } catch (e) {}          // creates/updates #recorder-card
+    var card = $("recorder-card");
+    if (card && card.parentNode !== pane) { pane.innerHTML = ""; pane.appendChild(card); _recMoved = true; }
+    if (!_recTimer) {
+      _recTimer = setInterval(function () {
+        if (!isAgentVisible()) return;
+        var rp = $("rail-record");
+        if (!rp || rp.hidden) return;                     // only poll while shown
+        try { window.loadRecorder(); } catch (e) {}
+        var c = $("recorder-card");
+        if (c && c.parentNode !== rp) rp.appendChild(c);  // keep it home after any re-render
+      }, 3000);
+    }
+  }
+
+  // ---- Screen rail: render via aux_desktop's pure renderDesktop() ---------
+  var _screenTimer = null, _screenBusy = false, _screenPinned = null;
+  async function mountScreenRail(force) {
+    var pane = $("rail-screen"); if (!pane) return;
+    if (typeof window.renderDesktop !== "function") {
+      pane.innerHTML = '<div class="railstub">The Screen module is not loaded.</div>';
+      return;
+    }
+    if (_screenBusy) return; _screenBusy = true;
+    try {
+      var st = {}, tl = {};
+      try { st = await (await fetch("/api/desktop/shots", { cache: "no-store" })).json(); } catch (e) {}
+      try { tl = await (await fetch("/api/desktop/timeline", { cache: "no-store" })).json(); } catch (e) {}
+      var shots = (st && st.shots) || [];
+      var full = (_screenPinned && shots.some(function (s) { return s.name === _screenPinned.name; }))
+        ? _screenPinned.uri : null;
+      pane.innerHTML = window.renderDesktop(st || {}, tl || {}, full);
+      wireScreen(pane);
+    } catch (e) {
+      pane.innerHTML = '<div class="railstub">Screen panel unavailable.</div>';
+    }
+    _screenBusy = false;
+    if (!_screenTimer) {
+      _screenTimer = setInterval(function () {
+        if (!isAgentVisible()) return;
+        var rp = $("rail-screen");
+        var live = document.querySelector('#agent-rail .railtabs b[data-rail="screen"].live');
+        if ((!rp || rp.hidden) && !live) return;          // poll while shown OR computer_use live
+        mountScreenRail(false);
+      }, 4000);
+    }
+  }
+  function wireScreen(pane) {
+    var cap = pane.querySelector("#desk-cap");
+    if (cap) cap.onclick = function () {
+      cap.disabled = true;
+      fetch("/api/desktop/capture", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+        .then(function () { return mountScreenRail(true); })
+        .catch(function () {})
+        .then(function () { var c = pane.querySelector("#desk-cap"); if (c) c.disabled = false; });
+    };
+    var ref = pane.querySelector("#desk-refresh");
+    if (ref) ref.onclick = function () { mountScreenRail(true); };
+    var strip = pane.querySelectorAll(".desk-strip img");
+    for (var i = 0; i < strip.length; i++) {
+      strip[i].onclick = function () {
+        var name = this.getAttribute("data-name");
+        var big = pane.querySelector("#desk-full");
+        if (big && this.getAttribute("src")) { big.src = this.getAttribute("src"); _screenPinned = { name: name, uri: this.getAttribute("src") }; }
+        var imgs = pane.querySelectorAll(".desk-strip img");
+        for (var k = 0; k < imgs.length; k++) imgs[k].classList.toggle("on", imgs[k].getAttribute("data-name") === name);
+      };
+    }
+  }
+  // computer_use lifecycle: red LIVE dot + one auto-switch to Screen per turn
+  var _cuLive = false, _screenAutoSwitched = false;
+  function screenLive(on) {
+    _cuLive = !!on;
+    // the red LIVE dot is purely CSS-driven off the .live class (b.live .udot),
+    // so it survives an openRail() activate and clears when we drop .live.
+    var tab = document.querySelector('#agent-rail .railtabs b[data-rail="screen"]');
+    if (tab) tab.classList.toggle("live", !!on);
+    if (on) {
+      mountScreenRail(true);
+      if (!_screenAutoSwitched) { _screenAutoSwitched = true; openRail("screen"); }
+    }
+  }
+
+  // ==========================================================================
+  // Claude dialogues (full task + response) — /api/claude/recent, display-only
+  // ==========================================================================
+  var _claudeTimer = null;
+  async function loadClaudeRecent() {
+    if (!isAgentVisible()) return;
+    var d = null;
+    try { d = await (await fetch("/api/claude/recent?n=20", { cache: "no-store" })).json(); } catch (e) { return; }
+    if (!d || !d.ok) return;
+    window.__claudeRecent = d.calls || [];
+    var btn = $("ag-deepbtn"), t = $("ag-deepbtn-t");
+    var n = window.__claudeRecent.length;
+    if (btn) btn.classList.toggle("show", n > 0);
+    if (t) t.textContent = "Claude dialogues" + (n ? " · " + n : "");
+    if ($("ag-deep") && $("ag-deep").classList.contains("open")) renderDeepList();
+  }
+  function renderDeepList() {
+    var list = $("ag-deep-list"); if (!list) return;
+    var calls = window.__claudeRecent || [];
+    if (!calls.length) { list.innerHTML = '<div class="railstub">No deep escalations yet. When the agent asks Claude to reason, the full exchange appears here.</div>'; return; }
+    var h = "";
+    for (var i = 0; i < calls.length; i++) {
+      var c = calls[i] || {};
+      var bad = c.ok === false || c.error;
+      var task = (c.task || "").trim() || "(no task)";
+      var resp = bad ? (c.error || c.response || "Claude did not answer.") : (c.response || "(empty response)");
+      var secs = c.ms ? (c.ms / 1000).toFixed(c.ms < 10000 ? 1 : 0) + "s" : "";
+      h += '<div class="dcall' + (bad ? " err" : "") + '" data-i="' + i + '">'
+        + '<div class="dc-head">'
+        + '<span class="dc-task">' + esc(task) + '</span>'
+        + '<span class="dc-model">' + esc(c.model || c.depth || "claude") + '</span>'
+        + '<span class="dc-meta">' + esc([t12(c.ts), secs].filter(Boolean).join(" · ")) + '</span>'
+        + '</div>'
+        + '<div class="dc-body">'
+        + '<div class="dc-k">Asked Claude</div><div class="dc-q">' + esc(task) + '</div>'
+        + '<div class="dc-k">' + (bad ? "Result" : "Claude · " + esc(c.depth || "deep")) + '</div><div class="dc-a">' + esc(resp) + '</div>'
+        + '</div></div>';
+    }
+    list.innerHTML = h;
+    var rows = list.querySelectorAll(".dcall");
+    for (var j = 0; j < rows.length; j++) {
+      rows[j].querySelector(".dc-head").addEventListener("click", function () { this.parentNode.classList.toggle("open"); });
+    }
+  }
+  function openDeep() {
+    var dm = $("ag-deep"); if (!dm) return;
+    renderDeepList();
+    dm.classList.add("open");
+    loadClaudeRecent();
+    if (!REDUCE) { try { agAnimate(dm.querySelector(".dsheet"), { opacity: [0, 1], transform: ["translateY(10px)", "none"] }, { duration: 0.4, easing: SPRING }); } catch (e) {} }
+  }
+  function closeDeep() { var dm = $("ag-deep"); if (dm) dm.classList.remove("open"); }
+
+  // ==========================================================================
+  // On-demand "Escalate to Claude" on a normal bot reply (display/answer-only)
+  // ==========================================================================
+  function decorateEscalate() {
+    var msgs = $("msgs"); if (!msgs) return;
+    var bots = msgs.querySelectorAll(".bubble.bot");
+    var target = null;
+    for (var i = bots.length - 1; i >= 0; i--) {
+      var b = bots[i];
+      if (b.classList.contains("err")) continue;
+      if (b.getAttribute("data-esc") === "1") { target = null; break; }   // newest already decorated
+      target = b; break;
+    }
+    if (!target) return;
+    if (target.querySelector(".dots")) return;               // still the thinking placeholder
+    target.setAttribute("data-esc", "1");
+    // find the user question that produced this reply
+    var q = "";
+    var prev = target;
+    while (prev) {
+      prev = prev.previousSibling;
+      if (prev && prev.classList && prev.classList.contains("user")) { q = (prev.textContent || "").split("\n")[0]; break; }
+    }
+    var row = document.createElement("div");
+    row.className = "esc-row";
+    var btn = document.createElement("button");
+    btn.className = "esc-btn";
+    btn.innerHTML = svg("bridge") + "Escalate to Claude";
+    btn.title = "Re-run this question through Claude for deeper reasoning";
+    btn.addEventListener("click", function () { doEscalate(btn, target, q); });
+    row.appendChild(btn);
+    target.appendChild(row);
+  }
+  async function doEscalate(btn, bubble, question) {
+    if (!question) { question = (bubble.textContent || "").slice(0, 400); }
+    btn.disabled = true;
+    btn.innerHTML = svg("bridge") + "Thinking with Claude…";
+    setSigil("deep"); setStateLine("Thinking with Claude", "deep reasoning — on demand");
+    var card = document.createElement("div");
+    card.className = "deepcard";
+    card.innerHTML = '<div class="dk-head">' + svg("bridge") + '<span class="dk-lab">Claude · deep</span>'
+      + '<span class="dk-meta">thinking…</span></div><div class="dk-body"><span class="term-cur"></span></div>';
+    bubble.appendChild(card);
+    var task = question + "\n\n(Please reason more deeply and thoroughly than a quick answer — lay out the considerations and give your best-reasoned response.)";
+    var d = null;
+    try {
+      d = await (await fetch("/api/claude/think", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task: task, depth: "deep" })
+      })).json();
+    } catch (e) { d = { ok: false, error: "Could not reach Claude." }; }
+    var meta = card.querySelector(".dk-meta");
+    var body = card.querySelector(".dk-body");
+    setSigil("idle"); setStateLine("Watching", idleDetail());
+    if (d && d.ok && (d.text || d.response)) {
+      var secs = d.ms ? (d.ms / 1000).toFixed(d.ms < 10000 ? 1 : 0) + "s" : "";
+      if (meta) meta.textContent = [esc(d.model || "opus"), secs, t12(Date.now() / 1000)].filter(Boolean).join(" · ");
+      var ans = d.text || d.response;
+      body.innerHTML = (typeof window.renderMd === "function") ? window.renderMd(ans) : esc(ans);
+      btn.innerHTML = svg("check") + "Answered by Claude";
+      loadClaudeRecent();
+    } else {
+      card.classList.add("err");
+      card.querySelector(".dk-lab").textContent = (d && d.refused) ? "Claude declined" : "Claude unavailable";
+      if (meta) meta.textContent = t12(Date.now() / 1000);
+      body.textContent = (d && (d.text || d.reason || d.error)) || "Claude could not answer this.";
+      btn.disabled = false;
+      btn.innerHTML = svg("bridge") + "Escalate to Claude";
+    }
+    var m = $("msgs"); if (m) m.scrollTop = m.scrollHeight;
+  }
+
+  // ==========================================================================
   // polling lifecycle (visibility + view gated)
   // ==========================================================================
   function isAgentVisible() {
@@ -891,6 +1219,7 @@
     if (!_brainTimer) { pollBrain(); _brainTimer = setInterval(function () { if (isAgentVisible()) pollBrain(); }, 5000); }
     if (!_pulseTimer) { loadPulse(); _pulseTimer = setInterval(loadPulse, 10000); }
     if (!_tickTimer) { _tickTimer = setInterval(crossfade, 8000); }
+    if (!_claudeTimer) { loadClaudeRecent(); _claudeTimer = setInterval(function () { if (isAgentVisible()) loadClaudeRecent(); }, 12000); }
     // keep the Local AI panel live in the Agent left rail
     if (!window.__agentAiTimer) window.__agentAiTimer = setInterval(function () {
       if (isAgentVisible() && typeof window.renderAIInfo === "function") window.renderAIInfo();
@@ -900,6 +1229,9 @@
     if (_brainTimer) { clearInterval(_brainTimer); _brainTimer = null; }
     if (_pulseTimer) { clearInterval(_pulseTimer); _pulseTimer = null; }
     if (_tickTimer) { clearInterval(_tickTimer); _tickTimer = null; }
+    if (_claudeTimer) { clearInterval(_claudeTimer); _claudeTimer = null; }
+    if (_recTimer) { clearInterval(_recTimer); _recTimer = null; }
+    if (_screenTimer) { clearInterval(_screenTimer); _screenTimer = null; }
   }
 
   // ==========================================================================
@@ -937,6 +1269,11 @@
     showinDispatch: showinDispatch, driveHero: driveHero, setSigil: setSigil,
     toolFromStatus: toolFromStatus, loadPulse: loadPulse, crossfade: crossfade,
     enterAgent: enterAgent, exitAgent: exitAgent, pollBrain: pollBrain,
-    SHOWIN_RENDER: SHOWIN_RENDER
+    SHOWIN_RENDER: SHOWIN_RENDER,
+    mountRecordRail: mountRecordRail, mountScreenRail: mountScreenRail,
+    openRail: openRail, screenLive: screenLive,
+    loadClaudeRecent: loadClaudeRecent, renderDeepList: renderDeepList,
+    openDeep: openDeep, closeDeep: closeDeep,
+    decorateEscalate: decorateEscalate, doEscalate: doEscalate, t12: t12
   };
 })();

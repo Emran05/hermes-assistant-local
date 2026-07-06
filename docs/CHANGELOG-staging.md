@@ -209,3 +209,14 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   modules. index.html B0: Mind→Settings label+gear + 4 base-section ids + 2 tags. Rollback = remove a tag.
   VERIFIED: both headless harnesses (agent 8/8, settings 91/91), all endpoints 200, JS clean. Needs ⌘R
   visual QA. Console/Desktop fold into the Agent rails in B5 (built as stubs); tabs kept until parity.
+- `<ui-batch2>` Header/Agent-page follow-ups (user feedback). aux_agent.js →1279L: (1) B5 rails
+  fold-in — Record rail reuses the flight recorder (relocates #recorder-card), Screen rail reuses
+  aux_desktop's renderDesktop (watch-only) w/ red LIVE dot + one-shot auto-switch on computer_use;
+  (2) stale Console/Desktop/Settings TABS hidden (CSS, DOM kept, setView aliases + auto-open rail) →
+  top bar now Hub·Agent; (3) full CLAUDE DIALOGUE viewer (#ag-deep) from /api/claude/recent — expand
+  the exact task asked + Claude's full response, model/duration/12h, display-only; (4) ESCALATE TO
+  CLAUDE button on every bot reply → POST /api/claude/think depth:deep → appended "Claude · deep"
+  answer card (graceful on refusal). aux_prefs.js (430L): hides #themebtn, adds a prefs gear →
+  macOS-style dropdown (Appearance Light/Dark/Auto, reduce-motion (real CSS), Pause/Resume,
+  System Settings…→setView('mind'), Proactive deep-link, About+live model) — only functional controls.
+  Load order settings_shell→prefs→agent. VERIFIED: agent 13/13 + prefs 36/36 harness, all endpoints 200.
