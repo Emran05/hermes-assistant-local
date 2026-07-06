@@ -54,6 +54,12 @@ import subprocess
 # --------------------------------------------------------------------------
 CB_PROMPT_PATH = os.path.join(HOME, ".hermes", "claude-bridge-prompt.md")
 CB_LOG_PATH    = os.path.join(HOME, ".hermes", "dashboard", "claude-bridge-log.jsonl")
+# Recent FULL dialogues (task + response) so the UI can show what the agent asked
+# Claude and what it answered. Local only, 0600, ring-capped — the user's own data.
+CB_RECENT_PATH = os.path.join(HOME, ".hermes", "dashboard", "claude-recent.json")
+CB_RECENT_MAX  = 30
+CB_TASK_CAP    = 6000
+CB_RESP_CAP    = 12000
 
 # depth -> (model alias, effort level). sonnet/medium is the routine hard call;
 # opus/xhigh is the genuinely-hard call, reserved (expensive on the plan).
@@ -230,6 +236,37 @@ def _cb_log(entry):
         print("[aux_claudebridge] log write failed: %s" % e, file=sys.stderr)
 
 
+def _cb_recent_add(entry):
+    """Prepend one full dialogue to the ring store (0600). Never fails a call."""
+    try:
+        os.makedirs(os.path.dirname(CB_RECENT_PATH), mode=0o700, exist_ok=True)
+        try:
+            with open(CB_RECENT_PATH, encoding="utf-8") as f:
+                items = json.load(f)
+            if not isinstance(items, list):
+                items = []
+        except Exception:
+            items = []
+        items.insert(0, entry)
+        items = items[:CB_RECENT_MAX]
+        tmp = CB_RECENT_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(items, f, ensure_ascii=False)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, CB_RECENT_PATH)
+    except Exception as e:                                # pragma: no cover
+        print("[aux_claudebridge] recent write failed: %s" % e, file=sys.stderr)
+
+
+def _cb_recent(n=20):
+    try:
+        with open(CB_RECENT_PATH, encoding="utf-8") as f:
+            items = json.load(f)
+        return items[:n] if isinstance(items, list) else []
+    except Exception:
+        return []
+
+
 def _cb_norm_depth(depth):
     d = str(depth or "quick").strip().lower()
     if d in ("deep", "opus", "high", "xhigh", "max", "hard", "heavy"):
@@ -325,11 +362,20 @@ def claude_think(task, user_context="", depth="quick"):
             shutil.rmtree(scratch, ignore_errors=True)
 
     ms = _ms()
-    logent = {"ts": time.time(), "depth": depth, "model": model,
+    now = time.time()
+    logent = {"ts": now, "depth": depth, "model": model,
               "task_summary": summary, "ms": ms, "ok": ok}
     if not ok:
         logent["error"] = err[:200]
     _cb_log(logent)
+    # full local dialogue for the "show me what Claude did" UI (0600, ring)
+    _cb_recent_add({
+        "ts": now, "depth": depth, "model": model, "ms": ms, "ok": ok,
+        "task": (task or "")[:CB_TASK_CAP],
+        "context": (user_context or "")[:2000],
+        "response": (text or "")[:CB_RESP_CAP],
+        "error": (err[:300] if not ok else ""),
+    })
 
     out = {"ok": ok, "text": text, "model": model, "depth": depth,
            "ms": ms, "tokens": None}
@@ -425,5 +471,15 @@ def _cb_bridge_handler(ctx):
 # --------------------------------------------------------------------------
 # route registration
 # --------------------------------------------------------------------------
+def _cb_recent_handler(ctx):
+    try:
+        n = int(ctx.q1("n", "20") or "20")
+    except (TypeError, ValueError):
+        n = 20
+    n = max(1, min(30, n))
+    return {"ok": True, "calls": _cb_recent(n)}
+
+
 register_post("/api/claude/think", _cb_think_handler)
 register_get("/api/claude/bridge", _cb_bridge_handler)
+register_get("/api/claude/recent", _cb_recent_handler)
