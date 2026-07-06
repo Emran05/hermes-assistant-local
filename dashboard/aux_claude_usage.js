@@ -115,7 +115,8 @@
         '<span class="w-sub" style="font-size:11px">tok this 5h</span>' +
         '<span class="num" style="margin-left:auto;font-weight:640;font-size:12.5px">' + money(w.cost) + "</span></div>";
       h += '<div class="w-sub" style="font-size:11px;display:flex;align-items:center;gap:6px;margin-bottom:8px">' +
-        (w.active ? '<span class="livedot"></span>' : "") + E(resetLine) + "</div>";
+        (w.active ? '<span class="livedot"></span>' : "") + E(resetLine) +
+        (w.cache ? '<span style="margin-left:auto;opacity:.7" title="Cached context re-served each message — not new work, mostly free">+' + KF(w.cache) + " cache</span>" : "") + "</div>";
 
       if (capPct != null) {
         var cc = capPct >= 90 ? "var(--bad)" : capPct >= 70 ? "var(--warn)" : accent;

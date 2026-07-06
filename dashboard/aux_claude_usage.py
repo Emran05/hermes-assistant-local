@@ -200,14 +200,19 @@ def _cu_agg():
 def _cu_add(a, e):
     _ts, _fam, model, inp, out, cr, cc = e
     a["in"] += inp; a["out"] += out; a["cr"] += cr; a["cc"] += cc
-    a["total"] += inp + out + cr + cc
+    # "total" is REAL work = input + output. Cache-READ tokens (the same cached
+    # prompt prefix re-served on every message) are NOT counted here — including
+    # them made the headline 10-100x too high (a session's context is re-read
+    # every turn). Cache read/write are surfaced separately as `cache`.
+    a["total"] += inp + out
     a["cost"] += _cu_cost(model, inp, out, cr, cc)
     a["msgs"] += 1
 
 
 def _cu_pack(a):
     return {"in": a["in"], "out": a["out"], "cr": a["cr"], "cc": a["cc"],
-            "total": a["total"], "cost": round(a["cost"], 4), "msgs": a["msgs"]}
+            "cache": a["cr"] + a["cc"], "total": a["total"],
+            "cost": round(a["cost"], 4), "msgs": a["msgs"]}
 
 
 def _cu_proj_name(name, cwd):
@@ -296,9 +301,10 @@ def _cu_build():
     # --- per-project ---
     projs = []
     for name, pa in proj_tok.items():
-        total = pa["in"] + pa["out"] + pa["cr"] + pa["cc"]
+        total = pa["in"] + pa["out"]          # real work (cache-read excluded)
         projs.append({"name": _cu_proj_name(name, proj_cwd.get(name)),
                       "path": proj_cwd.get(name), "total": total,
+                      "cache": pa["cr"] + pa["cc"],
                       "cost": round(pa["cost"], 4), "msgs": pa["msgs"]})
     projs.sort(key=lambda p: -p["total"])
 
