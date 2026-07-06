@@ -424,38 +424,21 @@ def _fy_extract_json(text):
         return []
 
 
-def _fy_model_pass(cands, prof):
-    """ONE chat completion over <=FY_TOPK candidates. Returns validated moves
-    or [] (best-effort — caller falls back to the lexical tier)."""
-    pool = {_fy_norm_url(c["item"].get("url")): c for c in cands}
-    listing = "\n".join(
+def _fy_listing(cands):
+    return "\n".join(
         "- %s | %s | %s | %s" % (
             _fy_clean(c["item"].get("title"))[:160],
             _fy_clean(c["item"].get("source"))[:40],
             _fy_clean(c["item"].get("url")),
             _fy_clean(c["item"].get("summary"))[:150])
         for c in cands)
-    try:
-        payload = json.dumps({
-            "model": _fy_active_model(),
-            "messages": [{"role": "system", "content": _FY_REASON_SYS},
-                         {"role": "user", "content":
-                          "USER PROFILE:\n" + _fy_profile_text(prof) +
-                          "\n\nCANDIDATE ITEMS (title | source | url | summary):\n"
-                          + listing}],
-            "temperature": 0.3, "max_tokens": 1600, "stream": False,
-        }).encode("utf-8")
-        req = urllib.request.Request(_fy_chat_url(), data=payload,
-                                     headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=120) as r:
-            resp = json.loads(r.read().decode("utf-8", "replace"))
-        text = (((resp.get("choices") or [{}])[0].get("message") or {})
-                .get("content") or "").strip()
-    except Exception as e:
-        _fy_log("model pass failed: %r" % e)
-        return []
+
+
+def _fy_moves_from_text(text, pool):
+    """Parse a reasoning response (Claude or local) into validated moves —
+    rejects invented/duplicate URLs against the candidate pool."""
     moves, seen = [], set()
-    for o in _fy_extract_json(text):
+    for o in _fy_extract_json(text or ""):
         if not isinstance(o, dict):
             continue
         key = _fy_norm_url(o.get("url"))
@@ -482,6 +465,62 @@ def _fy_model_pass(cands, prof):
         })
     moves.sort(key=lambda m: -(m["score"] or 0))
     return moves[:FY_MAX_MOVES]
+
+
+def _fy_claude_moves(cands, prof):
+    """Two-brain: prefer the Claude Bridge (the user's Max plan) for the why-you
+    reasoning — sharper than the local model, and it doesn't spend the local
+    memory ceiling. Returns validated moves, or [] to fall through to the local
+    model / lexical tiers."""
+    think = globals().get("claude_think")
+    if not callable(think):
+        return []
+    pool = {_fy_norm_url(c["item"].get("url")): c for c in cands}
+    task = (
+        "From the CANDIDATE ITEMS below, select the ones that genuinely matter to "
+        "THIS user given their goals, projects, interests and people. Return ONLY a "
+        "JSON array (no prose, no code fence). Each element: "
+        '{"title","url","why_you","matched_goal","matched_person",'
+        '"suggested_action","score"}. why_you ties the item to a specific goal or '
+        "person in one line; suggested_action is one concrete do/meet/go; score is "
+        "0..1 relevance. Copy urls verbatim from the list; omit weak matches.\n\n"
+        "CANDIDATE ITEMS (title | source | url | summary):\n" + _fy_listing(cands))
+    try:
+        res = think(task, user_context=_fy_profile_text(prof), depth="quick")
+    except Exception as e:
+        _fy_log("bridge think failed: %r" % e)
+        return []
+    if not (isinstance(res, dict) and res.get("ok") and res.get("text")):
+        if isinstance(res, dict) and res.get("refused"):
+            _fy_log("bridge refused (%s) — falling back to local" % res.get("reason"))
+        return []
+    return _fy_moves_from_text(res["text"], pool)
+
+
+def _fy_model_pass(cands, prof):
+    """ONE local chat completion over <=FY_TOPK candidates (fallback when the
+    Claude Bridge is unavailable). Returns validated moves or []."""
+    pool = {_fy_norm_url(c["item"].get("url")): c for c in cands}
+    try:
+        payload = json.dumps({
+            "model": _fy_active_model(),
+            "messages": [{"role": "system", "content": _FY_REASON_SYS},
+                         {"role": "user", "content":
+                          "USER PROFILE:\n" + _fy_profile_text(prof) +
+                          "\n\nCANDIDATE ITEMS (title | source | url | summary):\n"
+                          + _fy_listing(cands)}],
+            "temperature": 0.3, "max_tokens": 1600, "stream": False,
+        }).encode("utf-8")
+        req = urllib.request.Request(_fy_chat_url(), data=payload,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            resp = json.loads(r.read().decode("utf-8", "replace"))
+        text = (((resp.get("choices") or [{}])[0].get("message") or {})
+                .get("content") or "").strip()
+    except Exception as e:
+        _fy_log("model pass failed: %r" % e)
+        return []
+    return _fy_moves_from_text(text, pool)
 
 
 def _fy_lexical_moves(cands, prof):
@@ -564,13 +603,24 @@ def _foryou_build(force=False):
             _fy_log("built (personalized, 0 candidates over threshold)")
             return store
 
-        # TIER 2 — admission-gated, ONE batched call, <=FY_TOPK items
+        # TIER 2 — reasoning. Prefer the Claude Bridge (the user's Max plan:
+        # sharper why-you reasoning, and it doesn't spend the local memory
+        # ceiling); then the local model (admission-gated); then lexical.
+        cmoves = _fy_claude_moves(cands, prof)
+        if cmoves:
+            store = dict(base, personalized=True, reasoned=True, engine="claude",
+                         moves=cmoves)
+            _fy_write_store(store)
+            _fy_log("built (personalized, CLAUDE bridge: %d cands -> %d moves)"
+                    % (len(cands), len(cmoves)))
+            return store
         if _fy_model_ok():
             moves = _fy_model_pass(cands, prof)
             if moves:
-                store = dict(base, personalized=True, reasoned=True, moves=moves)
+                store = dict(base, personalized=True, reasoned=True, engine="local",
+                             moves=moves)
                 _fy_write_store(store)
-                _fy_log("built (personalized, model pass: %d candidates -> %d moves)"
+                _fy_log("built (personalized, local model: %d candidates -> %d moves)"
                         % (len(cands), len(moves)))
                 return store
             # model was reachable but returned nothing usable -> lexical tier
