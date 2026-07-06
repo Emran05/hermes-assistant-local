@@ -984,6 +984,13 @@ def access_preamble():
         "[context] Never invent facts, events, or files you did not actually "
         "read or verify. If you don't know, say so plainly."
     )
+    lines.append(
+        "[context] Do NOT repeat a web_search (or any tool call) with an "
+        "identical or near-identical query. If two searches don't answer the "
+        "question, stop and conclude honestly — say what you found and that you "
+        "couldn't confirm the rest (it may not exist or be too new). Never loop "
+        "on the same search; a handful of distinct searches is the ceiling."
+    )
     tasks = [t for t in get_tasks()["tasks"] if not t.get("done")][:10]
     if tasks:
         lines.append("[context] The user's open tasks (from their dashboard task "
