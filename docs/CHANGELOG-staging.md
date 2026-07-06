@@ -174,3 +174,9 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   design specs (Mac control / sandboxed self-upgrade / Agent Desktop) + adversarial SECURITY review
   (dev-agent needs P0 fixes before build — deny-read secrets, egress-pin, orchestrator-commits,
   out-of-band merge confirm; Mac control + panel building now).
+- `<hands-mac>` Mac control skill + Agent Desktop panel — apple/mac-control skill (open apps, media,
+  screenshot→Telegram PREVIEW-BY-DEFAULT/opt-in send MC_CONFIRM_SEND, target hard-locked to --to telegram,
+  no chat_id) + aux_desktop.py (/api/desktop/shots|shot|timeline|capture; screenshots 0600, loopback-only
+  data-URIs, on-demand only) + aux_desktop.js (#view-desktop tab: live shots + computer_use timeline +
+  Capture-now + task box). §4.9 enforced (panel exposes no self-approvable action). NOTE: build agent
+  accidentally sent ONE real screenshot to the user's own Telegram during testing → script now opt-in-send.
