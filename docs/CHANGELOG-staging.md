@@ -191,3 +191,9 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   onboarding). VERIFIED: endpoints live, foryou widget in hub, empty-state fallback + personalized
   reasoning proven (seeded goal → 0.95-scored moves w/ real why-you). Next: user onboarding lights it up.
   + claude-bridge-system-prompt.md (researched deep-reasoning prompt for the two-brain Claude Bridge).
+- `<loop-breaker>` HARD loop-breaker guard (hermes plugin ~/.hermes/plugins/loop-breaker/, enabled via
+  plugins.enabled). pre_tool_call hook blocks the 3rd+ IDENTICAL tool call (name+args) within a turn
+  → {"action":"block",...} nudging the agent to vary or conclude. Fixes the 54x-identical-web_search
+  loop at 2 wasted calls instead of 50. Durable (plugin, not an upstream edit). Unit-verified: allows 2,
+  blocks 3rd+, resets per turn / new query. Snapshotted to skills-snapshot/_plugins/.
+  + UI-RESTRUCTURE-PLAN.md (Hub·Agent·Settings design + agent-page show-in taxonomy + settings IA).
