@@ -1,0 +1,126 @@
+# ~/.hermes/config.yaml
+# Personal assistant agent — M5 Mac, headless, always-on.
+# Reach: Telegram (locked to your user ID). Autonomy: draft-and-approve.
+# Reliable integrations: Google Calendar, Gmail, Discord.
+# Secrets live in ~/.hermes/.env (see env.example), NOT in this file.
+
+# ---------------------------------------------------------------------------
+# MODEL / PROVIDER
+# The local MLX server is exposed as an OpenAI-compatible endpoint.
+# Start it with mlx-server.sh (see that file). Hermes just points at it.
+# ---------------------------------------------------------------------------
+model:
+  provider: custom
+  name: "Qwen3-30B-A3B-Instruct-2507-4bit"   # label; should match the served model name
+  base_url: "http://127.0.0.1:8080/v1"
+  api_key_env: "LOCAL_MODEL_KEY"    # any non-empty string; local server ignores it
+  context_window: 65536             # Hermes requires >= 64k; keep KV cache sane
+
+# Optional cloud fallback if the local box is down. Off by default — fully local.
+# fallback:
+#   provider: openrouter
+#   model: "anthropic/claude-sonnet-4-6"
+
+# ---------------------------------------------------------------------------
+# AUXILIARY MODELS (side tasks: summarization, dangerous-command classify, etc.)
+# Point these at the SAME local model so nothing leaves the machine.
+# ---------------------------------------------------------------------------
+auxiliary:
+  compression:
+    provider: "main"
+    model: ""            # empty = reuse main chat model
+  command_approval:
+    provider: "main"
+    model: ""            # local classifier for the approve/deny gate
+
+# ---------------------------------------------------------------------------
+# AGENT BEHAVIOR — the draft-and-approve safety posture
+# ---------------------------------------------------------------------------
+agent:
+  timezone: "America/New_York"      # adjust to yours; drives "plan my day"
+  max_turns: 60
+  human_delay: false
+  # Require explicit approval before ANY command/tool that writes or sends.
+  approval:
+    mode: "always"                  # every write/send action pauses for /approve
+    # Read-only tools (list calendar, read email, read Discord) run freely;
+    # only state-changing / outbound actions hit the gate.
+    auto_approve_readonly: true
+
+# ---------------------------------------------------------------------------
+# DISPLAY — what you see in Telegram
+# ---------------------------------------------------------------------------
+display:
+  tool_progress: "new"              # brief one-liners as tools fire; not full logs
+  tool_progress_command: true       # lets you /verbose from Telegram
+  runtime_footer:
+    enabled: false
+  platforms:
+    telegram:
+      tool_progress: "new"
+
+# ---------------------------------------------------------------------------
+# CONTEXT COMPRESSION — keeps long always-on sessions from blowing context
+# ---------------------------------------------------------------------------
+compression:
+  enabled: true
+  threshold: 0.70
+  target_ratio: 0.25
+  protect_last_n: 20
+  protect_first_n: 3
+
+# ---------------------------------------------------------------------------
+# MESSAGING GATEWAY — Telegram only, locked to you.
+# Token + allowed users come from .env (TELEGRAM_BOT_TOKEN / TELEGRAM_ALLOWED_USERS).
+# ---------------------------------------------------------------------------
+platforms:
+  telegram:
+    enabled: true
+    # allowlist is read from TELEGRAM_ALLOWED_USERS in .env — keep it to YOUR id
+    extra:
+      command_menu:
+        max_commands: 60
+        priority_mode: prepend
+        priority:
+          - approve
+          - deny
+          - verbose
+
+# ---------------------------------------------------------------------------
+# MCP SERVERS — the integrations.
+# Calendar + Gmail via Google MCP; Discord via the gateway (not MCP).
+# Notion stub included but commented until you want it.
+# Tokens/paths come from .env — never inline secrets here.
+# ---------------------------------------------------------------------------
+mcp_servers:
+  # --- Google Calendar + Gmail -------------------------------------------
+  # Uses a Google MCP server; OAuth creds path set in .env.
+  google:
+    command: npx
+    args: ["-y", "@google/mcp-workspace"]   # verify exact package at install time
+    env:
+      GOOGLE_OAUTH_CREDENTIALS: "${GOOGLE_OAUTH_CREDENTIALS}"
+      GOOGLE_MCP_SCOPES: "calendar.readonly,gmail.readonly,gmail.compose"
+      # NOTE scopes: read calendar, read gmail, DRAFT gmail (compose) only.
+      # No gmail.send scope on purpose — drafts only, you send after approve.
+
+  # --- Notion (phase 2 — uncomment when ready) ---------------------------
+  # notion:
+  #   command: npx
+  #   args: ["-y", "@notionhq/notion-mcp-server"]
+  #   env:
+  #     NOTION_TOKEN: "${NOTION_TOKEN}"
+
+# ---------------------------------------------------------------------------
+# CRON — proactive "plan my day" nudge. Draft only; you approve sends.
+# ---------------------------------------------------------------------------
+cron:
+  jobs:
+    - name: "morning-agenda"
+      schedule: "0 7 * * *"          # 7:00am daily
+      platform: telegram
+      prompt: >
+        Read today's Google Calendar events and my unread Gmail from the last
+        24h. Draft a concise morning agenda: schedule, top 3 priorities, and any
+        emails that look like they need a reply. Present it to me — do NOT send
+        anything or modify anything without approval.
