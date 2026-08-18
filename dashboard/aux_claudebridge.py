@@ -81,54 +81,65 @@ CB_LOG_TAIL    = 4000         # bytes of the log to read back for /bridge status
 # BEFORE any claude call. Coarse on purpose: the system prompt is the primary
 # layer, this is the cheap net that fails closed toward the human-approved path.
 # --------------------------------------------------------------------------
-# Harmful / exfiltration / credentials / destructive / approval-bypass. Scanned
-# over TASK + USER-CONTEXT (context is scanned too because injected instructions
-# in scraped world-text are part of the threat model).
-_CB_HARM_RE = re.compile(
-    r"(\.env\b"
-    r"|\bexfiltrat\w*"
-    r"|\bleak(?:ing|ed|s)?\b"
-    r"|\bcredential"
-    r"|\bpassword"
-    r"|\bapi[ _-]?key"
-    r"|\bprivate[ _-]?key"
-    r"|\bsecret[ _-]?(?:key|token|value|file|s)"
-    r"|\bsecrets\b"
-    r"|\baccess[ _-]?token"
-    r"|\boauth[ _-]?token"
-    r"|\bssh[ _-]?key"
-    r"|\bid_rsa\b"
-    r"|\.ssh\b"
-    r"|\.aws/credentials"
-    r"|\bkeychain\b"
-    r"|\brm\s+-rf\b"
-    r"|\bwipe\b"
-    r"|\bdestroy\b"
-    r"|\bformat\s+(?:the\s+)?(?:disk|drive|volume)"
-    r"|\bdelete\s+(?:all|everything)"
-    r"|\bbypass\w*\s+(?:the\s+)?approval"
-    r"|\bdisable\w*\s+(?:the\s+)?approval"
-    r")", re.I)
+# Design (rewritten 2026-08-18 after a 5/18 false-positive rate on realistic
+# escalations — "memory leak", "password field", ".env approach", "wipe the
+# cache", "should I create a component" were all refused): the gate matches
+# INTENT, not vocabulary. The tool-lockout is the load-bearing control (Claude
+# can't read/run/send anything), so this net only has to catch (a) an ask to
+# obtain/move secrets, (b) an ask for a destructive/approval-bypassing action,
+# (c) an imperative "produce the code" request. Mentioning a password, a leak,
+# a .env file or a component in a QUESTION is a reasoning topic, not a threat.
 
-# Substantial code generation. Scanned over TASK only (this is about what the
-# caller is asking Claude to PRODUCE). Three catchers: an unambiguous "full
-# implementation" / "N endpoints" phrase; a code filename next to a produce-verb;
-# or a produce-verb within a short window of a code artefact.
+# --- (a) secrets: an ACTION verb close to a secret NOUN --------------------
+_CB_SECRET_NOUN = (
+    r"(?:\.env\b|\benv\s+file|\bcredentials?\b|\bpasswords?\b|\bapi[ _-]?keys?\b"
+    r"|\bprivate[ _-]?keys?\b|\bsecret[ _-]?(?:key|token|value|file)s?\b|\bsecrets\b"
+    r"|\b(?:access|oauth|auth|bearer|session)[ _-]?tokens?\b|\bssh[ _-]?keys?\b"
+    r"|\bid_rsa\b|~?/?\.ssh\b|\.aws/credentials|\bkeychain\b|\bcookies?\b)")
+_CB_SECRET_VERB = (
+    r"\b(?:read|open|cat|dump|print|show|reveal|display|list|extract|grab|fetch|pull"
+    r"|copy|steal|harvest|collect|exfiltrat\w*|leak|send|upload|post|email|mail|paste"
+    r"|share|forward|transmit|export|include|attach|retrieve|get|obtain|find|locate"
+    r"|expose|log)\b")
+# verb ... noun (within ~50 chars) OR noun ... verb (passive: "credentials to send")
+_CB_HARM_SECRETS = re.compile(
+    _CB_SECRET_VERB + r"[^.?!\n]{0,50}?" + _CB_SECRET_NOUN
+    + r"|" + _CB_SECRET_NOUN + r"[^.?!\n]{0,30}?\b(?:to|and)\s+(?:send|upload|post|email|paste|share|exfiltrat\w*|leak)\b",
+    re.I)
+# --- (b) destructive / approval bypass ---------------------------------------
+_CB_HARM_DESTRUCT = re.compile(
+    r"\brm\s+-[a-z]*r[a-z]*f?\b|\brm\s+-[a-z]*f[a-z]*r\b"
+    r"|\bformat\s+(?:the\s+|my\s+)?(?:disk|drive|volume|ssd|mac)\b"
+    r"|\b(?:wipe|erase|destroy|nuke|shred|delete)\s+(?:the\s+|my\s+|all\s+(?:of\s+)?(?:the\s+|my\s+)?)?"
+    r"(?:disk|drive|mac|machine|laptop|system|home\s+(?:dir|directory|folder)|data|files|everything|backups?|repo|repository|database|db)\b"
+    r"|\bdelete\s+(?:all|everything)\b",
+    re.I)
+# approval bypass — refused even when phrased as a question ("how do I bypass…")
+_CB_HARM_BYPASS = re.compile(
+    r"\b(?:bypass|disable|skip|circumvent|turn\s+off|remove)\w*\s+(?:the\s+)?(?:approval|permission|safety|guard|gate|confirmation)s?\b"
+    r"|\bwithout\s+(?:asking|approval|permission|confirmation)\b",
+    re.I)
+# --- (c) explicit "produce the code" ask ------------------------------------
+# Imperative produce-verb + code artefact IN THE SAME SENTENCE, and that
+# sentence is not a question ("should I create a component?" is design).
 _CB_CODE_STRONG = re.compile(
     r"\bfull\s+implementation\b"
     r"|\b(?:entire|complete|whole)\s+(?:implementation|program|module|file|feature|codebase)\b"
-    r"|\bfrom\s+scratch\b"
-    r"|\bwrite\s+(?:the\s+)?(?:full|entire|complete)?\s*code\b"
-    r"|\b\d+\s+endpoints?\b", re.I)
+    r"|\bwrite\s+(?:me\s+|us\s+)?(?:the\s+|a\s+|an\s+)?(?:full|entire|complete|working|production)?\s*"
+    r"(?:code|implementation|program|script|module|class|function|component|widget|endpoint|parser|handler|plugin|patch|diff|pr|pull\s+request)\b"
+    r"|\b(?:implement|build|create|generate|scaffold|code\s+up|port|rewrite|refactor)\s+(?:me\s+|us\s+)?(?:the\s+|a\s+|an\s+|this\s+|these\s+|that\s+)?"
+    r"(?:\w+\s+){0,3}?(?:code|implementation|program|script|module|class|function|component|widget|endpoint|endpoints|parser|handler|plugin|package|library|codebase|file|files|patch|diff|pr|pull\s+request|api|cli|daemon|service|aux_\w+)\b"
+    r"|\b\d+\s+endpoints?\b",
+    re.I)
 _CB_CODE_FILE = re.compile(
     r"\b[\w./-]+\.(?:py|js|ts|tsx|jsx|go|rs|rb|java|kt|c|cc|cpp|h|hpp|cs|php|swift|sh|sql|vue|svelte)\b",
     re.I)
-_CB_CODE_VERB = re.compile(
-    r"\b(?:write|implement|implementing|build|building|create|creating|generate|generating"
-    r"|code|refactor|develop|developing|produce|program|scaffold|rewrite|port)\b", re.I)
-_CB_CODE_OBJ = re.compile(
-    r"\b(?:module|subroutine|function|method|class|endpoint|endpoints|implementation"
-    r"|codebase|library|package|component|widget|aux_\w+|parser|handler|daemon)\b", re.I)
+_CB_CODE_FILE_VERB = re.compile(
+    r"\b(?:write|implement|create|generate|scaffold|rewrite|refactor|port|patch|edit|modify|fix)\b", re.I)
+_CB_QUESTION_LEAD = re.compile(
+    r"^\s*(?:should|would|could|can|is|are|do|does|did|how|why|what|which|when|where|who|whether|if|compare|weigh|evaluate|assess|explain|analy[sz]e|think|help me (?:decide|think|weigh|choose|understand)|is it|isn't|any thoughts|thoughts on|opinion|pros?\b|cons?\b|trade-?offs?)\b",
+    re.I)
+_CB_SENT_SPLIT = re.compile(r"(?<=[.?!])\s+|\n+")
 
 CB_MSG_CODEGEN = (
     "Refused — this is a substantial code-generation request, and the Claude Bridge is a "
@@ -146,24 +157,43 @@ CB_MSG_HARM = (
     "reasoning question and I'll help with that.")
 
 
+def _cb_is_question(sentence):
+    st = sentence.strip()
+    return st.endswith("?") or bool(_CB_QUESTION_LEAD.match(st))
+
+
 def _cb_is_codegen(task):
-    t = task or ""
-    if _CB_CODE_STRONG.search(t):
+    """True only for an imperative 'produce the code' ask. Questions about
+    code (design, tradeoffs, 'should I create X', 'why does the parser…') pass."""
+    for sent in _CB_SENT_SPLIT.split(task or ""):
+        if not sent.strip() or _cb_is_question(sent):
+            continue
+        if _CB_CODE_STRONG.search(sent):
+            return True
+        if _CB_CODE_FILE.search(sent) and _CB_CODE_FILE_VERB.search(sent):
+            return True
+    return False
+
+
+def _cb_is_harmful(text):
+    text = text or ""
+    if _CB_HARM_SECRETS.search(text) or _CB_HARM_BYPASS.search(text):
         return True
-    if _CB_CODE_FILE.search(t) and _CB_CODE_VERB.search(t):
-        return True
-    verbs = [m.start() for m in _CB_CODE_VERB.finditer(t)]
-    if verbs:
-        for om in _CB_CODE_OBJ.finditer(t):
-            if any(abs(om.start() - v) <= 60 for v in verbs):
-                return True
+    # destructive commands: an imperative ("rm -rf ~/x", "wipe the disk") is
+    # refused; a QUESTION that merely mentions one ("what does rm -rf teach
+    # about approval gates?", "should I wipe the disk?") is a reasoning topic.
+    for sent in _CB_SENT_SPLIT.split(text):
+        if sent.strip() and _CB_HARM_DESTRUCT.search(sent) and not _cb_is_question(sent):
+            return True
     return False
 
 
 def _cb_gate(task, context=""):
-    """Return (reason, message) to refuse, or None to allow."""
-    scan = (task or "") + "\n" + (context or "")
-    if _CB_HARM_RE.search(scan):
+    """Return (reason, message) to refuse, or None to allow.
+    Task AND context are scanned for harmful INTENT (injected instructions in
+    scraped world-text are part of the threat model); code-gen is judged on the
+    task alone."""
+    if _cb_is_harmful(task) or _cb_is_harmful(context):
         return ("harmful", CB_MSG_HARM)
     if _cb_is_codegen(task or ""):
         return ("codegen", CB_MSG_CODEGEN)

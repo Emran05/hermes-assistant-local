@@ -325,6 +325,7 @@
       ".deepcard .dk-lab{font-size:11.5px;font-weight:640;color:var(--claude)}",
       ".deepcard .dk-meta{margin-left:auto;font-size:10.5px;color:var(--faint);font-variant-numeric:tabular-nums}",
       ".deepcard .dk-body{padding:11px 13px;font-size:13.5px;line-height:1.6;color:var(--ink)}",
+      ".esc-btn.suggest{border-color:color-mix(in srgb,var(--claude) 55%,transparent);color:var(--claude);box-shadow:0 0 0 3px color-mix(in srgb,var(--claude) 14%,transparent)}",
       ".deepcard.err .dk-lab{color:var(--bad)}",
       ".deepcard.err .dk-head .ic{color:var(--bad)}",
 
@@ -1150,12 +1151,14 @@
     if (!target) return;
     if (target.querySelector(".dots")) return;               // still the thinking placeholder
     target.setAttribute("data-esc", "1");
-    // find the user question that produced this reply
+    if (target.querySelector(".deepcard")) return;          // auto-route already answered
+    // find the user question that produced this reply (FULL text — the first
+    // line alone lost multi-line questions)
     var q = "";
     var prev = target;
     while (prev) {
       prev = prev.previousSibling;
-      if (prev && prev.classList && prev.classList.contains("user")) { q = (prev.textContent || "").split("\n")[0]; break; }
+      if (prev && prev.classList && prev.classList.contains("user")) { q = (prev.textContent || "").trim().slice(0, 4000); break; }
     }
     var row = document.createElement("div");
     row.className = "esc-row";
@@ -1167,6 +1170,67 @@
     row.appendChild(btn);
     target.appendChild(row);
   }
+  // ---- Claude auto-route (aux_autoroute) — render deep {state,...} on a bubble
+  function deepIcon() { return svg("bridge"); }
+  function ensureDeepCard(bubble) {
+    var card = bubble.querySelector(".deepcard");
+    if (card) return card;
+    card = document.createElement("div");
+    card.className = "deepcard";
+    card.innerHTML = '<div class="dk-head">' + deepIcon() + '<span class="dk-lab">Claude</span>'
+      + '<span class="dk-meta"></span></div><div class="dk-body"><span class="term-cur"></span></div>';
+    bubble.appendChild(card);
+    return card;
+  }
+  function fillDeepCard(card, d) {
+    var meta = card.querySelector(".dk-meta"), body = card.querySelector(".dk-body"), lab = card.querySelector(".dk-lab");
+    if (d.reason) card.title = d.reason;
+    if (d.state === "thinking") {
+      lab.textContent = "Claude · " + (d.depth === "deep" ? "deep" : "quick") + " · auto";
+      meta.textContent = "thinking…";
+      return;
+    }
+    if (d.ok && d.text) {
+      var secs = d.ms ? (d.ms / 1000).toFixed(d.ms < 10000 ? 1 : 0) + "s" : "";
+      lab.textContent = "Claude · " + (d.depth === "deep" ? "deep" : "quick") + (d.auto ? " · auto" : "");
+      meta.textContent = [d.model || "", secs, t12(d.ts || Date.now() / 1000)].filter(Boolean).join(" · ");
+      body.innerHTML = (typeof window.renderMd === "function") ? window.renderMd(d.text) : esc(d.text);
+      card.classList.remove("err");
+    } else {
+      card.classList.add("err");
+      lab.textContent = d.refused ? "Claude declined" : "Claude unavailable";
+      meta.textContent = t12(Date.now() / 1000);
+      body.textContent = d.error || "Claude could not answer this.";
+    }
+  }
+  var _deepDone = {};                                  // jid -> rendered final state
+  window.hermesDeep = function (jid, bubble, d) {
+    if (!bubble || !d) return;
+    if (d.state === "suggest") {                       // just flag the escalate button
+      bubble.setAttribute("data-deep-suggest", d.reason || "");
+      var b = bubble.querySelector(".esc-btn");
+      if (b) { b.classList.add("suggest"); b.title = "Looks like a hard question — " + (d.reason || ""); }
+      return;
+    }
+    var card = ensureDeepCard(bubble);
+    bubble.setAttribute("data-esc", "1");
+    var row = bubble.querySelector(".esc-row"); if (row) row.remove();
+    if (d.state === "thinking") {
+      fillDeepCard(card, d);
+      setSigil("deep"); setStateLine("Thinking with Claude", "auto-routed — " + (d.reason || "hard question"));
+      return;
+    }
+    if (_deepDone[jid]) return;
+    _deepDone[jid] = true;
+    fillDeepCard(card, d);
+    setSigil("idle"); setStateLine("Watching", idleDetail());
+    if (d.ok) { try { loadClaudeRecent(); } catch (e) {} }
+    else if (!d.refused) {                             // unavailable → offer manual retry
+      bubble.removeAttribute("data-esc"); try { decorateEscalate(); } catch (e) {}
+    }
+    var m = $("msgs"); if (m) m.scrollTop = m.scrollHeight;
+  };
+
   async function doEscalate(btn, bubble, question) {
     if (!question) { question = (bubble.textContent || "").slice(0, 400); }
     btn.disabled = true;

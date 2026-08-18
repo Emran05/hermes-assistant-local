@@ -315,6 +315,12 @@ def _wt_load():
                    "min_items": _clamp_int(md.get("min_items", 2), 1, 6, 2),
                    "mover_pct": _clamp_float(md.get("mover_pct", 1.5), 0.5, 10.0) or 1.5,
                    "channels": _valid_channels(md.get("channels"), ["telegram", "hub"])}
+    ev = d.get("evening") if isinstance(d.get("evening"), dict) else {}
+    d["evening"] = {"enabled": bool(ev.get("enabled", True)),
+                    "hour": _clamp_int(ev.get("hour", 18), 16, 23, 18),
+                    "minute": _clamp_int(ev.get("minute", 0), 0, 59, 0),
+                    "min_items": _clamp_int(ev.get("min_items", 1), 1, 6, 1),
+                    "channels": _valid_channels(ev.get("channels"), ["telegram", "hub"])}
     bk = d.get("breaking") if isinstance(d.get("breaking"), dict) else {}
     d["breaking"] = {"enabled": bool(bk.get("enabled", True)),
                      "override_quiet": bool(bk.get("override_quiet", True)),
@@ -338,6 +344,7 @@ def _wt_state_load():
     s["version"] = 1
     s.setdefault("last_brief_date", "")
     s.setdefault("last_midday_date", "")
+    s.setdefault("last_evening_date", "")
     day = s.get("day") if isinstance(s.get("day"), dict) else {}
     s["day"] = {"date": day.get("date", ""), "sent": int(day.get("sent", 0) or 0)}
     s.setdefault("fires", {})
@@ -1016,24 +1023,57 @@ def _brief_day():
 
 
 def _brief_world():
-    data = _rss_data()
-    secs = data.get("sections")
+    """World front page from the full-spread feeds — PAST 24H ONLY, tagged by
+    lean so the framing gap is visible. Dedupes near-identical headlines across
+    outlets; falls back to the rss widget only if the intel store is cold."""
+    now = time.time()
+    fresh = [it for it in (_intel_load().get("items") or [])
+             if it.get("topic") == "World" and it.get("ts")
+             and (now - it["ts"]) <= WORLD_MAX_H * 3600]
+    fresh.sort(key=lambda it: it.get("ts") or 0, reverse=True)
+    seen, per_src, picks = set(), {}, []
+
+    def _consider(it, src_cap):
+        src = it.get("source", "")
+        k = re.sub(r"\W+", "", str(it.get("title", "")).lower())[:55]
+        if not k or k in seen or per_src.get(src, 0) >= src_cap:
+            return
+        seen.add(k)
+        per_src[src] = per_src.get(src, 0) + 1
+        picks.append(it)
+
+    # pass 1: one per source first, so the spread (Fox/CNN/BBC/NPR/AJ/…) shows
+    for it in fresh:
+        if len(picks) >= 6:
+            break
+        _consider(it, 1)
+    # pass 2: backfill up to 6 with a 2nd from the most active sources
+    for it in fresh:
+        if len(picks) >= 6:
+            break
+        _consider(it, 2)
+    if picks:
+        lines = []
+        for it in picks:
+            src = it.get("source", "")
+            lean = _WORLD_LEAN.get(src)
+            tag = (" (%s · %s)" % (src, lean)) if lean else ((" (%s)" % src) if src else "")
+            lines.append("• %s%s" % (_md_link(it.get("title", ""), it.get("url")), tag))
+        return _sec(lines)
+    # cold-store fallback: the rss widget (no hard recency guarantee, but better
+    # than an empty section on first boot before the hourly gather has run).
+    secs = _rss_data().get("sections")
     if not isinstance(secs, list) or not secs:
-        return _sec(note="No fresh headlines right now.")
+        return _sec(note="No fresh headlines in the last 24h.")
     lines = []
-    want = ("Tech", "World", "Business", "Science")
-    order = [s for s in secs if s.get("name") in want] + \
-            [s for s in secs if s.get("name") not in want]
-    for sec in order:
-        items = sec.get("items") or []
-        if not items:
-            continue
-        lines.append(sec.get("name", "") + ":")
-        for it in items[:3]:
+    for sec in secs:
+        for it in (sec.get("items") or [])[:2]:
             src = it.get("source", "")
             lines.append("• %s%s" % (_md_link(it.get("title", ""), it.get("url")),
-                                          (" (" + src + ")") if src else ""))
-    return _sec(lines) if lines else _sec(note="No fresh headlines right now.")
+                                     (" (" + src + ")") if src else ""))
+        if len(lines) >= 5:
+            break
+    return _sec(lines) if lines else _sec(note="No fresh headlines in the last 24h.")
 
 
 def _brief_markets():
@@ -1133,15 +1173,6 @@ def _brief_lookahead():
         if later:
             lines.append("Later today:")
             lines.extend(later[:4])
-    mk = _markets_data()
-    wl = [q for q in (mk.get("watchlist") or []) if not q.get("error")
-          and q.get("pct") is not None]
-    if wl:
-        top = max(wl, key=lambda q: abs(float(q.get("pct") or 0)))
-        if abs(float(top.get("pct") or 0)) >= 1.0:
-            lines.append("Watch %s (%s) at the open." % (
-                _md_link(top.get("symbol"), _quote_url(top.get("symbol"))),
-                _fmt_pct(top.get("pct"))))
     if not lines:
         return _sec(note="Nothing flagged further out.")
     return _sec(lines)
@@ -1149,9 +1180,8 @@ def _brief_lookahead():
 
 _BRIEF_HEADERS = [("foryou", "For you — moves & people"),
                   ("day", "Your day"),
-                  ("world", "World & tech front page"),
+                  ("world", "World front page"),
                   ("ai", "AI & Labs"),
-                  ("markets", "Market movers"),
                   ("underground", "Underground signal"),
                   ("lookahead", "Look-ahead")]
 
@@ -1211,6 +1241,13 @@ def _brief_render_text(sections):
 
 # ---- synthesis pass — ONE tool-free chat completion, sanity-gated -----------
 def _model_chat_url():
+    """Background lane (:8081 small model) when it's up, else the primary."""
+    bl = globals().get("bg_lane")
+    if callable(bl):
+        try:
+            return bl()["chat_url"]
+        except Exception:
+            pass
     base = MODEL_URL
     if base.endswith("/v1/models"):
         return base[:-len("/models")] + "/chat/completions"
@@ -1219,6 +1256,12 @@ def _model_chat_url():
 
 
 def _active_model():
+    bl = globals().get("bg_lane")
+    if callable(bl):
+        try:
+            return bl()["model"]
+        except Exception:
+            pass
     try:
         with open(ACTIVE_MODEL_FILE) as f:
             m = f.read().strip()
@@ -1335,7 +1378,7 @@ def _brief_compose(run_synthesis):
 # intel (+ cached widgets) so the 8am compose does no fresh network.
 # ==========================================================================
 INTEL_FILE = os.path.join(DATA, "intel.json")
-INTEL_MAX_ITEMS = 120
+INTEL_MAX_ITEMS = 200            # room for AI feeds + the 8 world feeds together
 INTEL_INTERVAL = 3600            # gather at most once/hour
 INTEL_FRESH_H = 72               # retain 3 days so a poor-fetch pass can't thin
                                  # the store (labs don't post daily); the brief
@@ -1364,6 +1407,28 @@ _INTEL_FEEDS = [
     ("Social",  "r/artificial",     "https://www.reddit.com/r/artificial/top/.rss?t=day"),
 ]
 _UNDERGROUND_TOPICS = ("Voices", "Social")   # what enriches the underground section
+
+# --- World news — full spread, tagged by lean so the brief shows the framing gap.
+# AP + Reuters intentionally absent: both discontinued public RSS (verified dead
+# 2026-07 — AP's host doesn't resolve, Reuters 404s). Guardian/PBS/DW carry the
+# factual/wire layer; BBC/NPR public; Fox/CNN the US poles; Al Jazeera the Mideast.
+# All verified live + carrying pubDate/published timestamps (recency-filterable).
+WORLD_MAX_H = 24              # general brief only surfaces items from the past 24h
+BREAKING_MAX_H = 6           # breaking alerts locked to the past 6h (user: "6-12")
+_WORLD_FEEDS = [
+    ("World", "Guardian",   "https://www.theguardian.com/world/rss"),
+    ("World", "PBS",        "https://www.pbs.org/newshour/feeds/rss/headlines"),
+    ("World", "DW",         "https://rss.dw.com/rdf/rss-en-world"),
+    ("World", "BBC World",  "https://feeds.bbci.co.uk/news/world/rss.xml"),
+    ("World", "NPR",        "https://feeds.npr.org/1001/rss.xml"),
+    ("World", "Fox",        "https://moxie.foxnews.com/google-publisher/world.xml"),
+    ("World", "CNN",        "http://rss.cnn.com/rss/cnn_world.rss"),
+    ("World", "Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml"),
+]
+_WORLD_SOURCES = {f[1] for f in _WORLD_FEEDS}      # keeps World out of AI & Labs
+_WORLD_LEAN = {"Guardian": "factual", "PBS": "factual", "DW": "factual",
+               "BBC World": "public", "NPR": "public",
+               "Fox": "right", "CNN": "left", "Al Jazeera": "Mideast"}
 
 
 def _intel_clean(s):
@@ -1441,7 +1506,7 @@ def _intel_fetch_feed(url, source, topic):
 
 
 def _intel_feeds():
-    feeds = list(_INTEL_FEEDS)
+    feeds = list(_INTEL_FEEDS) + list(_WORLD_FEEDS)
     for u in (_safe_call(get_settings, {}).get("intel_feeds") or []):
         if isinstance(u, str) and u.startswith("http"):
             try:
@@ -1487,9 +1552,15 @@ def _intel_gather():
                   if not it.get("ts") or (now - (it.get("ts") or now)) < INTEL_FRESH_H * 3600]
         merged.sort(key=lambda it: it.get("ts") or 0, reverse=True)
         merged = merged[:INTEL_MAX_ITEMS]
-        curated = _intel_curate(merged)
+        # curate only the AI-topic items — world news has its own section
+        curated = _intel_curate([it for it in merged
+                                 if it.get("source") not in _WORLD_SOURCES])
         _intel_save({"version": 1, "updated": now, "items": merged, "curated": curated,
                      "feeds": len(feeds)})
+        try:
+            _trends_update(merged)          # refresh today's trend-radar tally
+        except Exception as _e:
+            _wt_log_err("trends update: %r" % _e)
         _wt_log_err("intel gather: %d feeds, %d fetched -> %d items, %d curated"
                     % (len(feeds), len(fetched), len(merged), len(curated)))
         return merged
@@ -1605,7 +1676,14 @@ def _intel_agent_pass():
     if not _intel_web_ok():
         return []
     try:
-        p = subprocess.run([HERMES, "-z", _INTEL_AGENT_PROMPT],
+        bl = globals().get("bg_lane")
+        extra = []
+        if callable(bl):
+            try:
+                extra = list(bl().get("hermes_args") or [])   # background lane
+            except Exception:
+                extra = []
+        p = subprocess.run([HERMES] + extra + ["-z", _INTEL_AGENT_PROMPT],
                            capture_output=True, text=True, timeout=180,
                            env=_hermes_env())
         arr = _intel_extract_json(p.stdout or "")
@@ -1627,10 +1705,11 @@ def _intel_agent_pass():
 # ---- brief consumers ----
 def _brief_ai_labs():
     store = _intel_load()
-    curated = store.get("curated") or []
+    curated = [c for c in (store.get("curated") or [])
+               if c.get("source") not in _WORLD_SOURCES]
     lines = []
     if curated:
-        for c in curated[:6]:
+        for c in curated[:4]:
             why = (c.get("why") or "").strip()
             lines.append("• %s (%s)%s" % (
                 _md_link(c.get("title", ""), c.get("url")),
@@ -1639,8 +1718,9 @@ def _brief_ai_labs():
         items = store.get("items") or []
         now = time.time()
         fresh = [it for it in items
-                 if not it.get("ts") or (now - (it.get("ts") or now)) < 24 * 3600]
-        for it in (fresh or items)[:6]:
+                 if it.get("source") not in _WORLD_SOURCES
+                 and (not it.get("ts") or (now - (it.get("ts") or now)) < 24 * 3600)]
+        for it in (fresh or items)[:4]:
             lines.append("• %s (%s)" % (_md_link(it.get("title", ""), it.get("url")),
                                         it.get("source", "")))
     if not lines:
@@ -1670,6 +1750,226 @@ def intel_loop():
         except Exception as e:
             _wt_log_err("intel loop: %r" % e)
         time.sleep(300)                  # check every 5 min
+
+
+# ==========================================================================
+# NEWS DESK — framing comparison ("one story, every lens").
+# Clusters the lean-tagged world headlines into stories that several outlets
+# cover, then keeps the ones where the FRAMING differs across the spectrum
+# (>=2 leans). Pure headline analysis — no model, no network (reads the intel
+# store). The headline IS the framing: "hardline war backer dies" vs "Trump ally
+# dies" is the whole point.
+# ==========================================================================
+
+_NEWS_STOP = set((
+    "the a an and or of to in on for with at by from as is are was were be been "
+    "being this that these those over into after before amid it its his her their "
+    "they he she you we has have had will would could should may might must not no "
+    "new now say says said report reports can more most than then them out up down "
+    "off but who what when where why how about against says amid live day".split()))
+
+
+def _news_terms(title):
+    """(all-significant-terms, proper-nouns) from a headline. Proper nouns
+    (Capitalized mid-title: names/places/orgs) are the strong clustering signal."""
+    caps = {w.lower() for w in re.findall(r"\b([A-Z][a-zA-Z]{2,})", title or "")}
+    words = {w for w in re.findall(r"[a-zA-Z]{4,}", (title or "").lower())
+             if w not in _NEWS_STOP}
+    return words | caps, caps
+
+
+def _framing_clusters(window_h=36, max_stories=6):
+    """Fresh world items clustered into cross-outlet stories with >=2 leans, so
+    every result is a genuine framing contrast. Most-covered / newest first."""
+    now = time.time()
+    prepared = []
+    for it in (_intel_load().get("items") or []):
+        if it.get("source") not in _WORLD_SOURCES or not it.get("ts"):
+            continue
+        if now - it["ts"] > window_h * 3600:
+            continue
+        allt, caps = _news_terms(it.get("title", ""))
+        if caps:                        # no proper noun -> nothing to anchor on
+            prepared.append((it, allt, caps))
+    clusters = []                        # each: {terms, caps, items:[(it,allt,caps)]}
+    for it, allt, caps in prepared:
+        best, best_score = None, 0
+        for cl in clusters:
+            scap = cl["caps"] & caps     # REQUIRE a shared proper noun (kills weak merges)
+            if not scap:
+                continue
+            sall = cl["terms"] & allt
+            if len(scap) >= 2 or len(sall) >= 3:
+                score = 2 * len(scap) + len(sall)
+                if score > best_score:
+                    best, best_score = cl, score
+        if best:
+            best["items"].append((it, allt, caps))
+            best["terms"] |= allt
+            best["caps"] |= caps
+        else:
+            clusters.append({"terms": set(allt), "caps": set(caps),
+                             "items": [(it, allt, caps)]})
+    stories = []
+    for cl in clusters:
+        by_src = {}
+        for it, _a, _c in cl["items"]:
+            by_src.setdefault(it["source"], it)     # one headline per outlet
+        leans = {_WORLD_LEAN.get(s) for s in by_src}
+        leans.discard(None)
+        if len(by_src) < 2 or len(leans) < 2:        # need a real cross-lens contrast
+            continue
+        label = sorted(cl["caps"],
+                       key=lambda w: -sum(w in c for _i, _a, c in cl["items"]))[:3]
+        angles = sorted(
+            [{"source": s, "lean": _WORLD_LEAN.get(s, ""),
+              "title": it.get("title", ""), "url": it.get("url"), "ts": it.get("ts")}
+             for s, it in by_src.items()],
+            key=lambda a: (a["lean"], a["source"]))
+        stories.append({"label": " ".join(w.title() for w in label),
+                        "leans": sorted(leans), "sources": len(by_src),
+                        "ts": max(it.get("ts") or 0 for it in by_src.values()),
+                        "angles": angles})
+    stories.sort(key=lambda s: (-len(s["leans"]), -s["sources"], -(s["ts"] or 0)))
+    return stories[:max_stories]
+
+
+def w_framing():
+    try:
+        return {"stories": _framing_clusters(), "updated": time.time()}
+    except Exception as e:
+        return {"stories": [], "error": type(e).__name__}
+
+
+def expand_framing():
+    try:
+        return {"stories": _framing_clusters(window_h=48, max_stories=14),
+                "updated": time.time()}
+    except Exception as e:
+        return {"stories": [], "error": type(e).__name__}
+
+
+def framing_handler(ctx):
+    return w_framing()
+
+
+register_get("/api/framing", framing_handler)          # noqa: F821
+WIDGETS["framing"] = {"title": "Every Lens", "icon": "news", "size": "card",   # noqa: F821
+                      "cat": "news", "provider": w_framing}
+EXPANDERS["framing"] = expand_framing                  # noqa: F821
+
+
+# ==========================================================================
+# TREND RADAR — what's ACCELERATING across the feeds.
+# Tallies proper-noun entities (people/places/orgs) from each day's headlines
+# into a small daily ledger (trends.json), then ranks entities whose mentions
+# TODAY spike above their recent baseline. New + rising both surface. Pure
+# headline counting — no model. On day 1 there's no baseline, so it shows the
+# day's hottest topics; acceleration sharpens as the ledger fills.
+# ==========================================================================
+
+TRENDS_FILE = os.path.join(DATA, "trends.json")
+TRENDS_KEEP_DAYS = 14
+_TREND_STOP = set(("us u.s new the how what says amid live day world part watch "
+                   "here more back top full first video news update".split()))
+
+
+def _trend_entities(title):
+    ents = {}
+    for w in re.findall(r"\b([A-Z][a-zA-Z]{2,})", title or ""):
+        k = w.lower()
+        if k in _TREND_STOP or k in _NEWS_STOP:
+            continue
+        ents[k] = w                     # keep a display surface form
+    return ents
+
+
+def _trends_load():
+    d = read_json(TRENDS_FILE, {"days": {}, "labels": {}})
+    if not isinstance(d.get("days"), dict):
+        d = {"days": {}, "labels": {}}
+    d.setdefault("labels", {})
+    return d
+
+
+def _trends_update(items=None):
+    """Recompute TODAY's entity tally from the intel store (idempotent for the
+    day); past days stay frozen. Called each intel gather (+ lazily on view)."""
+    if items is None:
+        items = _intel_load().get("items") or []
+    now = time.time()
+    today = time.strftime("%Y-%m-%d", time.localtime(now))
+    counts, labels = {}, {}
+    for it in items:
+        ts = it.get("ts") or 0
+        if not ts or time.strftime("%Y-%m-%d", time.localtime(ts)) != today:
+            continue
+        for k, disp in _trend_entities(it.get("title", "")).items():
+            counts[k] = counts.get(k, 0) + 1
+            labels[k] = disp
+    d = _trends_load()
+    d["days"][today] = counts
+    d["labels"].update(labels)
+    for day in sorted(d["days"])[:-TRENDS_KEEP_DAYS]:      # prune old days
+        d["days"].pop(day, None)
+    d["updated"] = now
+    with _state_lock:
+        write_json(TRENDS_FILE, d)
+    return d
+
+
+def _trends_rising(n=8):
+    d = _trends_load()
+    days = sorted(d["days"])
+    if not days:
+        return []
+    today = days[-1]
+    prior = days[:-1][-7:]                       # up to 7 prior days = baseline
+    tcounts = d["days"].get(today, {})
+    out = []
+    for k, tc in tcounts.items():
+        if tc < 2:
+            continue                             # ignore one-off mentions
+        hist = [d["days"].get(day, {}).get(k, 0) for day in prior]
+        avg = (sum(hist) / len(hist)) if hist else 0.0
+        delta = tc - avg
+        ratio = tc / (avg + 1.0)
+        score = tc + 2.0 * max(0.0, delta) + 1.5 * ratio
+        kind = "new" if avg < 0.3 else ("rising" if delta > 0.6 else "steady")
+        out.append({"entity": d["labels"].get(k, k), "today": tc,
+                    "avg": round(avg, 1), "kind": kind, "score": score,
+                    "spark": (hist + [tc])[-8:]})
+    out.sort(key=lambda e: -e["score"])
+    return out[:n]
+
+
+def w_trends():
+    try:
+        d = _trends_load()
+        if time.strftime("%Y-%m-%d") not in d.get("days", {}):
+            _trends_update()                     # lazy first tally for instant display
+        return {"rising": _trends_rising(), "updated": time.time(),
+                "days": len(_trends_load().get("days", {}))}
+    except Exception as e:
+        return {"rising": [], "error": type(e).__name__}
+
+
+def expand_trends():
+    try:
+        return {"rising": _trends_rising(16), "updated": time.time(),
+                "days": len(_trends_load().get("days", {}))}
+    except Exception as e:
+        return {"rising": [], "error": type(e).__name__}
+
+
+def trends_handler(ctx):
+    return w_trends()
+
+
+register_get("/api/trends", trends_handler)            # noqa: F821
+WIDGETS["trends"] = {"title": "Trend Radar", "icon": "trend", "size": "card",   # noqa: F821
+                     "cat": "news", "provider": w_trends}
+EXPANDERS["trends"] = expand_trends                    # noqa: F821
 
 
 # ==========================================================================
@@ -1834,6 +2134,102 @@ def _midday_tick(cfg, state, now_ts):
     state["last_midday_date"] = today
 
 
+def _evening_compose(cfg):
+    """Deterministic end-of-day wrap: the day's biggest stories + what's trending
+    + still-open tasks. Short by design (the morning brief is the long one).
+    Always builds text; `noteworthy` gates the send."""
+    ev = cfg.get("evening", {})
+    now = time.time()
+    day_start = _today_at(0)
+    lines = ["Evening wrap — %s, %s" % (_fmt_date(now), _t12(now))]
+    items = 0
+
+    try:
+        stories = _framing_clusters(window_h=20, max_stories=3)
+    except Exception:
+        stories = []
+    if stories:
+        lines.append("Today's biggest stories:")
+        for s in stories:
+            top = (s.get("angles") or [{}])[0]
+            lines.append("• %s — %s" % (s.get("label", ""),
+                         _md_link(top.get("title", ""), top.get("url"))))
+        items += len(stories)
+    else:
+        world = sorted(
+            [it for it in (_intel_load().get("items") or [])
+             if it.get("source") in _WORLD_SOURCES and (it.get("ts") or 0) >= day_start],
+            key=lambda it: it.get("ts") or 0, reverse=True)
+        if world:
+            lines.append("Today's headlines:")
+            for it in world[:4]:
+                lines.append("• %s (%s)" % (
+                    _md_link(it.get("title", ""), it.get("url")), it.get("source", "")))
+            items += min(4, len(world))
+
+    try:
+        rising = _trends_rising(4)
+    except Exception:
+        rising = []
+    if rising:
+        lines.append("Trending today: " + ", ".join(
+            "%s (%d)" % (r.get("entity"), r.get("today")) for r in rising))
+        items += 1
+
+    tasks = [t for t in _safe_call(get_tasks, {"tasks": []}).get("tasks", [])
+             if not t.get("done")]
+    if tasks:
+        lines.append("Still open: " + "; ".join(t.get("text", "") for t in tasks[:3]))
+
+    noteworthy = items >= int(ev.get("min_items", 1))
+    return {"noteworthy": noteworthy, "items": items,
+            "text": _strip_emoji("\n".join(lines))}
+
+
+def _evening_tick(cfg, state, now_ts):
+    """Once/day at ~6pm: a short end-of-day wrap; catch-up until ~10pm, then the
+    day is done. Date-guarded; notify-only (no actions)."""
+    ev = cfg.get("evening", {})
+    if not ev.get("enabled", True):
+        return
+    today = _today_str(now_ts)
+    if state.get("last_evening_date") == today:
+        return
+    lt = time.localtime(now_ts)
+    cur_min = lt.tm_hour * 60 + lt.tm_min
+    if cur_min < ev.get("hour", 18) * 60 + ev.get("minute", 0):
+        return
+    if cur_min >= 22 * 60:               # slept through the window — skip today
+        _wt_save_state(lambda s: s.__setitem__("last_evening_date", today))
+        state["last_evening_date"] = today
+        return
+    try:
+        comp = _evening_compose(cfg)
+    except Exception as e:
+        _wt_log_err("evening compose failed: %r" % e)
+        comp = {"noteworthy": False, "items": 0, "text": ""}
+    row = {"ts": now_ts, "rule_id": "", "type": "evening_wrap",
+           "label": "Evening wrap", "signature": "evening:" + today,
+           "context": {"items": comp["items"]},
+           "channels": ev.get("channels", ["telegram", "hub"]),
+           "delivered": [], "suppressed": "", "reaction": ""}
+    if not comp["noteworthy"]:
+        row["suppressed"] = "not_noteworthy"
+    else:
+        ok, det = True, ""
+        if "telegram" in row["channels"]:
+            ok, det = _wt_send_telegram(comp["text"])
+        if ok:
+            row["delivered"] = list(row["channels"])
+            row["text"] = comp["text"]
+        else:
+            row["suppressed"] = "deliver_failed"
+            row["detail"] = det
+    _wt_log_append(row)
+    _wt_save_state(lambda s: s.__setitem__("last_evening_date", today))
+    state["last_evening_date"] = today
+
+
 # ---- breaking: severity keyword tables (curated tight to keep the bar high) --
 _BREAK_NEWS_KW = [
     "declares war", "invasion of", "invades", "airstrike", "air strike",
@@ -1859,42 +2255,16 @@ def _breaking_scan(cfg):
     now = time.time()
     cands = []
 
-    # 1) market shock — live/extended sessions only (never stale weekend data)
-    try:
-        mk = _markets_data()
-        state = mk.get("state")
-        if state in ("REGULAR", "PRE", "POST") and not mk.get("error"):
-            phase = {"REGULAR": "live", "PRE": "pre-market", "POST": "after hours"}[state]
-            for pool, thr in ((mk.get("indices") or [], float(bc.get("index_pct", 2.5))),
-                              (mk.get("watchlist") or [], float(bc.get("ticker_pct", 8.0)))):
-                for q in pool:
-                    if q.get("error") or q.get("pct") is None:
-                        continue
-                    pct = float(q["pct"])
-                    if abs(pct) < thr:
-                        continue
-                    bucket = int(abs(pct) // 2) * 2   # re-arm only on deeper moves
-                    d = "up" if pct > 0 else "down"
-                    sig = "mkt:%s:%s:%d" % (q.get("symbol"), d, bucket)
-                    nm = q.get("friendly") or q.get("symbol")
-                    cands.append({
-                        "class": "market", "sig": sig,
-                        "text": _strip_emoji(
-                            "BREAKING — Markets\n%s %s intraday at %s (%s)" % (
-                                _md_link(nm, _quote_url(q.get("symbol"))),
-                                _fmt_pct(pct), _fmt_price(q.get("price")), phase)),
-                        "context": {"symbol": q.get("symbol"), "pct": pct,
-                                    "price": q.get("price"), "state": state}})
-    except Exception as e:
-        _wt_log_err("breaking market scan: %r" % e)
+    # (market-shock breaking removed — the user cut stocks from the feed.)
 
-    # 2) corroborated severe news — fresh <2h + >=2 distinct sources per keyword
+    # 1) corroborated severe news — fresh + >=2 distinct sources per keyword,
+    #    locked to the past BREAKING_MAX_H (breaking window, tighter than the 24h brief)
     try:
         matches = {}
         for sec in (_rss_data().get("sections") or []):
             for it in (sec.get("items") or []):
                 ts = it.get("ts") or 0
-                if not ts or now - ts > 2 * 3600:
+                if not ts or now - ts > BREAKING_MAX_H * 3600:
                     continue
                 hay = str(it.get("title", "")).lower()
                 for kw in _BREAK_NEWS_KW:
@@ -1922,11 +2292,11 @@ def _breaking_scan(cfg):
     except Exception as e:
         _wt_log_err("breaking news scan: %r" % e)
 
-    # 3) major AI-lab event — fresh <3h intel item, lab name + action verb
+    # 2) major AI-lab event — fresh intel item (breaking window), lab + action verb
     try:
         for it in (_intel_load().get("items") or []):
             ts = it.get("ts") or 0
-            if not ts or now - ts > 3 * 3600:
+            if not ts or now - ts > BREAKING_MAX_H * 3600:
                 continue
             hay = (str(it.get("title", "")) + " " + str(it.get("summary", ""))).lower()
             if any(l in hay for l in _AI_LABS) and any(a in hay for a in _AI_ACTIONS):
@@ -2106,6 +2476,7 @@ def watchtower_loop():
             now_ts = time.time()
             _brief_tick(cfg, state, now_ts)
             _midday_tick(cfg, state, now_ts)
+            _evening_tick(cfg, state, now_ts)
             _breaking_pass(cfg, state, now_ts)
             _rule_pass(cfg, state, now_ts)
         except Exception as e:
@@ -2561,7 +2932,12 @@ def intel_handler(ctx):
 globals()["_generate_briefing"] = _wt_generate_briefing
 globals()["_briefing_payload"] = _wt_briefing_payload
 
+def evening_preview_handler(ctx):
+    return _evening_compose(_wt_load())
+
+
 register_get("/api/brief/preview", brief_preview_handler)
+register_get("/api/evening/preview", evening_preview_handler)
 register_post("/api/brief/send", brief_send_handler)
 register_get("/api/watchtower", watchtower_get_handler)
 register_post("/api/watchtower", watchtower_post_handler)

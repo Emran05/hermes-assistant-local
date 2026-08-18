@@ -220,3 +220,97 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   macOS-style dropdown (Appearance Light/Dark/Auto, reduce-motion (real CSS), Pause/Resume,
   System Settings…→setView('mind'), Proactive deep-link, About+live model) — only functional controls.
   Load order settings_shell→prefs→agent. VERIFIED: agent 13/13 + prefs 36/36 harness, all endpoints 200.
+- `<idle-suspend>` Auto RAM reclaim — the model server now sleeps when nobody's
+  using it. server.py: `idle_suspend_loop()` boots com.hermes.mlx-server out after
+  10 min (`_idle_min()`, override via idle-suspend-min / IDLE_SUSPEND_MIN) of no
+  USER activity (dashboard /api/chat ∪ newest telegram/hub state.db turn — background
+  briefing/watchtower excluded), freeing ~22-26GB, marker `agent-idle-suspended`
+  (DISTINCT from the manual-pause `agent-paused`; the two never coexist). The chat
+  worker `agent_wake()`s (bootstrap + poll /v1/models) transparently before the turn;
+  memory_guard + the loop skip while suspended; while asleep the loop also wakes on a
+  fresh telegram/hub turn (best-effort). New /api/agent/wake + /api/agent/idle_config;
+  /api/models carries idle_suspended/idle_enabled/idle_min; index.html model menu shows
+  a distinct "sleeping · Wake now" state. VERIFIED end-to-end: forced a real suspend
+  (mlx_lm gone, RAM freed, correct marker, pause-file absent) → chat auto-woke it →
+  replied. Needs ⌘R for the menu state. Directly addresses the KV-cache/MLX ceiling.
+- `<graphify>` Code knowledge-graph memory layer. Official `graphifyy` in an isolated
+  venv ~/.hermes/graphify-venv (never the framework Python); `graphify update .` →
+  graphify-out/graph.json (2794 nodes / 5086 edges / 163 communities, tree-sitter,
+  no LLM). aux_graphify.py serves it read-only: GET /api/graph/stats (counts +
+  god-nodes) and /api/graph/query?q= (node + neighbors — cheap "explain" instead of
+  grepping; ~71x fewer tokens/query per the tool's benchmark). mtime-cached. VERIFIED:
+  both endpoints 200 (query found this session's own agent_idle_suspended()). Remaining
+  (harness-gated, run via `!`): graphify install --platform claude|hermes to register
+  the /graphify skill into each agent's config. graphify-out/ (~5MB) → gitignore.
+- `<qwen3.8>` Qwen3.8-27B in the model roster (2026-08-18). Researched: released
+  2026-08-14, `mlx-community/Qwen3.8-27B-4bit` is `model_type: qwen3_5` (dense 27B,
+  hybrid GatedDeltaNet/full-attn 64L, 262k ctx, vision tower dropped by mlx-lm's
+  sanitize) — the INSTALLED mlx-lm 0.31.3 loads it; the only config delta vs Qwen3.5
+  (`output_gate_type: swish`) is the DeltaNet gate mlx already uses. Deliberately the
+  NON-MTP repo: `-MTP-4bit` hits mlx-lm≤0.31.3's double-RMSNorm-shift bug (#1197/#1623,
+  fixed on main 2026-08-18, unreleased) and ships NaN drafter weights (mlx-vlm #1931).
+  Its template thinks by default at reasoning_effort=xhigh (~22k think tokens on a
+  trivial prompt) → roster default `template_args {enable_thinking:false}`; new
+  `_write_template_args()` on switch → `~/.hermes/dashboard/chat-template-args`, read
+  by mlx-server.sh as `--chat-template-args`. `_model_registry()` now merges new seed
+  entries into an existing models.json. New POST /api/models/thinking {enabled[,id]}
+  (`set_model_thinking`: persists, restarts server if active; on = low effort);
+  /api/models carries `thinking {supported,enabled}`; model menu shows a "Thinking:
+  on/off" row for thinking-capable models. VERIFIED: standalone generate coherent
+  (31.7 tok/s decode, 15.5GB peak); server: simple/nested/restraint/chain/streaming
+  tool_calls all parsed (qwen3_coder parser), per-request thinking → `reasoning`
+  field, prefill ~580 tok/s cold / prefix-cached 0.5s for 12.6k tok, footprint 21GB
+  (27 peak); `hermes -m … -z` real terminal tool turn correct (24 .py files); official
+  drill 6/6 via a real switch (log shows template-args applied) + restore + re-pause.
+  Trade-off vs the 30B-A3B: ~4-5x slower per token, first-turn prefill of Hermes's
+  ~15k system prompt ≈25s (then cached) — a deliberate upgrade choice, not the new
+  default. Needs ⌘R for the menu row.
+- `<qwen3.8-mtp>` Qwen3.8-27B ~2x decode via native MTP speculative decoding
+  (2026-08-18). Research (13-agent sweep + direct verification): the lever Mac
+  users use on the Qwen3.5/3.6/3.8 DeltaNet family is the model's own MTP head
+  (mlx-lm PR #990 unmerged/needs re-quant; MTPLX 2.24x M5 Max claim; mlx.fast
+  leaderboard ~85 tok/s) — mlx-vlm 0.6.14 ships it (`--draft-kind mtp`), KV-quant
+  and ZMLX fusion are +1-8% noise, separate draft models hurt. Built: isolated venv
+  `~/.hermes/mlx-vlm-venv` (`install-mlx-vlm-venv.sh`), `mlx-vlm-launch.py`
+  (RNG-restore shim for mlx 0.32's read-only random.state — else every temp>0
+  request crashed; default reasoning_effort env; atexit os._exit to dodge the
+  mlx teardown segfault that popped "Python quit unexpectedly" dialogs), roster
+  `backend/draft_model/draft_kind/draft_block_size` fields + `_model_registry()`
+  key backfill, `_write_template_args()` now also writes `server-backend`,
+  `download_model` fetches the drafter, `downloaded` requires it, mlx-server.sh
+  branches on the backend file (APC_ENABLED=1, APC_EXACT_CACHE_ENTRIES=6),
+  footprint pgrep matches both. MEASURED (M5 Max): mlx_vlm.generate AR 31.3 →
+  MTP block3/4 63.4 tok/s code (88% acc), prose 47.3 (55%), block 6 22.8 (worse
+  than AR → default 3); server: 6/6 tool suite at temp 0 AND 0.7 (streaming
+  tool_calls ok, per-request enable_thinking → reasoning field), 12.6k-token
+  prefix 21s cold → 0.4s cached (12611 cached_tokens), footprint 19GB/24 peak,
+  cold prefill 625-690 tok/s (step size 512/2048/8192 no effect), `hermes -z`
+  real terminal turn correct; official drill via launchd path 6/6 (cases 1.4-1.8x
+  faster than the mlx-lm run), restore + re-pause clean; SIGTERM exit leaves no
+  crash report. Fallback: venv missing → mlx-lm path (still works, no MTP).
+- `<dsh-spike>` DeepSeek Harness feasibility (2026-08-18, uncommitted, outside
+  repo): `@deepseek-ai/dsh@0.1.0-rc.7` at ~/.hermes/dsh, DSH_HOME=~/.hermes/dsh/home
+  with a `hermes-local` openai-completions route → :8080 (dummy apiKeyEnv
+  required) + agent-default-model patch. Headless task on the local Qwen3-30B:
+  real shell tool round-trip, correct answer, 7.8s. Not wired into the dashboard;
+  integration depth is the user's call (CLI-only / dashboard surface via Python
+  SDK / replace Hermes — not recommended).
+- `<claude-routing>` Fixed the two-brain routing (2026-08-18). (1) `_cb_gate`
+  rewritten intent-based (was refusing 5/18 benign escalations as codegen/harmful):
+  25/25 benign pass, 22/22 true positives + injected-context still refused. (2) New
+  `aux_autoroute.py`: deterministic per-turn scorer decides when a chat question also
+  goes to Claude (parallel Sonnet; Opus only on "think hard"), answer persisted +
+  rendered as the deep-card (index.html streamJob/pollDeep/deepCardHTML,
+  aux_agent.js window.hermesDeep), modes auto|suggest|off, /api/claude/autoroute*.
+  (3) Escalate button now sends the FULL question (was first line). VERIFIED live:
+  hard question → local + Claude in parallel, persisted in order; routine → local.
+- `<two-model-roster>` Roster = Qwen3.8-27B (primary, MTP) + Qwen3.5-9B (background
+  lane); Qwen3-30B-A3B + Hermes-3-8B removed from models.json and DELETED from the HF
+  cache (user call). New `com.hermes.mlx-bg` service (:8081, mlx-server-bg.sh via the
+  mlx-vlm venv — 9B checkpoints need transformers-5 tokenizer class), server.py
+  `bg_lane()` + `run_agent(lane="bg")`, briefing/watchtower/intel/For-You routed to it
+  (falls back to primary when down), footprint sums both lanes, `/api/models.bg`,
+  model-menu "Background:" row, `custom_providers: [bg]` in ~/.hermes/config.yaml,
+  install-services.sh installs the bg service. Primary switched to Qwen3.8 through
+  the real switch path (hermes model.default updated). VERIFIED: briefing regenerated
+  on :8081 (primary saw 0 requests); 9B tool suite 6/6 at ~88 tok/s, 7GB.

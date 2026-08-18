@@ -52,6 +52,14 @@ for d in (DATA, CHATS, INBOX):
 DASH_HOST = os.environ.get("DASH_HOST", "127.0.0.1")
 DASH_PORT = int(os.environ.get("DASH_PORT", "7788"))
 MODEL_URL = os.environ.get("MODEL_URL", "http://127.0.0.1:8080/v1/models")
+# Background lane — a second, always-on SMALL model (com.hermes.mlx-bg, :8081,
+# mlx-server-bg.sh) that all non-interactive producers use (briefing, watchtower
+# intel/news, For-You candidates…) so the primary model stays warm for the user.
+# bg_lane() falls back to the primary when :8081 is down. Model id lives in
+# ~/.hermes/dashboard/bg-model (default Qwen3.5-9B — same family/template as
+# Qwen3.8; the only official Qwen3.8 sizes are 27B and a 2.4T MoE).
+BG_MODEL_URL = os.environ.get("BG_MODEL_URL", "http://127.0.0.1:8081/v1/models")
+DEFAULT_BG_MODEL = "mlx-community/Qwen3.5-9B-4bit"
 AGENT_TIMEOUT = int(os.environ.get("AGENT_TIMEOUT", "600"))
 BRIEFING_REFRESH_MIN = int(os.environ.get("BRIEFING_REFRESH_MIN", "30"))
 
@@ -896,6 +904,14 @@ def _finish_chat_job(job, session):
 
 def _chat_worker(job, session, prompt):
     try:
+        if agent_idle_suspended():          # model asleep to save RAM — wake it
+            job["status"] = "Waking the model from sleep — about 30s…"
+            if not agent_wake(wait=True):
+                job.update(reply="The model was asleep and didn't wake in time — "
+                           "give it a few seconds and send that again.",
+                           ok=False, state="done", done=True)
+                _finish_chat_job(job, session)
+                return
         chat = load_chat(session)
 
         def save_meta():
@@ -913,11 +929,14 @@ def _chat_worker(job, session, prompt):
     _finish_chat_job(job, session)
 
 
-def run_agent(message, session=None):
-    """One agent turn via `hermes -z`. Returns (ok, text)."""
+def run_agent(message, session=None, lane="primary"):
+    """One agent turn via `hermes -z`. Returns (ok, text). lane="bg" routes the
+    run to the background model lane when it's up (briefing / news / intel)."""
     cmd = [HERMES]
     if session:
         cmd += ["--continue", session]
+    if lane == "bg":
+        cmd += bg_lane()["hermes_args"]
     cmd += ["-z", message]
     with _agent_lock:
         try:
@@ -941,6 +960,46 @@ def model_online():
             return r.status == 200
     except Exception:
         return False
+
+
+def bg_model():
+    try:
+        v = open(os.path.join(DATA, "bg-model")).read().strip()
+        if v:
+            return v
+    except OSError:
+        pass
+    return DEFAULT_BG_MODEL
+
+
+def _bg_probe():
+    try:
+        with urllib.request.urlopen(BG_MODEL_URL, timeout=2) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def bg_online():
+    return bool(_cached("bg_online", 15, _bg_probe))
+
+
+def _chat_url_of(models_url):
+    if models_url.endswith("/v1/models"):
+        return models_url[:-len("/models")] + "/chat/completions"
+    return re.sub(r"/v1/models/?$", "/v1/chat/completions", models_url)
+
+
+def bg_lane():
+    """Where background (non-user) model work should go:
+    {lane: 'bg'|'primary', chat_url, model, hermes_args: [...]} — hermes_args are
+    the extra `hermes` CLI args that route a -z run to the lane (the named
+    custom provider `custom:bg` in ~/.hermes/config.yaml)."""
+    if bg_online():
+        return {"lane": "bg", "chat_url": _chat_url_of(BG_MODEL_URL), "model": bg_model(),
+                "hermes_args": ["--provider", "custom:bg", "-m", bg_model()]}
+    return {"lane": "primary", "chat_url": _chat_url_of(MODEL_URL), "model": active_model(),
+            "hermes_args": []}
 
 
 # --------------------------------------------------------------------------
@@ -1048,7 +1107,7 @@ def _generate_briefing():
         if not mlx_admission()[0]:   # back off background work when memory is high
             return
         for attempt in range(2):  # one retry if the model emits meta garbage
-            ok, text = run_agent(access_preamble() + BRIEFING_PROMPT)
+            ok, text = run_agent(access_preamble() + BRIEFING_PROMPT, lane="bg")
             if ok and _briefing_is_sane(text):
                 with _state_lock:
                     write_json(BRIEFING_FILE, {
@@ -1074,17 +1133,23 @@ def _mlx_footprint_gb():
     """Real memory (phys_footprint) of the MLX server, in GB — ps RSS
     under-reports MLX's Metal/unified allocations, so use footprint(1)."""
     try:
-        pids = subprocess.run(["pgrep", "-f", "mlx_lm"], capture_output=True,
-                              text=True, timeout=5).stdout.split()
+        # matches both backends: `python3 -m mlx_lm server` and the mlx_vlm
+        # launcher (`.../mlx-vlm-venv/bin/python mlx-vlm-launch.py`)
+        pids = subprocess.run(["pgrep", "-f", "mlx_lm server|mlx-vlm-launch"],
+                              capture_output=True, text=True, timeout=5).stdout.split()
         if not pids:
             return None
-        out = subprocess.run(["footprint", "-p", pids[0]], capture_output=True,
-                             text=True, timeout=20).stdout
-        m = re.search(r"phys_footprint:\s*([\d.]+)\s*(GB|MB)", out)
-        if not m:
-            return None
-        v = float(m.group(1))
-        return v if m.group(2) == "GB" else v / 1024
+        total, seen = 0.0, False
+        for pid in pids:                              # both lanes (primary + bg)
+            out = subprocess.run(["footprint", "-p", pid], capture_output=True,
+                                 text=True, timeout=20).stdout
+            m = re.search(r"phys_footprint:\s*([\d.]+)\s*(GB|MB)", out)
+            if not m:
+                continue
+            v = float(m.group(1))
+            total += v if m.group(2) == "GB" else v / 1024
+            seen = True
+        return total if seen else None
     except Exception:
         return None
 
@@ -1107,6 +1172,21 @@ def _mlx_footprint_gb():
 MLX_SOFT_GB = float(os.environ.get("MLX_SOFT_GB", "50"))    # admission ceiling
 MLX_HARD_GB = float(os.environ.get("MLX_HARD_GB", "56"))    # last-resort restart
 MEM_OVERRIDE_FILE = os.path.join(DATA, "mem-override")
+
+# --- Idle suspend ----------------------------------------------------------
+# The model server is the memory hog (~26GB resident, weights + prompt/KV cache).
+# When NOBODY is using it there's no reason to hold that RAM. idle_suspend_loop()
+# boots the model server out after _idle_min() of no USER activity (dashboard
+# chat + Telegram/hub turns; background briefing/watchtower does NOT count and
+# never wakes it), and the next user turn transparently wakes it (agent_wake,
+# ~30-50s cold start). This is DISTINCT from a manual pause: a pause is a
+# deliberate "stay down, fail fast" park (PAUSE_FILE); an idle-suspend is
+# "asleep, wake on demand" (IDLE_SUSPEND_FILE). The two files never coexist.
+IDLE_SUSPEND_FILE = os.path.join(DATA, "agent-idle-suspended")
+IDLE_SUSPEND_OFF = os.path.join(DATA, "idle-suspend-off")   # user opt-out marker
+IDLE_MIN_FILE = os.path.join(DATA, "idle-suspend-min")      # persisted minutes
+IDLE_SUSPEND_MIN = float(os.environ.get("IDLE_SUSPEND_MIN", "10"))
+_last_user_activity = time.time()   # bumped on every genuine user turn
 
 
 def _mlx_restart():
@@ -1150,7 +1230,7 @@ def memory_guard_loop():
     Admission control (mlx_admission) is the first line — this is the backstop."""
     while True:
         time.sleep(30)             # was 300 — balloons spike faster than that
-        if agent_paused():         # user parked the model on purpose
+        if agent_paused() or agent_idle_suspended():   # model intentionally down
             continue
         gb = _mlx_footprint_gb()
         if gb and gb > MLX_HARD_GB:
@@ -1160,6 +1240,145 @@ def memory_guard_loop():
                 print(f"[memory_guard] mlx footprint {gb:.0f}GB > "
                       f"{MLX_HARD_GB:.0f}GB — restarted model server "
                       "(freed the KV balloon)", file=sys.stderr)
+
+
+# --------------------------------------------------------------------------
+# Idle suspend — free the model's RAM when no one is using it, wake on demand.
+# See the IDLE_SUSPEND_* block above for the design. Core invariant: an
+# idle-suspend (automatic, wakes on the next prompt) is NEVER confused with a
+# user pause (deliberate, stays down and fails fast) — different marker files.
+# --------------------------------------------------------------------------
+
+def agent_idle_suspended():
+    return os.path.exists(IDLE_SUSPEND_FILE)
+
+
+def idle_suspend_enabled():
+    return not os.path.exists(IDLE_SUSPEND_OFF)
+
+
+def _idle_min():
+    """Minutes of no-activity before suspend (a persisted file overrides env)."""
+    try:
+        v = float(open(IDLE_MIN_FILE).read().strip())
+        if v >= 1:
+            return v
+    except Exception:
+        pass
+    return IDLE_SUSPEND_MIN
+
+
+def note_user_activity():
+    """Record a genuine USER turn (dashboard chat / menu-bar quick-ask). Resets
+    the idle clock; background work must NOT call this or the model never sleeps."""
+    global _last_user_activity
+    _last_user_activity = time.time()
+
+
+def _newest_external_turn_ts():
+    """Newest message ts from Telegram/hub sessions — activity this process can't
+    see directly (they go agent→serve→:8080, not through the dashboard). Read-only,
+    best-effort, 0.0 on any problem. Excludes 'cli' (the briefing's own -z turns)
+    so background work never resets the clock."""
+    if not os.path.exists(STATE_DB):
+        return 0.0
+    try:
+        import sqlite3
+        uri = "file:" + urllib.parse.quote(STATE_DB) + "?mode=ro"
+        con = sqlite3.connect(uri, uri=True, timeout=1.5)
+        row = con.execute(
+            "SELECT MAX(m.timestamp) FROM messages m JOIN sessions s "
+            "ON m.session_id = s.id WHERE s.source IN ('telegram','hub')"
+        ).fetchone()
+        con.close()
+        return float(row[0]) if row and row[0] else 0.0
+    except Exception:
+        return 0.0
+
+
+def _chat_jobs_active():
+    with _jobs_lock:
+        return any(not v.get("done") for v in CHAT_JOBS.values())
+
+
+def agent_wake(wait=True, timeout=90):
+    """Bring the model back after an idle-suspend (NOT a user pause). Bootstraps
+    the launchd service, clears the idle marker, and — when wait — blocks until
+    the model answers /v1/models or the timeout elapses. Returns True if the
+    model is (or came) online. Safe to call when already awake (idempotent)."""
+    uid = os.getuid()
+    try:
+        r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", MLX_PLIST],
+                           capture_output=True, text=True, timeout=20)
+        if r.returncode != 0 and "already" not in (r.stderr or "").lower():
+            time.sleep(3)  # launchd needs a beat after a recent bootout
+            subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", MLX_PLIST],
+                           capture_output=True, timeout=20)
+    except Exception as e:
+        print(f"[idle_suspend] wake bootstrap failed: {e}", file=sys.stderr)
+        return False
+    try:
+        os.remove(IDLE_SUSPEND_FILE)
+    except OSError:
+        pass
+    for _k in ("mlx_ram", "mlx_ram_fast", "sys_live"):
+        _widget_cache.pop(_k, None)
+    note_user_activity()
+    if not wait:
+        return True
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if model_online():
+            return True
+        time.sleep(1.5)
+    return model_online()
+
+
+def idle_suspend_loop():
+    """Auto-suspend the model server after _idle_min() of no USER activity,
+    freeing its ~26GB; the next user turn wakes it (agent_wake). Background
+    briefing/watchtower work never counts as activity and never wakes a sleeping
+    model. While asleep, also wake if a Telegram/hub turn shows up in state.db
+    (best-effort cross-surface wake — the dashboard can't intercept that path)."""
+    while True:
+        time.sleep(30)
+        try:
+            if not idle_suspend_enabled():
+                continue
+            if agent_paused():
+                continue                # deliberate park — leave it down
+            if agent_idle_suspended():
+                # asleep: wake if a Telegram/hub turn arrived since we slept.
+                slept_at = 0.0
+                try:
+                    slept_at = float(open(IDLE_SUSPEND_FILE).read().strip() or 0)
+                except Exception:
+                    pass
+                if _newest_external_turn_ts() > slept_at + 1:
+                    print("[idle_suspend] external turn while asleep — waking",
+                          file=sys.stderr)
+                    agent_wake(wait=False)
+                continue
+            if not model_online():
+                continue                # nothing running to suspend
+            if _chat_jobs_active() or globals().get("_briefing_generating"):
+                continue                # a turn is in flight — never suspend mid-work
+            idle_for = time.time() - max(_last_user_activity,
+                                         _newest_external_turn_ts())
+            if idle_for < _idle_min() * 60:
+                continue
+            uid = os.getuid()
+            subprocess.run(["launchctl", "bootout", f"gui/{uid}/{MLX_LABEL}"],
+                           capture_output=True, timeout=15)
+            with open(IDLE_SUSPEND_FILE, "w") as _f:
+                _f.write(str(time.time()))
+            for _k in ("mlx_ram", "mlx_ram_fast", "sys_live"):
+                _widget_cache.pop(_k, None)
+            print(f"[idle_suspend] no user activity for {idle_for / 60:.0f}m — "
+                  "suspended model server (freed its RAM); next prompt wakes it",
+                  file=sys.stderr)
+        except Exception as e:
+            print(f"[idle_suspend] loop error: {e}", file=sys.stderr)
 
 
 # --------------------------------------------------------------------------
@@ -1902,7 +2121,7 @@ def hub_data():
 
 MODELS_FILE = os.path.join(DATA, "models.json")
 ACTIVE_MODEL_FILE = os.path.join(DATA, "active-model")
-DEFAULT_MODEL = "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit"
+DEFAULT_MODEL = "mlx-community/Qwen3.8-27B-4bit"
 PAUSE_FILE = os.path.join(DATA, "agent-paused")
 MLX_LABEL = "com.hermes.mlx-server"
 MLX_PLIST = os.path.join(HOME, "Library", "LaunchAgents", MLX_LABEL + ".plist")
@@ -1924,13 +2143,18 @@ def agent_power(action):
             return {"ok": False, "error": type(e).__name__}
         with open(PAUSE_FILE, "w") as f:
             f.write(str(time.time()))
+        try:                       # a deliberate pause supersedes any idle-suspend
+            os.remove(IDLE_SUSPEND_FILE)
+        except OSError:
+            pass
         _widget_cache.pop("sys_live", None)
         return {"ok": True, "paused": True}
     if action == "resume":
-        try:
-            os.remove(PAUSE_FILE)
-        except OSError:
-            pass
+        for _pf in (PAUSE_FILE, IDLE_SUSPEND_FILE):   # clear both down-states
+            try:
+                os.remove(_pf)
+            except OSError:
+                pass
         try:
             r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", MLX_PLIST],
                                capture_output=True, text=True, timeout=20)
@@ -1944,16 +2168,41 @@ def agent_power(action):
     return {"ok": False, "error": "unknown action"}
 
 _SEED_MODELS = [
-    {"id": "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit", "label": "Qwen3-30B-A3B",
-     "ram": 18, "note": "MoE · fast · current default"},
-    {"id": "mlx-community/Hermes-3-Llama-3.1-8B-4bit", "label": "Hermes-3-8B",
-     "ram": 5, "note": "Nous · tuned for tool-calling"},
-    {"id": "mlx-community/Qwen3-8B-4bit", "label": "Qwen3-8B",
-     "ram": 5, "note": "strong general 8B"},
-    {"id": "mlx-community/Qwen3-14B-4bit", "label": "Qwen3-14B",
-     "ram": 9, "note": "more headroom for tool chains"},
-    {"id": "mlx-community/Qwen3-4B-Instruct-2507-4bit", "label": "Qwen3-4B",
-     "ram": 3, "note": "ultra-light"},
+    # Roster policy (2026-08-18, user call): TWO models only.
+    #  * Qwen3.8-27B — the assistant's brain (primary lane :8080, mlx_vlm backend
+    #    + native MTP speculative decoding ≈2x, APC prefix cache).
+    #  * Qwen3.5-9B — the BACKGROUND lane (:8081, com.hermes.mlx-bg): all
+    #    briefing / watchtower news+intel / For-You candidate passes go here so
+    #    the 27B stays warm for the user. Same GatedDeltaNet family + chat
+    #    template as 3.8 (XML tool calls, thinking control) — the only official
+    #    Qwen3.8 sizes are 27B and a 2.4T MoE, so 3.5-9B is the nearest sibling.
+    #    ~6GB, ~88 tok/s, 6/6 on the tool drill. Served via the mlx-vlm venv
+    #    (its tokenizer_config uses transformers-5's TokenizersBackend, which
+    #    mlx-lm's pinned transformers<5 cannot load).
+    # Qwen3.8-27B (2026-08-14): dense 27B, hybrid GatedDeltaNet/full-attention
+    # (model_type qwen3_5). Served by the mlx_vlm backend (isolated venv
+    # ~/.hermes/mlx-vlm-venv, launcher mlx-vlm-launch.py) with its NATIVE MTP
+    # drafter (`Qwen3.8-27B-MTP-bf16`, 0.9GB — the -MTP-4bit drafter ships NaN
+    # weights, mlx-vlm #1931) → speculative decoding ≈2.0x on code / 1.5x prose
+    # (measured M5 Max: 31 → 63/47 tok/s, block 3; block 6 is SLOWER than AR).
+    # APC_ENABLED=1 gives exact prefix caching (18k-token system prompt: 26s
+    # cold → 0.4s). mlx-lm 0.31.3 also loads it (qwen3_5 module) — that's the
+    # fallback if the venv is missing. Thinking is ON by default in the chat
+    # template at reasoning_effort=xhigh (~22k think tokens on trivial prompts),
+    # far too slow for a tool loop → roster default enable_thinking=false; the
+    # model-menu "Thinking" row flips it (low effort) and restarts the server.
+    {"id": "mlx-community/Qwen3.8-27B-4bit", "label": "Qwen3.8-27B",
+     "ram": 19, "note": "assistant brain · dense · MTP ~2x · Aug-2026",
+     "thinking": True,
+     "template_args": {"enable_thinking": False},
+     "backend": "mlx_vlm",
+     "draft_model": "mlx-community/Qwen3.8-27B-MTP-bf16",
+     "draft_kind": "mtp", "draft_block_size": 3},
+    {"id": "mlx-community/Qwen3.5-9B-4bit", "label": "Qwen3.5-9B",
+     "ram": 7, "note": "background lane · news, scraping, briefings · fast",
+     "role": "background", "thinking": True,
+     "template_args": {"enable_thinking": False},
+     "backend": "mlx_vlm"},
 ]
 
 _model_dl = {}          # id -> "downloading" | "done" | "error"
@@ -1964,7 +2213,123 @@ def _model_registry():
     if not reg or not isinstance(reg.get("models"), list):
         reg = {"models": list(_SEED_MODELS)}
         write_json(MODELS_FILE, reg)
+    else:
+        # migrate: seed entries added after models.json was first written are
+        # merged in (by id, appended after the current default) so an existing
+        # install sees new roster models without a reset. User edits win.
+        have = {m.get("id") for m in reg["models"]}
+        missing = [dict(m) for m in _SEED_MODELS if m["id"] not in have]
+        dirty = False
+        if missing:
+            ins = 1 if reg["models"] and reg["models"][0].get("id") == DEFAULT_MODEL else 0
+            reg["models"][ins:ins] = missing
+            dirty = True
+        # backfill keys a seed entry gained later (backend/draft_model/...) —
+        # only ABSENT keys, so user edits win
+        seeds = {m["id"]: m for m in _SEED_MODELS}
+        for m in reg["models"]:
+            sm = seeds.get(m.get("id"))
+            if not sm:
+                continue
+            for k, v in sm.items():
+                if k not in m:
+                    m[k] = v
+                    dirty = True
+        if dirty:
+            write_json(MODELS_FILE, reg)
     return reg["models"]
+
+
+def _model_entry(mid):
+    for m in _model_registry():
+        if m.get("id") == mid:
+            return m
+    return None
+
+
+# Per-model chat-template kwargs (mlx_lm server --chat-template-args). Written
+# on switch from the roster entry's "template_args"; mlx-server.sh reads it.
+TEMPLATE_ARGS_FILE = os.path.join(DATA, "chat-template-args")
+
+
+# Per-model server backend (mlx-server.sh reads it): {"backend": "mlx_lm"|
+# "mlx_vlm", "draft_model", "draft_kind", "draft_block_size", "enable_thinking",
+# "reasoning_effort"}. mlx_vlm = isolated venv + mlx-vlm-launch.py (native MTP
+# speculative decoding + APC prefix cache); anything else = python3 -m mlx_lm server.
+SERVER_BACKEND_FILE = os.path.join(DATA, "server-backend")
+MLX_VLM_VENV_PY = os.path.join(HOME, ".hermes", "mlx-vlm-venv", "bin", "python")
+
+
+def _write_template_args(mid):
+    m = _model_entry(mid) or {}
+    ta = m.get("template_args")
+    try:
+        if isinstance(ta, dict) and ta:
+            with open(TEMPLATE_ARGS_FILE, "w") as f:
+                json.dump(ta, f)
+        else:
+            os.remove(TEMPLATE_ARGS_FILE)
+    except OSError:
+        pass
+    # backend selection for mlx-server.sh
+    backend = m.get("backend") or "mlx_lm"
+    if backend == "mlx_vlm" and not os.path.exists(MLX_VLM_VENV_PY):
+        backend = "mlx_lm"          # venv missing → mlx-lm still loads Qwen3.8
+    cfg = {"backend": backend}
+    if backend == "mlx_vlm":
+        for k in ("draft_model", "draft_kind", "draft_block_size"):
+            if m.get(k) is not None:
+                cfg[k] = m[k]
+        ta = ta if isinstance(ta, dict) else {}
+        cfg["enable_thinking"] = bool(ta.get("enable_thinking", True))
+        if ta.get("reasoning_effort"):
+            cfg["reasoning_effort"] = ta["reasoning_effort"]
+    try:
+        with open(SERVER_BACKEND_FILE, "w") as f:
+            json.dump(cfg, f)
+    except OSError:
+        pass
+
+
+def model_thinking_state(mid=None):
+    """{supported, enabled} for the roster entry (thinking = chat template
+    honours enable_thinking; enabled = what the server was started with)."""
+    m = _model_entry(mid or active_model()) or {}
+    if not m.get("thinking"):
+        return {"supported": False, "enabled": False}
+    ta = m.get("template_args") or {}
+    return {"supported": True, "enabled": ta.get("enable_thinking", True) is not False}
+
+
+def set_model_thinking(enabled, mid=None):
+    """Flip enable_thinking for a thinking-capable roster model. Persists to
+    models.json; if it's the active model, rewrites the args file and restarts
+    the server (bootout→bootstrap, same as a switch) so it takes effect."""
+    mid = mid or active_model()
+    reg = _model_registry()
+    m = next((x for x in reg if x.get("id") == mid), None)
+    if not m or not m.get("thinking"):
+        return {"ok": False, "error": "model has no thinking toggle"}
+    ta = dict(m.get("template_args") or {})
+    if enabled:
+        ta["enable_thinking"] = True
+        ta.setdefault("reasoning_effort", "low")   # xhigh default overthinks
+    else:
+        ta["enable_thinking"] = False
+        ta.pop("reasoning_effort", None)
+    m["template_args"] = ta
+    write_json(MODELS_FILE, {"models": reg})
+    if mid != active_model():
+        return {"ok": True, "enabled": bool(enabled), "restarted": False}
+    _write_template_args(mid)
+    if agent_paused() or agent_idle_suspended():
+        return {"ok": True, "enabled": bool(enabled), "restarted": False}
+    try:
+        _mlx_restart()
+    except Exception as e:
+        return {"ok": False, "error": f"restart failed: {e}"}
+    _widget_cache.pop("sys_live", None)
+    return {"ok": True, "enabled": bool(enabled), "restarted": True, "loading": True}
 
 
 def _hf_cache_dir(mid):
@@ -2023,10 +2388,19 @@ def models_payload():
     out = []
     for m in reg:
         out.append({**m, "active": m["id"] == active,
-                    "downloaded": _model_downloaded(m["id"]),
+                    "downloaded": _model_downloaded(m["id"]) and
+                    (not m.get("draft_model") or _model_downloaded(m["draft_model"])),
                     "downloading": _model_dl.get(m["id"]) == "downloading"})
-    ram = None if agent_paused() else _cached("mlx_ram", 60, _mlx_footprint_gb)
+    _down = agent_paused() or agent_idle_suspended()   # process not resident
+    ram = None if _down else _cached("mlx_ram", 60, _mlx_footprint_gb)
+    bgm = bg_model()
     return {"active": active, "models": out, "paused": agent_paused(),
+            "thinking": model_thinking_state(active),
+            "bg": {"model": bgm, "online": bg_online(),
+                   "label": next((m.get("label") for m in reg if m.get("id") == bgm), bgm.split("/")[-1])},
+            "idle_suspended": agent_idle_suspended(),
+            "idle_enabled": idle_suspend_enabled(),
+            "idle_min": _idle_min(),
             "ram_gb": ram,
             "mem": {"soft_gb": MLX_SOFT_GB, "hard_gb": MLX_HARD_GB,
                     "over": bool(ram and ram >= MLX_SOFT_GB),
@@ -2040,6 +2414,7 @@ def switch_model(mid):
         return {"ok": False, "error": "model not downloaded yet"}
     with open(ACTIVE_MODEL_FILE, "w") as f:
         f.write(mid)
+    _write_template_args(mid)      # per-model chat-template kwargs (thinking)
     try:
         subprocess.run([HERMES, "config", "set", "model.default", mid],
                        capture_output=True, text=True, timeout=30, env=_hermes_env())
@@ -2077,12 +2452,18 @@ def download_model(mid):
     def run():
         _model_dl[mid] = "downloading"
         try:
-            subprocess.run(
-                [sys.executable, "-c",
-                 "from huggingface_hub import snapshot_download;"
-                 f"snapshot_download('{mid}')"],
-                capture_output=True, text=True, timeout=7200, env=_hermes_env())
-            _model_dl[mid] = "done" if _model_downloaded(mid) else "error"
+            ids = [mid]
+            dm = (_model_entry(mid) or {}).get("draft_model")
+            if dm:
+                ids.append(dm)          # speculative drafter rides along
+            for _id in ids:
+                subprocess.run(
+                    [sys.executable, "-c",
+                     "from huggingface_hub import snapshot_download;"
+                     f"snapshot_download('{_id}')"],
+                    capture_output=True, text=True, timeout=7200, env=_hermes_env())
+            ok = all(_model_downloaded(_id) for _id in ids)
+            _model_dl[mid] = "done" if ok else "error"
         except Exception:
             _model_dl[mid] = "error"
     threading.Thread(target=run, daemon=True).start()
@@ -2223,7 +2604,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "state": job["state"],
                             "text": job["text"], "status": job["status"],
                             "approval": job["approval"], "done": job["done"],
-                            "reply": job["reply"], "err": not job["ok"]})
+                            "reply": job["reply"], "err": not job["ok"],
+                            # aux_autoroute: Claude auto-escalation for this turn
+                            "deep": job.get("deep")})
         elif path == "/api/status":
             self._json(system_status())
         elif path == "/api/widgets":
@@ -2444,6 +2827,40 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/agent/resume":
             self._json(agent_power("resume"))
             return
+        if path == "/api/agent/wake":
+            # explicit wake from an idle-suspend (async; UI polls /api/models).
+            # A no-op if the model is a deliberate pause or already awake.
+            if agent_idle_suspended():
+                threading.Thread(target=agent_wake, kwargs={"wait": True},
+                                 daemon=True).start()
+                self._json({"ok": True, "waking": True})
+            else:
+                self._json({"ok": True, "waking": False,
+                            "paused": agent_paused()})
+            return
+        if path == "/api/agent/idle_config":
+            # toggle idle-suspend on/off and/or set the minutes threshold.
+            d = self._body_json()
+            if "enabled" in d:
+                try:
+                    if d.get("enabled"):
+                        if os.path.exists(IDLE_SUSPEND_OFF):
+                            os.remove(IDLE_SUSPEND_OFF)
+                    else:
+                        open(IDLE_SUSPEND_OFF, "w").close()
+                except OSError:
+                    pass
+            if d.get("minutes") is not None:
+                try:
+                    mins = float(d["minutes"])
+                    if mins >= 1:
+                        with open(IDLE_MIN_FILE, "w") as f:
+                            f.write(str(mins))
+                except (TypeError, ValueError):
+                    pass
+            self._json({"ok": True, "enabled": idle_suspend_enabled(),
+                        "minutes": _idle_min()})
+            return
         if path == "/api/model/mem_override":
             # user's "allow it" escape hatch: touch/remove the override file so
             # mlx_admission stops refusing work while memory is over the ceiling.
@@ -2469,6 +2886,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/models/download":
             self._json(download_model((self._body_json().get("id") or "").strip()))
+            return
+        if path == "/api/models/thinking":
+            d = self._body_json()
+            self._json(set_model_thinking(bool(d.get("enabled")), d.get("id")))
             return
         if path == "/api/models/add":
             d = self._body_json()
@@ -2519,6 +2940,7 @@ class Handler(BaseHTTPRequestHandler):
                            "with your terminal tools): " + ", ".join(attachments) + "\n\n")
             prompt += message
 
+            note_user_activity()   # genuine user turn — resets the idle clock
             job = _new_job(session)
             threading.Thread(target=_chat_worker, args=(job, session, prompt),
                              daemon=True).start()
@@ -2542,6 +2964,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     threading.Thread(target=briefing_loop, daemon=True).start()
     threading.Thread(target=memory_guard_loop, daemon=True).start()
+    threading.Thread(target=idle_suspend_loop, daemon=True).start()
     if "system_sampler_loop" in globals():   # wave-2 live system charts
         threading.Thread(target=globals()["system_sampler_loop"],
                          daemon=True).start()

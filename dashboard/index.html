@@ -1101,7 +1101,7 @@ async function renderAIInfo(){
   const ttft=(t.ttft_ms||{}).p50;
   $('ai-ttft').textContent=ttft?(ttft<1000?Math.round(ttft)+' ms':(ttft/1000).toFixed(1)+' s'):'—';
   const ram=md.ram_gb, soft=(md.mem||{}).soft_gb||50;
-  $('ai-ram').textContent=md.paused?'paused':(ram!=null?(Math.round(ram*10)/10)+' / '+Math.round(soft)+' GB':'—');
+  $('ai-ram').textContent=md.paused?'paused':(md.idle_suspended?'sleeping':(ram!=null?(Math.round(ram*10)/10)+' / '+Math.round(soft)+' GB':'—'));
   const bar=$('ai-membar'),pct=(ram!=null&&!md.paused)?Math.min(100,Math.round(100*ram/soft)):0;
   bar.style.width=pct+'%';bar.className=pct>=100?'bad':pct>=85?'warn':'';
 }
@@ -1704,10 +1704,11 @@ function updateGreet(){
 updateGreet();setInterval(updateGreet,60000);
 
 // model pill + switcher + live agent state
-let modelLoading=false, agentBusy=false, agentPaused=false;
+let modelLoading=false, agentBusy=false, agentPaused=false, agentIdle=false;
 function setModel(on,txt){
   if(modelLoading||agentBusy)return;
   if(agentPaused){$('p-model').className='pdot';$('p-model-t').textContent='paused';return;}
+  if(agentIdle){$('p-model').className='pdot';$('p-model-t').textContent='sleeping';return;}
   $('p-model').className='pdot '+(on?'on':'off');
   if(txt!==undefined)$('p-model-t').textContent=txt;
 }
@@ -1720,25 +1721,39 @@ async function loadModels(){
   let d;try{d=await(await fetch('/api/models')).json();}catch(e){return;}
   const menu=$('model-menu');
   agentPaused=!!d.paused;
+  agentIdle=!!d.idle_suspended;
   const active=d.models.find(m=>m.active);
   if(!modelLoading&&!agentBusy){
     if(agentPaused){$('p-model').className='pdot';$('p-model-t').textContent='paused';}
+    else if(agentIdle){$('p-model').className='pdot';$('p-model-t').textContent='sleeping';}
     else if(active){$('p-model-t').textContent=active.label;}
   }
   menu.innerHTML='<div class="mmhead">Agent model · lighter = less RAM</div>'+d.models.map(m=>{
     let act;
-    if(m.active)act=agentPaused?'paused':'active';
+    if(m.active)act=agentPaused?'paused':(agentIdle?'sleeping':'active');
     else if(m.downloading)act='downloading…';
     else if(m.downloaded)act='switch';
     else act='download'+(m.ram?' · '+m.ram+'GB':'');
-    return '<div class="mmi'+(m.active&&!agentPaused?' on':'')+'" data-id="'+esc(m.id)+'" data-dl="'+(m.downloaded?1:0)+'" data-active="'+(m.active?1:0)+'" data-busy="'+(m.downloading?1:0)+'">'+
+    return '<div class="mmi'+(m.active&&!agentPaused&&!agentIdle?' on':'')+'" data-id="'+esc(m.id)+'" data-dl="'+(m.downloaded?1:0)+'" data-active="'+(m.active?1:0)+'" data-busy="'+(m.downloading?1:0)+'">'+
       '<span class="dot"></span><div style="min-width:0"><div class="nm">'+esc(m.label)+'</div><div class="rm2">'+esc(m.note||'')+(m.ram?' · ~'+m.ram+'GB RAM':'')+'</div></div>'+
       '<span class="act">'+act+'</span></div>';}).join('');
   // power row: park the model to free its RAM / wake it back up
   const ram=(d.ram_gb!=null&&d.ram_gb>0.2)?(' · frees ~'+(Math.round(d.ram_gb*10)/10)+' GB RAM'):'';
-  menu.innerHTML+=agentPaused
+  menu.innerHTML+=agentIdle
+    ? '<div class="mmpower resume" id="mm-wake"><svg class="ic" viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3"/></svg><div style="min-width:0"><div class="nm">Wake model now</div><div class="rm2">'+esc('asleep to save RAM · wakes on your next message anyway')+'</div></div></div>'
+    : (agentPaused
     ? '<div class="mmpower resume" id="mm-power"><svg class="ic" viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3"/></svg><div style="min-width:0"><div class="nm">Resume agent</div><div class="rm2">reloads the model — chat & Telegram come back</div></div></div>'
-    : '<div class="mmpower" id="mm-power"><svg class="ic" viewBox="0 0 24 24"><rect x="5" y="4" width="4.5" height="16" rx="1.5"/><rect x="14.5" y="4" width="4.5" height="16" rx="1.5"/></svg><div style="min-width:0"><div class="nm">Pause agent</div><div class="rm2">'+esc('parks the model'+ram+' — chat & Telegram pause too')+'</div></div></div>';
+    : '<div class="mmpower" id="mm-power"><svg class="ic" viewBox="0 0 24 24"><rect x="5" y="4" width="4.5" height="16" rx="1.5"/><rect x="14.5" y="4" width="4.5" height="16" rx="1.5"/></svg><div style="min-width:0"><div class="nm">Pause agent</div><div class="rm2">'+esc('parks the model'+ram+' — chat & Telegram pause too')+'</div></div></div>');
+  // thinking row — only for roster models whose chat template honours
+  // enable_thinking (Qwen3.8). Off = fast tool loop; on = deeper, much slower.
+  const th=d.thinking||{};
+  if(th.supported){
+    menu.innerHTML+='<div class="mmpower'+(th.enabled?' resume':'')+'" id="mm-think"><svg class="ic" viewBox="0 0 24 24" style="fill:none;stroke-width:2"><path d="M12 3a6 6 0 0 0-3.5 10.9V17h7v-3.1A6 6 0 0 0 12 3z"/><path d="M10 21h4"/></svg><div style="min-width:0"><div class="nm">Thinking: '+(th.enabled?'on':'off')+'</div><div class="rm2">'+esc(th.enabled?'reasons before answering (low effort) — slower turns · tap to turn off':'direct answers — fastest for tools · tap to turn on (slower)')+'</div></div></div>';
+  }
+  // background lane row — the small always-on model that news/briefings use
+  if(d.bg&&d.bg.model){
+    menu.innerHTML+='<div class="mmpower" id="mm-bg" style="cursor:default"><svg class="ic" viewBox="0 0 24 24" style="fill:none;stroke-width:2"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg><div style="min-width:0"><div class="nm">Background: '+esc(d.bg.label||d.bg.model)+' <span class="rm2" style="display:inline">· '+(d.bg.online?'online':'offline')+'</span></div><div class="rm2">'+esc('news, briefings & scraping run here — the main model stays yours')+'</div></div></div>';
+  }
   // memory ceiling row — RAM vs the hard limit; over-limit shows controls
   const mm=d.mem||{};
   if(!agentPaused&&d.ram_gb!=null){
@@ -1757,6 +1772,10 @@ async function loadModels(){
   menu.querySelectorAll('.mmi').forEach(el=>el.onclick=()=>onModelClick(el));
   const pw=menu.querySelector('#mm-power');
   if(pw)pw.onclick=()=>agentPaused?resumeAgent():pauseAgent();
+  const wk=menu.querySelector('#mm-wake');
+  if(wk)wk.onclick=()=>wakeAgent();
+  const tk=menu.querySelector('#mm-think');
+  if(tk)tk.onclick=()=>toggleThinking(!th.enabled);
   const ovr=menu.querySelector('#mm-ovr');
   if(ovr)ovr.onclick=async()=>{const on=!ovr.classList.contains('on');
     await fetch('/api/model/mem_override',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({allow:on})});loadModels();};
@@ -1765,6 +1784,14 @@ async function loadModels(){
     await fetch('/api/model/mem_free',{method:'POST'});
     showModelSwap('','Freeing memory','Restarting the model to clear its cache — about 30–60s.');
     setTimeout(()=>{hideModelSwap&&hideModelSwap();loadModels();},4000);};
+}
+async function toggleThinking(on){
+  if(!confirm((on?'Turn thinking ON? Turns get noticeably slower (the model reasons first).':'Turn thinking OFF? Direct answers, fastest for tool calls.')+' The model server restarts (~30–60s).'))return;
+  $('model-menu').hidden=true;
+  let r={};try{r=await(await fetch('/api/models/thinking',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:on})})).json();}catch(e){}
+  if(r&&r.restarted){modelLoading=true;$('p-model').className='pdot busy';$('p-model-t').textContent='loading…';
+    showModelSwap('','Thinking '+(on?'on':'off'),'Restarting the model server with the new setting — about 30–60s.');waitForModel('the agent');}
+  else loadModels();
 }
 async function pauseAgent(){
   if(!confirm('Pause the agent? This unloads the model to free its RAM. Dashboard chat and Telegram replies won\'t work until you resume.'))return;
@@ -1780,6 +1807,15 @@ async function resumeAgent(){
   $('p-model').className='pdot busy';$('p-model-t').textContent='waking…';
   showModelSwap('','Waking the agent','Reloading the model into memory — about 30–60s.');
   await fetch('/api/agent/resume',{method:'POST'});
+  waitForModel('the agent');
+}
+async function wakeAgent(){
+  // manual wake from idle-suspend (the next chat would wake it anyway).
+  $('model-menu').hidden=true;
+  agentIdle=false;modelLoading=true;
+  $('p-model').className='pdot busy';$('p-model-t').textContent='waking…';
+  showModelSwap('','Waking the agent','Reloading the model into memory — about 30–60s.');
+  await fetch('/api/agent/wake',{method:'POST'});
   waitForModel('the agent');
 }
 async function onModelClick(el){
@@ -2007,9 +2043,27 @@ async function loadHistory(){
   const d=await (await fetch('/api/history?session='+encodeURIComponent(session))).json();
   if(!d.messages||!d.messages.length){emptyState();return;}
   for(const m of d.messages){
+    if(m.role!=='user'&&m.deep&&!m.err){   // a Claude answer (auto-route / escalate) — same card as live
+      const b=addBubble('','bot',true);
+      const md=b.querySelector('.md'); if(md)md.remove();
+      b.setAttribute('data-esc','1');
+      b.insertAdjacentHTML('beforeend',deepCardHTML(m.text,m.deep,m.ts));
+      continue;
+    }
     const b=addBubble(m.text,m.role==='user'?'user':'bot',m.role!=='user'&&!m.err);
     if(m.err)b.classList.add('err');
   }
+}
+// shared markup for a Claude "deep" answer card (aux_agent.js injects the .deepcard CSS)
+function deepCardHTML(text,meta,ts){
+  meta=meta||{};
+  const secs=meta.ms?(meta.ms/1000).toFixed(meta.ms<10000?1:0)+'s':'';
+  const when=ts?new Date(ts*1000).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'';
+  const lab='Claude · '+(meta.depth==='deep'?'deep':'quick')+(meta.auto?' · auto':'');
+  return '<div class="deepcard" title="'+esc(meta.reason||'')+'"><div class="dk-head">'
+    +'<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12h6M14 12h6M10 12a2 2 0 1 0 4 0 2 2 0 0 0-4 0"/><path d="M6 8l-2 4 2 4M18 8l2 4-2 4"/></svg>'
+    +'<span class="dk-lab">'+esc(lab)+'</span><span class="dk-meta">'+esc([meta.model||'',secs,when].filter(Boolean).join(' · '))+'</span></div>'
+    +'<div class="dk-body">'+renderMd(text||'')+'</div></div>';
 }
 let attachments=[];
 function renderAttach(){
@@ -2058,6 +2112,23 @@ async function sendMsg(text){
   $('send').disabled=false;$('input').focus();loadSessions();renderHub();
   if((document.querySelector('.deck').dataset.chat||'')==='full')renderChatSide();
 }
+// Claude auto-route (aux_autoroute): the poll payload carries `deep`
+// {state: thinking|done|suggest, text, model, ms, reason}. Rendering lives in
+// aux_agent.js (window.hermesDeep); this just forwards + keeps polling the
+// deep answer after the local turn is done.
+function deepForward(jid,bubble,deep){
+  if(!deep)return;
+  try{if(window.hermesDeep)window.hermesDeep(jid,bubble,deep);}catch(e){}
+}
+async function pollDeep(jid,bubble){
+  for(let i=0;i<600;i++){          // ≤ 10 min (opus/xhigh can be slow)
+    await new Promise(r=>setTimeout(r,1000));
+    let d;try{d=await (await fetch('/api/claude/autoroute/job?job='+jid)).json();}catch(e){continue;}
+    if(!d||d.gone)return;
+    if(d.deep){deepForward(jid,bubble,d.deep);if(d.deep.state!=='thinking')return;}
+    else return;
+  }
+}
 async function streamJob(jid,thinking){
   let bubble=null, approvalBox=null;
   let firstTokTs=null;   // live tok/s: time the first token lands + running char count
@@ -2068,6 +2139,7 @@ async function streamJob(jid,thinking){
     try{d=await (await fetch('/api/chat/poll?job='+jid)).json();}
     catch(e){await new Promise(r=>setTimeout(r,1500));continue;}
     if(d.gone){thinking.remove();addBubble('The agent job was lost (dashboard restarted?).','bot',false).classList.add('err');setAgentState(null);return;}
+    if(d.deep&&d.deep.state!=='thinking'){deepForward(jid,ensureBubble(),d.deep);}
     if(d.text){const b=ensureBubble();b.querySelector('.md').innerHTML=renderMd(d.text)+(d.done?'':' <span class="caret">▌</span>');
       $('msgs').scrollTop=$('msgs').scrollHeight;
       // live tokens/sec — chars≈token*3.6 for English; update the Local AI panel live
@@ -2105,6 +2177,7 @@ async function streamJob(jid,thinking){
       setAgentState(null);
       window.__liveTps=null;   // freeze the live rate; panel reverts to the metrics avg
       renderAIInfo();
+      if(d.deep){deepForward(jid,b,d.deep);if(d.deep.state==='thinking')pollDeep(jid,b);}
       return;
     }
     await new Promise(r=>setTimeout(r,700));
@@ -2147,8 +2220,11 @@ $('input').addEventListener('input',function(){this.style.height='auto';this.sty
 <script src="/aux_shortcuts.js"></script>
 <script src="/aux_promotion.js"></script>
 <script src="/aux_youmodel.js"></script>
+<script src="/aux_graphify.js"></script>
 <script src="/aux_settings_shell.js"></script>
 <script src="/aux_prefs.js"></script>
 <script src="/aux_agent.js"></script>
+<script src="/aux_topbar.js"></script>
+<script src="/aux_newsdesk.js"></script>
 </body>
 </html>

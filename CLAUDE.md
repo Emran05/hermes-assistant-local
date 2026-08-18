@@ -36,7 +36,80 @@ and explicit agent tool calls (web search etc.) touch the internet.
   + cached `ram_gb`. Guards: memory_guard skips while paused, switch_model
   auto-resumes, `/api/chat` fails fast with a friendly reply, app relaunch
   does NOT auto-resume (kickstart no-ops on a booted-out service).
-- **Model toggle** — header pill is a switcher (`/api/models`, `/api/models/switch|download|add`). `mlx-server.sh` reads the chosen repo id from `~/.hermes/dashboard/active-model` (falls back to the 30B). Switch = write that file + `hermes config set model.default` + `launchctl kickstart com.hermes.mlx-server`, then poll `/api/health` until the new model loads. Roster seeded (`_SEED_MODELS`, verified HF ids) with Qwen3-30B (current) + lighter Hermes-3-8B / Qwen3-8B / Qwen3-14B / Qwen3-4B; user-extendable via models.json. Downloads run in a bg thread via `huggingface_hub.snapshot_download`. Rationale: 30B MoE resident ~18GB; a dense 8B (~5GB) is plenty for tool-calling since Claude does the coding.
+- **Idle-suspend (auto RAM reclaim)** — `idle_suspend_loop()` boots
+  com.hermes.mlx-server out after `_idle_min()` (default 10, `IDLE_SUSPEND_MIN`
+  env / `~/.hermes/dashboard/idle-suspend-min`) of no USER activity, freeing its
+  ~26GB, and writes `~/.hermes/dashboard/agent-idle-suspended` (a unix-ts).
+  DISTINCT from a manual pause: a pause stays down + fails fast (`agent-paused`);
+  an idle-suspend AUTO-WAKES on the next turn. "USER activity" = dashboard
+  `/api/chat` (`note_user_activity()`) ∪ newest Telegram/hub turn in state.db —
+  background briefing/watchtower does NOT count and never wakes it. The chat
+  worker calls `agent_wake()` (bootstrap + poll `/v1/models`, ~30-50s cold
+  start) BEFORE the turn; while asleep the loop also wakes on a fresh
+  telegram/hub turn (best-effort — the dashboard can't intercept that path, so
+  the first Telegram msg after sleep may miss). Guards: memory_guard + the loop
+  both skip while suspended; the two marker files never coexist (pause/resume/
+  wake clear the other). Endpoints `/api/agent/wake`, `/api/agent/idle_config`
+  {enabled,minutes}; `/api/models` carries `idle_suspended`/`idle_enabled`/
+  `idle_min`; model menu shows a "sleeping · Wake now" row. Disable: touch
+  `~/.hermes/dashboard/idle-suspend-off` (or the settings toggle).
+- **Code knowledge graph (Graphify)** — `graphifyy` (official double-y pkg) in
+  an ISOLATED venv `~/.hermes/graphify-venv` (never the fragile framework
+  Python). `graphify update .` re-extracts the repo via tree-sitter (no LLM,
+  ~2.8k nodes/5.1k edges) → `graphify-out/{graph.json,graph.html,GRAPH_REPORT.md}`;
+  `graphify watch .` rebuilds on change. `aux_graphify.py` serves it read-only:
+  `GET /api/graph/stats` (counts + god-nodes) and `/api/graph/query?q=` (node +
+  neighbors — cheap "explain" the agent/dashboard use instead of grepping).
+  graph.json is mtime-cached. `graphify install --platform claude|hermes`
+  registers the `/graphify` skill into those agents' configs (harness-gated —
+  run via `!`). `graphify-out/` is generated (~5MB) — gitignore unless you want
+  it versioned.
+- **Model toggle** — header pill is a switcher (`/api/models`, `/api/models/switch|download|add`). `mlx-server.sh` reads the chosen repo id from `~/.hermes/dashboard/active-model` (falls back to Qwen3.8-27B). Switch = write that file + `hermes config set model.default` + `launchctl kickstart com.hermes.mlx-server`, then poll `/api/health` until the new model loads. Roster seeded (`_SEED_MODELS`) with Qwen3.8-27B (primary/default) + Qwen3.5-9B (background lane) — see roster policy; user-extendable via models.json (`_model_registry()` merges NEW seed entries into an existing models.json by id). Per-model `template_args` (roster field) → written on switch to `~/.hermes/dashboard/chat-template-args` → mlx-server.sh passes it as `--chat-template-args`; Qwen3.8 defaults `{enable_thinking:false}` (its template thinks at xhigh by default, ~22k tokens on trivial prompts). `POST /api/models/thinking {enabled}` flips it (on = low effort) and restarts the server; the model menu shows a Thinking on/off row when `/api/models`.thinking.supported. Qwen3.8-27B is `model_type qwen3_5` (drill 6/6 on both backends).
+- **Model-server backends (`mlx-server.sh`)** — roster entries may set `backend: "mlx_vlm"` (+ `draft_model`/`draft_kind`/`draft_block_size`); the switcher writes `~/.hermes/dashboard/server-backend` (JSON) and mlx-server.sh execs `~/.hermes/mlx-vlm-venv/bin/python mlx-vlm-launch.py` (mlx_vlm.server, OpenAI-compatible, uvicorn) instead of `python3 -m mlx_lm server`; missing venv → silently falls back to mlx-lm. The venv is ISOLATED (`install-mlx-vlm-venv.sh`: mlx-vlm 0.6.14 + mlx 0.32.1 + transformers 5 — never into the framework Python, it breaks mlx-lm). Qwen3.8-27B runs there with its NATIVE MTP drafter `mlx-community/Qwen3.8-27B-MTP-bf16` (0.9GB; the `-MTP-4bit` drafter ships NaN weights, mlx-vlm #1931) → speculative decoding: M5 Max 31 → 63 tok/s code / 47 prose (block 3; block 6 is SLOWER than AR; ~88%/55% acceptance), Hermes drill cases ~1.4-1.8x faster. `APC_ENABLED=1` (+`APC_EXACT_CACHE_ENTRIES=6`) = exact prefix cache — hybrid SSM models use "exact" whole-prefix snapshots, ~64KB/token; the ~18k-token Hermes system prompt goes 26s cold → 0.4s cached. Prefill is compute-bound at ~630-690 tok/s regardless of `--prefill-step-size` — first turn of a fresh session pays ~25s, nothing else does. `mlx-vlm-launch.py` shims: (1) mlx≥0.32 made `mx.random.state` read-only → mlx-vlm 0.6.14 crashed on every temperature>0 speculative request (`_restore_rng_state`); the launcher no-ops the restore (only RNG-stream separation, sampling stays correct); (2) `MLX_VLM_DEFAULT_REASONING_EFFORT` env → default `reasoning_effort` when thinking is on (template default xhigh); (3) atexit `os._exit(0)` because mlx 0.32 segfaults in the CompileCache destructor at teardown (that's the "Python quit unexpectedly" dialog — harmless but noisy). Thinking toggle on this backend = `--enable-thinking --thinking-budget 8192` + effort low. `_mlx_footprint_gb` pgrep matches both backends. mlx_vlm's `/v1/models` also lists every cached model; Hermes must send the exact model id (both backends load whatever id the request names). Downloads run in a bg thread via `huggingface_hub.snapshot_download`. Rationale: 30B MoE resident ~18GB; a dense 8B (~5GB) is plenty for tool-calling since Claude does the coding.
+- **Background lane (2026-08-18)** — a SECOND always-on small model, `com.hermes.mlx-bg`
+  (`mlx-server-bg.sh`, :8081, Qwen3.5-9B-4bit via the mlx-vlm venv — its
+  tokenizer_config uses transformers-5's `TokenizersBackend`, which mlx-lm's pinned
+  transformers<5 can't load; mlx-lm hangs on the first request). server.py:
+  `BG_MODEL_URL`, `bg_model()` (`~/.hermes/dashboard/bg-model`), `bg_online()`
+  (15s-cached probe), `bg_lane()` → `{lane, chat_url, model, hermes_args}` falling back
+  to the primary when :8081 is down. `run_agent(..., lane="bg")` adds `--provider
+  custom:bg -m <bg>` (named custom provider `bg` in `~/.hermes/config.yaml`
+  `custom_providers:` — the ONLY way to point one `hermes -z` at another base_url;
+  `OPENAI_BASE_URL` env is ignored when config has base_url). Producers on the lane:
+  briefing (`run_agent(lane="bg")`), watchtower synthesis + intel agent pass, For-You
+  (`_model_chat_url/_active_model`, `_fy_chat_url/_fy_active_model` consult `bg_lane()`).
+  Chat/clip/drill stay on the primary. `_mlx_footprint_gb` sums both lanes;
+  `/api/models.bg {model,online,label}`; model menu shows a "Background: …" row. Pause
+  parks only the primary (bg is ~7GB). Verified: briefing regenerated on :8081 while
+  :8080 saw zero requests; 9B tool suite 6/6, ~88 tok/s.
+- **Roster policy (2026-08-18, user call): TWO models** — Qwen3.8-27B (primary,
+  active, hermes `model.default`) + Qwen3.5-9B (background lane). Everything else was
+  removed from models.json AND the HF cache (Qwen3-30B-A3B, Hermes-3-8B deleted;
+  re-download from the menu if ever needed). The only official Qwen3.8 sizes are 27B
+  and a 2.4T MoE — there is no small 3.8; 3.5-9B is the nearest sibling (same
+  architecture/template).
+- **Claude auto-route (`aux_autoroute.py`, 2026-08-18)** — the local model NEVER used
+  the think-with-claude skill (bridge log: 4 calls total, all 07-06), so routing is
+  now decided in code per chat turn: `ar_score()` over the USER message (+3 explicit
+  "think hard/ask claude", +1 per judgment cue, +1 long, +0.5 "?", −1 per mechanical
+  cue, −2 very short, −3 command-like); ≥ `min_score` (2.5) → Claude runs IN PARALLEL
+  with the local turn (`quick`=Sonnet, `deep`=Opus only on an explicit "think hard");
+  the answer is persisted as a bot message with `deep:{model,ms,reason,…}` and shown
+  as the deep-card. Wraps `_chat_worker` only (aux_metrics redefines `_new_job` —
+  don't rely on job subclassing); `/api/chat/poll` carries `deep`, UI polls
+  `/api/claude/autoroute/job?job=` after done while state=thinking. Modes
+  `auto|suggest|off` in settings.json `auto_route` (`GET/POST /api/claude/autoroute`,
+  `POST /api/claude/autoroute/score {q}` dry-run). Verified live: hard question →
+  local + Sonnet (21s, parallel) persisted in order; routine → local only.
+- **Bridge gate rewrite (`_cb_gate`, 2026-08-18)** — the old keyword regexes refused
+  5/18 realistic escalations ("memory leak", "password field", ".env approach", "wipe
+  the cache", "should I create a component"). Now INTENT-based: secrets = action verb
+  within ~50 chars of a secret noun (or noun … "to send/upload"); destructive =
+  imperative rm -rf/wipe/format/delete-everything (question sentences exempt);
+  approval-bypass always; codegen = imperative produce-verb + code artefact in a
+  NON-question sentence, or filename + write/implement/refactor. Test set:
+  25/25 benign allowed, 12/12 harmful + 10/10 codegen refused, injected-context
+  caught (`scratchpad t_gate.py` pattern). The tool-lockout remains the real control.
 - **Live System widget** — `/api/sys` (2s cache) + a 3s client updater (`liveSystem`) patches the meters in place without a full hub re-render; shows a pulsing "live" dot.
 - **Markets widget** — Yahoo chart; sparkline is anchored at the previous close so its shape matches the daily %; meta shows "at close · <date>" / "live" from `marketState`+`regularMarketTime` (don't present holiday/last-session data as live).
 - **Modular widget hub** — the Hub view is a widget registry, not fixed HTML.
@@ -164,6 +237,20 @@ and explicit agent tool calls (web search etc.) touch the internet.
   The Telegram gateway service is separate (managed by `hermes gateway`).
 - **App** — `/Applications/Hermes Assistant.app`, real Swift/AppKit WKWebView
   shell (source `app/main.swift`, rebuild `app/build-app.sh`).
+
+- **DeepSeek Harness (`dsh`) spike — 2026-08-18, NOT integrated** — installed
+  locally (not global) at `~/.hermes/dsh` (`@deepseek-ai/dsh@0.1.0-rc.7`, MIT,
+  Node 22 via nvm, 306MB); `DSH_HOME=~/.hermes/dsh/home` holds `settings.yaml`
+  (pi-ai route `hermes-local` → `http://127.0.0.1:8080/v1`, `api:
+  openai-completions`, both roster model ids; needs a dummy `apiKeyEnv` —
+  `HERMES_LOCAL_API_KEY=local-anything` — pi-ai refuses keyless routes) and
+  `cordis.patch.yml` (agent-default-model → hermes-local/Qwen3-30B). Verified:
+  `dsh --profile headless "<task>"` did a real shell tool round-trip on the local
+  30B and answered correctly in 7.8s. Telemetry off (`DSH_TELEMETRY_MODE=DISABLED`,
+  also the default). Web UI: `dsh web` on :3080; programmatic: Python SDK
+  (`deepseek-harness-sdk`, JSON-RPC stdio) — that's the hook if it ever gets a
+  dashboard surface. Model ids sent by dsh must match the loaded model (see
+  backend note above).
 
 ## Commands
 ```bash

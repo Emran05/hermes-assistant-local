@@ -349,6 +349,13 @@ def _fy_prefilter(items, prof):
 # request/parse/validate style; URLs validated against the candidate pool)
 # --------------------------------------------------------------------------
 def _fy_chat_url():
+    """Background lane (:8081 small model) when it's up, else the primary."""
+    bl = globals().get("bg_lane")
+    if callable(bl):
+        try:
+            return bl()["chat_url"]
+        except Exception:
+            pass
     base = MODEL_URL
     if base.endswith("/v1/models"):
         return base[:-len("/models")] + "/chat/completions"
@@ -357,6 +364,12 @@ def _fy_chat_url():
 
 
 def _fy_active_model():
+    bl = globals().get("bg_lane")
+    if callable(bl):
+        try:
+            return bl()["model"]
+        except Exception:
+            pass
     try:
         with open(ACTIVE_MODEL_FILE) as f:
             m = f.read().strip()
