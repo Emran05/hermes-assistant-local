@@ -41,6 +41,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     var quickLoaded = false
     var pendingResumeJS: String?      // a hand-off to run once the main window has loaded
 
+    // ---- menu-bar info dropdown: weather · Claude usage · date · system ----
+    var menuTopbar: [String: Any] = [:]   // /api/topbar cache (weather + claude)
+    var menuSys: [String: Any] = [:]      // /api/sys cache (cpu/ram/disk/model)
+    var menuInfoTimer: Timer?
+
     // ---- P2.4 Message Center: the FDA-holding app feeds the dashboard ------
     let messagesSync = MessagesSync()
 
@@ -352,27 +357,96 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             b.target = self
             b.action = #selector(statusItemClicked)
             b.sendAction(on: [.leftMouseUp, .rightMouseUp])
-            b.toolTip = "Hermes Quick Ask (⌃⌥Space)"
+            b.toolTip = "Hermes — weather · Claude usage · system (⌃⌥Space for Quick Ask)"
+        }
+        fetchMenuInfo()
+        menuInfoTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            self?.fetchMenuInfo()
         }
     }
 
     @objc func statusItemClicked() {
-        let ev = NSApp.currentEvent
-        if let ev = ev, ev.type == .rightMouseUp || ev.modifierFlags.contains(.control) {
-            let menu = buildStatusMenu()
-            if let b = statusItem.button {
-                menu.popUp(positioning: nil, at: NSPoint(x: 0, y: b.bounds.height + 5), in: b)
-            }
-        } else {
-            toggleQuickAsk()
+        fetchMenuInfo()                    // refresh cache for next open; show cached now
+        let menu = buildStatusMenu()
+        if let b = statusItem.button {
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: b.bounds.height + 5), in: b)
         }
+    }
+
+    // Fetch weather+Claude (/api/topbar) and system meters (/api/sys) into the
+    // menu caches. Best-effort, non-blocking; the dropdown reads whatever's cached.
+    func fetchMenuInfo() {
+        for (path, isTopbar) in [("api/topbar", true), ("api/sys", false)] {
+            let url = DASH_URL.appendingPathComponent(path)
+            URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+                guard let self = self, let data = data,
+                      let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                else { return }
+                DispatchQueue.main.async {
+                    if isTopbar { self.menuTopbar = obj } else { self.menuSys = obj }
+                }
+            }.resume()
+        }
+    }
+
+    private func numStr(_ v: Any?) -> String {
+        if let i = v as? Int { return "\(i)" }
+        if let d = v as? Double { return "\(Int(d.rounded()))" }
+        return "?"
+    }
+    private func hm(_ secs: Double) -> String {
+        let s = Int(secs), h = Int(secs) / 3600, m = (s % 3600) / 60
+        return h > 0 ? "in \(h)h \(m)m" : "in \(m)m"
+    }
+    private func infoRow(_ title: String) -> NSMenuItem {
+        let it = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        it.isEnabled = false
+        return it
     }
 
     func buildStatusMenu() -> NSMenu {
         let m = NSMenu()
-        m.addItem(withTitle: "Quick Ask", action: #selector(toggleQuickAsk), keyEquivalent: "")
-        m.addItem(withTitle: "Open Main Window", action: #selector(showMainWindowAction(_:)), keyEquivalent: "")
+
+        // date header — MM/DD/YYYY, bold
+        let df = DateFormatter(); df.dateFormat = "MM/dd/yyyy"
+        let today = df.string(from: Date())
+        let hdr = NSMenuItem(title: today, action: nil, keyEquivalent: "")
+        hdr.isEnabled = false
+        hdr.attributedTitle = NSAttributedString(string: today,
+            attributes: [.font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
+        m.addItem(hdr)
         m.addItem(.separator())
+
+        // weather
+        if let w = menuTopbar["weather"] as? [String: Any],
+           (w["configured"] as? Bool) == true,
+           (w["error"] as? String) == nil,
+           let t = w["temp"], !(t is NSNull) {
+            let city = (w["city"] as? String) ?? ""
+            let desc = (w["desc"] as? String) ?? ""
+            m.addItem(infoRow("Weather    \(numStr(t))°  \(city)" + (desc.isEmpty ? "" : "  ·  \(desc)")))
+        }
+
+        // Claude plan usage
+        if let c = menuTopbar["claude"] as? [String: Any], (c["available"] as? Bool) == true {
+            var parts: [String] = []
+            if let pct = c["pct"] as? Int { parts.append("\(pct)%") }
+            if let msgs = c["msgs"], !(msgs is NSNull) { parts.append("\(numStr(msgs)) msgs") }
+            if let cost = c["cost"] as? Double { parts.append(String(format: "$%.2f", cost)) }
+            if let r = c["reset_in"] as? Double { parts.append("resets \(hm(r))") }
+            if !parts.isEmpty { m.addItem(infoRow("Claude     " + parts.joined(separator: "  ·  "))) }
+        }
+
+        // system hardware
+        if !menuSys.isEmpty {
+            m.addItem(infoRow("System     CPU \(numStr(menuSys["cpu_pct"]))%  ·  RAM \(numStr(menuSys["ram_pct"]))%  ·  Disk \(numStr(menuSys["disk_pct"]))% (\(numStr(menuSys["disk_free_gb"])) GB free)"))
+            let online = (menuSys["model_online"] as? Bool) == true
+            m.addItem(infoRow("Model      " + (online ? "online" : "sleeping / offline")))
+        }
+
+        m.addItem(.separator())
+        m.addItem(withTitle: "Quick Ask", action: #selector(toggleQuickAsk), keyEquivalent: "")
+        m.addItem(withTitle: "Open Dashboard", action: #selector(showMainWindowAction(_:)), keyEquivalent: "")
         let login = NSMenuItem(title: "Open at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
         if #available(macOS 13.0, *) {
             login.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
@@ -380,9 +454,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         m.addItem(login)
         m.addItem(.separator())
         m.addItem(withTitle: "Quit Hermes Assistant", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
-        for it in m.items { it.target = self }
-        // terminate: retarget to NSApp so it actually quits
-        m.items.last?.target = NSApp
+
+        for it in m.items where it.action != nil { it.target = self }
+        m.items.last?.target = NSApp     // terminate → NSApp
         return m
     }
 

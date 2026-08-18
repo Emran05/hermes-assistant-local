@@ -7,3 +7,5 @@ __pycache__/
 *.env
 .env*
 *.log
+# Graphify generated artifacts (~5MB, rebuild with `graphify update .`)
+graphify-out/
