@@ -341,6 +341,22 @@ and explicit agent tool calls (web search etc.) touch the internet.
   `model-autostart-off` + rerun install-services.sh with true/true to restore
   always-on. `--uninstall` removes. Telegram gateway separate (`hermes
   gateway`). Logs in `~/.hermes/logs/`.
+- **Menu-bar Quick Ask (rebuilt 2026-09-04)** — `dashboard/aux_quickask.js` IS the
+  popover: the Swift skeleton is frozen (380px wide; height only via bridge
+  `{action:"resize",h}` clamped 320..620; bridges `close`/`openMain`/`openApproval`,
+  `hermesClip` read → `__clipDeliver`, `hermesClipWrite`; Swift calls `__qaFocus()` on
+  show). Status strip = control surface (tap wakes/pauses via /api/agent/*, `Claude
+  on|off` pill on /api/claude/escalate, update pill from /api/update/check, `⋯` menu:
+  open main / clear session). Input is never disabled by model state — POST /api/chat
+  wakes an asleep model, the old health gate locked the popover most of the time.
+  `/` filters the action row (clip actions from /api/clip/actions → /api/clip/transform;
+  Plan my day; Ask Claude → /api/claude/think quick; Continue in main). Thread renders
+  `d.status` tool lines, inline Approve/Deny via /api/chat/approve, and `d.deep` as a
+  Claude card (previously dropped). Dual-role contract: inside index.html the file only
+  defines `window.hermesQuickAskResume`. Verify headless with the scratch harness
+  pattern: serve the skeleton on the dashboard origin via a Playwright route, stub
+  `window.webkit.messageHandlers`, and MOCK /api/chat + /api/chat/poll + /api/clip/
+  transform so tests never wake the 19GB model.
 - **App** — `/Applications/Hermes Assistant.app`, real Swift/AppKit WKWebView
   shell (source `app/main.swift`, rebuild `app/build-app.sh`).
 - **Versioning + self-update (2026-09-03)** — repo-root `VERSION` (currently

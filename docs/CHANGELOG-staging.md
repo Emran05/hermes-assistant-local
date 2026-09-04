@@ -459,3 +459,10 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   routes only exist after a dashboard restart), and no `v*` tag has been pushed
   to either remote yet — `git ls-remote --tags origin` is empty, so the stable
   channel correctly answers "no release found" until the first tag lands.
+- `<quickask-revamp>` (2026-09-04) Menu-bar popover rebuilt in aux_quickask.js (1286
+  lines, dependency-free): status strip as control surface (wake/pause, Claude on|off,
+  update pill), never-locked input, `/`-filtered one-tap actions (clipboard transforms,
+  Plan my day, Ask Claude, Continue in main), streaming thread with tool status, inline
+  Approve/Deny, Claude deep card, Copy/Continue hover actions, bridge-driven dynamic
+  height 320..620. Verified with mocked turns (0 errors, model never woken); dual-role
+  contract with index.html intact.

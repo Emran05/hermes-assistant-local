@@ -12,6 +12,14 @@ The first release meant to be installed by someone other than its author:
 a bootstrap script, a self-update path, and a security pass on the local API.
 
 ### Added
+- **Menu-bar Quick Ask, rebuilt.** The popover (⌃⌥Space) is now a control
+  surface: a status strip that wakes or pauses the model and toggles Claude
+  escalation with one tap, an ask field that is never locked by model state (a
+  send while asleep wakes it), one-tap clipboard actions (Summarize / Explain /
+  Rewrite), Plan my day and Ask Claude, `/` to filter actions, streaming answers
+  with inline Approve / Deny, Claude answers shown as their own card (they were
+  silently dropped before), Copy / Continue-in-main on every answer, and a
+  height that follows the content (320–620 px).
 - **Release + update system.** `VERSION` at the repo root is the single source
   of truth; `app/build-app.sh` stamps it (plus the short git sha) into the app
   bundle's `CFBundleShortVersionString` / `CFBundleVersion`. A new dashboard
