@@ -343,3 +343,68 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   `model.safetensors.index.json` present (`_weights_complete()`), not "any .safetensors"
   — the old check reported the new model downloaded at 0/3 shards (mtp/ landed first)
   and the menu offered "switch" mid-download.
+- `<escalation-toggle>` (2026-09-03) ONE master switch for the second brain:
+  settings.json `claude_escalation: {enabled}` (default true) +
+  `claude_escalation_enabled()` + `GET/POST /api/claude/escalate`, all in
+  aux_claudebridge.py. Enforced at the top of `claude_think()` (after the empty
+  task check, before `_cb_gate`) — the only function that runs `claude -p` — so
+  it covers the auto-router, the manual Escalate button AND aux_foryou's
+  `_fy_claude_moves`, which `auto_route.mode` never did. Refusal reuses the
+  module's existing shape (`{ok:False, refused:True, reason:"escalation_off",
+  text}`) so `_cb_think_handler` / `_ar_think_thread` / For-You's fallback all
+  handle it unchanged; NOT logged to claude-bridge-log.jsonl (that log + the
+  bridge card's recent_24h are a USAGE record and a switched-off call spends
+  nothing) — one stderr line per process instead. aux_autoroute `_ar_before`
+  treats it exactly like mode `off` (no scoring, no thread, no `deep` spinner)
+  without touching the stored mode, and `GET /api/claude/autoroute` now carries
+  `claude_escalation`. VERIFIED (exec-load harness, throwaway HOME): 22/22 —
+  default on, persist+reload, unrelated settings keys preserved, missing
+  `enabled` → 400, refusal shape/text/keys exact, `subprocess.run` provably not
+  reached, audit log byte-identical, router short-circuit + restore.
+- `<api-origin-guard>` (2026-09-03) The API had NO auth, CSRF token, Origin or
+  Host check on any route: any web page could `fetch()` 127.0.0.1:7788 with
+  Content-Type text/plain (a "simple request" — no preflight) and hit /api/chat,
+  /api/access, /api/shortcuts/run, /api/config/import, and DNS rebinding exposed
+  every GET. Fixed with one pre-dispatch `Handler._guard()` on do_GET AND
+  do_POST, over a pure `_request_allowed(method, headers) -> (ok, reason)`:
+  Host must be in `ALLOWED_HOSTS` ({127.0.0.1, localhost, [::1]} × {±:DASH_PORT}
+  + env `HERMES_DASH_ALLOWED_HOSTS`) → 403 "forbidden host" (kills rebinding,
+  and `/` + the static aux_*.js go through it so a rebound page can't load the
+  shell); a present Origin must be `http://<allowed host>` → 403 "cross-origin
+  request refused" (applied to GET too — several GETs return private data);
+  `Sec-Fetch-Site: cross-site` refused on state-changing verbs only, so a
+  cross-site NAVIGATION to the hub still works. No-Origin requests stay allowed
+  (curl, launchd, the Swift MessagesSync POST) — browsers always send Origin
+  cross-origin, so this is token-less CSRF protection. NO CORS headers added.
+  Denials log method/path/host/origin to stderr. VERIFIED: 22/22 unit cases on
+  the decision function (incl. env-var hosts, IPv6, `Origin: null`, https on our
+  own host, wrong port, header-case) + 9/9 wire cases against a throwaway
+  ThreadingHTTPServer running the REAL `_guard`/`_json` code (403 + JSON body).
+- `<model-lifecycle-hardening>` (2026-09-03) Silent-failure pass on the model
+  lifecycle. (1) `agent_power("pause")` verifies the bootout before writing
+  PAUSE_FILE — new `_mlx_primary_down()` polls ~3s for the launchd job to be
+  unloaded AND :8080 to stop answering (NOT `_mlx_proc_alive()`, whose pgrep
+  matches the bg lane too, so it can never confirm while :8081 runs); failure →
+  `{ok:False, error:"bootout failed: …"}` and no marker, because a false "paused"
+  makes memory_guard AND idle_suspend stand down over a live model. (2)
+  `_chat_worker`'s catch-all now prints `type: msg` + the last 5 traceback frames
+  before falling back to one-shot mode, and a failed `import hermes_rpc` says so
+  at startup (both were completely silent). (3) `_hf_snapshot_dir()` resolves
+  `refs/main` first, newest-mtime only as fallback — mirrors
+  `_patch_local_snapshot_resolution()` in mlx-vlm-launch.py so the dashboard and
+  the loader can't disagree about which snapshot "the" model is. (4) New
+  `_model_dl_err{}` (cleared per attempt) → `models_payload().download_error`, so
+  `_model_dl[mid]=="error"` always carries a reason — including "downloaded but
+  the weights are still incomplete"; `_hf_python()` returns None instead of
+  memoizing an interpreter that can't `import huggingface_hub`, and
+  `download_model` reports "no interpreter with huggingface_hub (venv missing?)"
+  synchronously. (5) `switch_model` also requires `_draft_ready()` ("drafter not
+  downloaded yet"), matching what `models_payload().downloaded` shows, and
+  `download_model` validates the id against the roster (it used to feed an
+  arbitrary body string to snapshot_download). (6) `_mlx_start()` returns a bool
+  and logs both bootstrap attempts + the kickstart; `agent_power("resume")`,
+  `switch_model` and `_mlx_restart` propagate `{ok:False, error}` instead of
+  answering `loading:True` for a server launchd refused to start. (7)
+  `run_agent()` also catches OSError, so a spawn failure can't kill a job thread
+  before it sets done=True. VERIFIED: 29/29 harness cases (stubbed launchctl /
+  model_online / subprocess) — no service restart, no model server touched.

@@ -29,6 +29,24 @@ and explicit agent tool calls (web search etc.) touch the internet.
   client, stdlib only) with per-chat serve sessions persisted in the chat JSON
   (`serve_sid` ephemeral, `serve_key` durable). Falls back to one-shot
   `hermes -z --continue` if serve is down.
+- **API same-origin guard (2026-09-03)** — the API has no auth token, cookie or
+  CSRF token and nearly every route mutates state (`/api/chat` runs the agent,
+  `/api/access` grants folders, `/api/shortcuts/run` executes,
+  `/api/config/import` overwrites config), so `Handler._guard()` runs
+  pre-dispatch on EVERY verb (`server.py` `_request_allowed(method, headers)` is
+  the pure, unit-tested decision function). Rules: **Host** must be in
+  `ALLOWED_HOSTS` = {127.0.0.1, localhost, [::1]} × {with `:DASH_PORT`, without}
+  + comma-list env `HERMES_DASH_ALLOWED_HOSTS`, else 403 `{"error":"forbidden
+  host"}` — that closes DNS rebinding, and it covers `/` and the static
+  `aux_*.js` too so a rebound page can't even load the app shell. **Origin**,
+  when present, must be `http://<allowed host>` (checked on GET as well as
+  POST; `Origin: null` fails), and **Sec-Fetch-Site: cross-site** is refused on
+  state-changing verbs only (a cross-site NAVIGATION to the hub sends that
+  header with no Origin and must still work). Requests with NO Origin stay
+  allowed — browsers always attach it cross-origin, so this is token-less CSRF
+  protection that leaves curl, the launchd scripts and the Swift app's
+  MessagesSync `/api/messages/ingest` POST untouched. **No CORS headers are
+  ever added.** Denials log one stderr line (method, path, host, origin).
 - **Agent pause/resume** — power row in the model menu. Pause `bootout`s
   com.hermes.mlx-server (KeepAlive means plain kill won't stick) and writes
   `~/.hermes/dashboard/agent-paused`; resume bootstraps the plist. Endpoints
@@ -123,6 +141,23 @@ and explicit agent tool calls (web search etc.) touch the internet.
   `auto|suggest|off` in settings.json `auto_route` (`GET/POST /api/claude/autoroute`,
   `POST /api/claude/autoroute/score {q}` dry-run). Verified live: hard question →
   local + Sonnet (21s, parallel) persisted in order; routine → local only.
+- **Claude escalation master switch (2026-09-03)** — `auto_route.mode` only ever
+  gated the auto-router, so the manual Escalate button and For-You kept spending
+  the Max plan with routing off. One global switch now: settings.json
+  `claude_escalation: {enabled}` (default **true**), helper
+  `claude_escalation_enabled()` + `GET/POST /api/claude/escalate {enabled}` in
+  `aux_claudebridge.py`. Enforced at the CHOKE POINT — the top of
+  `claude_think()`, before `_cb_gate` — because that is the only function that
+  shells out to `claude -p`, so the one check covers the router, the button,
+  For-You and anything added later. Refusal reuses the module's existing shape
+  (`{ok:False, refused:True, reason:"escalation_off", text}`) so every caller
+  handles it with code it already has; deliberately NOT written to
+  claude-bridge-log.jsonl (that log and the bridge card's `recent_24h` measure
+  Claude USAGE, and a switched-off call spends nothing) — one stderr line the
+  first time per process instead. `aux_autoroute._ar_before` also short-circuits
+  on it so a disabled bridge spawns no thread and shows no `deep` spinner, WITHOUT
+  mutating the stored mode; `GET /api/claude/autoroute` carries `claude_escalation`.
+  Settings read fresh per call (the file is tiny) — no restart, no cache.
 - **Bridge gate rewrite (`_cb_gate`, 2026-08-18)** — the old keyword regexes refused
   5/18 realistic escalations ("memory leak", "password field", ".env approach", "wipe
   the cache", "should I create a component"). Now INTENT-based: secrets = action verb

@@ -34,6 +34,12 @@
 # load-bearing structural control. The Claude Usage widget (aux_claude_usage) is
 # the visible governor of spend.
 #
+# MASTER SWITCH (2026-09-03): settings.json `claude_escalation.enabled`
+# (default true) gates claude_think() itself — see claude_escalation_enabled()
+# and GET/POST /api/claude/escalate. Because claude_think is the only code path
+# that runs `claude -p`, that one check turns the whole second brain off for
+# every caller: the auto-router, the manual Escalate button and For-You.
+#
 # Every call (including refusals) appends one line to
 # ~/.hermes/dashboard/claude-bridge-log.jsonl (0600) — ts, depth, model, a
 # TRUNCATED task summary (no secrets, no user-context, no response text), ms, ok
@@ -74,6 +80,19 @@ CB_DISALLOWED = "Bash Edit Write NotebookEdit WebFetch WebSearch Task"
 
 CB_SUMMARY_MAX = 160          # task-summary truncation for the audit log
 CB_LOG_TAIL    = 4000         # bytes of the log to read back for /bridge status
+
+# --- master escalation switch (2026-09-03) ---------------------------------
+# Until now there was no single off-switch for "talk to Claude": auto_route.mode
+# only covered the per-turn auto-router, so the manual Escalate button and
+# For-You's _fy_claude_moves kept spending the Max plan even with routing off.
+# claude_think() is the ONLY function that actually shells out to `claude -p`,
+# so one gate at the top of it is the complete, unbypassable off-switch for
+# every caller (router, button, For-You, anything added later). Default ON —
+# the two-brain design is the product; this is the user's brake, not a policy.
+CB_ESC_DEFAULT = True
+CB_MSG_ESC_OFF = ("Claude escalation is switched off — turn it on in the model menu "
+                  "or Settings › Claude Bridge.")
+_CB_ESC_LOGGED = {"done": False}      # stderr note once per process, not per call
 
 
 # --------------------------------------------------------------------------
@@ -297,6 +316,40 @@ def _cb_recent(n=20):
         return []
 
 
+def claude_escalation_enabled():
+    """Is the Claude bridge allowed to run at all? settings.json
+    `claude_escalation.enabled`, default True.
+
+    Read fresh on EVERY call rather than cached: settings.json is a few hundred
+    bytes read through server.py's read_json, so the cost is nil next to a
+    multi-second `claude -p`, and it means the toggle takes effect on the very
+    next call with no restart, no cache invalidation and no cross-thread state
+    (chat worker, For-You thread and the HTTP thread all see the same file).
+    Any read problem fails OPEN (default True) — a corrupt settings file must
+    not silently disable the second brain."""
+    try:
+        s = get_settings() or {}
+        cfg = s.get("claude_escalation")
+        if isinstance(cfg, dict) and "enabled" in cfg:
+            return bool(cfg.get("enabled"))
+    except Exception:
+        pass
+    return CB_ESC_DEFAULT
+
+
+def _cb_set_escalation(enabled):
+    """Persist the switch. Read-modify-write of the WHOLE settings blob through
+    server.py's write_json (tmp file + os.replace = atomic), matching
+    aux_autoroute._ar_set_mode — settings.json is shared by every module, so a
+    partial write would take unrelated widget config down with it."""
+    s = read_json(SETTINGS_FILE, {}) or {}
+    cfg = s.get("claude_escalation") if isinstance(s.get("claude_escalation"), dict) else {}
+    cfg["enabled"] = bool(enabled)
+    s["claude_escalation"] = cfg
+    write_json(SETTINGS_FILE, s)
+    return bool(enabled)
+
+
 def _cb_norm_depth(depth):
     d = str(depth or "quick").strip().lower()
     if d in ("deep", "opus", "high", "xhigh", "max", "hard", "heavy"):
@@ -325,6 +378,29 @@ def claude_think(task, user_context="", depth="quick"):
     if not task.strip():
         return {"ok": False, "text": "", "model": None, "depth": depth,
                 "ms": _ms(), "tokens": None, "error": "empty task"}
+
+    # 0) master switch — the choke point. Checked BEFORE the content gate (and
+    # before any logging) because a switched-off bridge is a configuration
+    # answer, not a security verdict: nothing about the task matters. The
+    # refusal keeps the module's existing shape ({ok:False, refused:True,
+    # reason, text}) so every caller handles it with code it already has —
+    # _cb_think_handler returns it verbatim, aux_autoroute's _ar_think_thread
+    # renders res["text"] as the deep-card error, aux_foryou logs the reason and
+    # falls through to the local model. Deliberately NOT written to
+    # claude-bridge-log.jsonl: that log (and the recent_24h counter the bridge
+    # status card shows) is a record of Claude USAGE, and a refused-by-switch
+    # call spent nothing — logging it would inflate the usage the user is
+    # trying to cut. One stderr line the first time per process instead, so the
+    # dashboard log shows why the second brain went quiet without a line per turn.
+    if not claude_escalation_enabled():
+        if not _CB_ESC_LOGGED["done"]:
+            _CB_ESC_LOGGED["done"] = True
+            print("[aux_claudebridge] escalation is OFF (settings.json "
+                  "claude_escalation.enabled=false) — refusing bridge calls",
+                  file=sys.stderr)
+        return {"ok": False, "refused": True, "reason": "escalation_off",
+                "text": CB_MSG_ESC_OFF, "model": None, "depth": depth,
+                "ms": _ms(), "tokens": None}
 
     # 1) gate (defense-in-depth) — refuse before spending any Claude quota
     refusal = _cb_gate(task, user_context)
@@ -510,6 +586,24 @@ def _cb_recent_handler(ctx):
     return {"ok": True, "calls": _cb_recent(n)}
 
 
+def _cb_escalate_get(ctx):
+    return {"ok": True, "enabled": claude_escalation_enabled()}
+
+
+def _cb_escalate_post(ctx):
+    """{"enabled": bool}. Strict about the key being present — a body that
+    forgot it must not silently flip the switch to False."""
+    b = ctx.body or {}
+    if "enabled" not in b:
+        return ({"ok": False, "error": "missing 'enabled' (bool)"}, 400)
+    try:
+        return {"ok": True, "enabled": _cb_set_escalation(bool(b.get("enabled")))}
+    except Exception as e:
+        return ({"ok": False, "error": "%s: %s" % (type(e).__name__, e)}, 500)
+
+
 register_post("/api/claude/think", _cb_think_handler)
+register_get("/api/claude/escalate", _cb_escalate_get)
+register_post("/api/claude/escalate", _cb_escalate_post)
 register_get("/api/claude/bridge", _cb_bridge_handler)
 register_get("/api/claude/recent", _cb_recent_handler)

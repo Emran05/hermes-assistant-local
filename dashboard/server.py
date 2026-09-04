@@ -36,6 +36,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.parse
 import urllib.request
 import uuid
@@ -872,8 +873,15 @@ def _hermes_env():
 
 try:
     import hermes_rpc
-except Exception:            # never let a helper import take the hub down
+except Exception as _rpc_e:  # never let a helper import take the hub down
     hermes_rpc = None
+    # ...but SAY SO. A failed import here silently downgrades every chat turn
+    # to the one-shot `hermes -z` path (no streaming, no interactive
+    # approvals), and the only symptom was a status line the user reads as a
+    # transient network blip.
+    print("[chat] hermes_rpc import FAILED — every turn will fall back to "
+          f"one-shot mode: {type(_rpc_e).__name__}: {_rpc_e}",
+          file=sys.stderr, flush=True)
 
 # Async chat jobs: /api/chat starts one, /api/chat/poll streams it to the UI.
 CHAT_JOBS = {}
@@ -925,7 +933,17 @@ def _chat_worker(job, session, prompt):
 
         hermes_rpc.run_turn(job, chat, prompt, save_meta)
     except Exception as e:
-        # serve backend unreachable/broken — fall back to the old one-shot CLI
+        # serve backend unreachable/broken — fall back to the old one-shot CLI.
+        # Print the real cause FIRST: this except swallowed everything, so a
+        # missing hermes_rpc, a WS 401 from a stale serve token, a protocol
+        # change and a plain bug all looked identical in the log (i.e. absent)
+        # and were only visible as "one-shot mode" in the UI. Type + message +
+        # the last 5 traceback frames is enough to name the failure without
+        # dumping a full trace on every turn.
+        print(f"[chat] serve turn failed ({type(e).__name__}: {e}) — "
+              "falling back to one-shot mode", file=sys.stderr, flush=True)
+        for _tl in traceback.format_exc().rstrip().splitlines()[-5:]:
+            print("[chat]   " + _tl, file=sys.stderr, flush=True)
         job["status"] = "serve backend unavailable, using one-shot mode"
         ok, text = run_agent(prompt, session=session)
         job.update(reply=text, ok=ok, state="done", done=True)
@@ -949,6 +967,15 @@ def run_agent(message, session=None, lane="primary"):
             return False, f"The agent took longer than {AGENT_TIMEOUT}s and was stopped."
         except FileNotFoundError:
             return False, f"Could not find the `hermes` binary at {HERMES}."
+        except OSError as e:
+            # Anything else the OS can refuse a spawn with (EACCES on a
+            # non-executable hermes, ENOMEM/EAGAIN under load, ENOTDIR on a
+            # broken PATH entry). The narrow except let those escape into the
+            # calling thread, which killed the chat-job worker BEFORE it could
+            # set done=True — the UI then polled a job that never finished.
+            print(f"[run_agent] spawn failed: {type(e).__name__}: {e}",
+                  file=sys.stderr, flush=True)
+            return False, f"Could not run the agent ({type(e).__name__}: {e})."
     out = (proc.stdout or "").strip()
     if proc.returncode != 0:
         err = (proc.stderr or "").strip().splitlines()
@@ -1226,21 +1253,47 @@ def _mlx_start(uid=None):
     start token (mlx-server.sh's gate refuses to load the model without a
     fresh one when model-autostart-off exists — this is what separates a real
     user-intent start from the app's blind kickstart), bootstraps the job
-    (tolerating 'already loaded'), then kickstarts it (no-op when running)."""
+    (tolerating 'already loaded'), then kickstarts it (no-op when running).
+
+    Returns True only when the server was actually asked to run. Both launchctl
+    calls used to be fire-and-forget, so a failed bootstrap (bad plist, launchd
+    error 5 after a recent bootout, a job removed by hand) still reported
+    `loading: True` to the UI — the user watched a spinner for a model that was
+    never going to come up, and the dashboard log said nothing. With RunAtLoad
+    false (on-demand mode) the KICKSTART is what starts the process, so its
+    failure is fatal too, not cosmetic."""
     uid = os.getuid() if uid is None else uid
     try:
         with open(MODEL_START_TOKEN, "w") as f:
             f.write(str(time.time()))
-    except OSError:
-        pass
-    r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", MLX_PLIST],
-                       capture_output=True, text=True, timeout=20)
-    if r.returncode != 0 and "already" not in (r.stderr or "").lower():
-        time.sleep(3)  # launchd needs a beat after a recent bootout
-        subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", MLX_PLIST],
-                       capture_output=True, timeout=20)
-    subprocess.run(["launchctl", "kickstart", f"gui/{uid}/{MLX_LABEL}"],
-                   capture_output=True, timeout=15)
+    except OSError as e:
+        print(f"[mlx_start] could not mint the start token: {e}",
+              file=sys.stderr, flush=True)
+
+    def _boot():
+        return subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", MLX_PLIST],
+                              capture_output=True, text=True, timeout=20)
+
+    def _clean(r):
+        # "already loaded"/"already bootstrapped" is success: the job is there.
+        return r.returncode == 0 or "already" in ((r.stderr or "") + (r.stdout or "")).lower()
+
+    r = _boot()
+    if not _clean(r):
+        time.sleep(3)  # launchd needs a beat after a recent bootout (error 5)
+        r2 = _boot()
+        if not _clean(r2):
+            print(f"[mlx_start] bootstrap failed (rc={r.returncode} then "
+                  f"rc={r2.returncode}): {' '.join((r2.stderr or r.stderr or '').split())[:300]}",
+                  file=sys.stderr, flush=True)
+            return False
+    k = subprocess.run(["launchctl", "kickstart", f"gui/{uid}/{MLX_LABEL}"],
+                       capture_output=True, text=True, timeout=15)
+    if k.returncode != 0:
+        print(f"[mlx_start] kickstart failed (rc={k.returncode}): "
+              f"{' '.join((k.stderr or '').split())[:300]}", file=sys.stderr, flush=True)
+        return False
+    return True
 
 
 def _mlx_restart():
@@ -1252,8 +1305,7 @@ def _mlx_restart():
         subprocess.run(["launchctl", "bootout", f"gui/{uid}/{MLX_LABEL}"],
                        capture_output=True, timeout=15)
         time.sleep(3)
-        _mlx_start(uid)
-        return True
+        return _mlx_start(uid)      # propagate a failed start (was always True)
     except Exception as e:
         print(f"[memory_guard] restart failed: {e}", file=sys.stderr)
         return False
@@ -1357,7 +1409,9 @@ def agent_wake(wait=True, timeout=90):
     model is (or came) online. Safe to call when already awake (idempotent)."""
     uid = os.getuid()
     try:
-        _mlx_start(uid)
+        if not _mlx_start(uid):     # logged in detail by _mlx_start itself
+            print("[idle_suspend] wake: launchctl would not start the model "
+                  "server — the poll below will time out", file=sys.stderr, flush=True)
     except Exception as e:
         print(f"[idle_suspend] wake bootstrap failed: {e}", file=sys.stderr)
         return False
@@ -2199,16 +2253,59 @@ def agent_paused():
     return os.path.exists(PAUSE_FILE)
 
 
+def _mlx_primary_down(timeout=3.0):
+    """Poll (up to `timeout`s) until the PRIMARY model server is genuinely gone.
+
+    Not `_mlx_proc_alive()`: its pgrep pattern ("mlx_lm server|mlx-vlm-launch")
+    matches BOTH lanes, so whenever the background 9B is up on :8081 it answers
+    True forever and a pause could never confirm. These two signals are
+    lane-specific — the launchd job being unloaded (`launchctl print` fails once
+    the bootout took) and :8080 no longer answering. An unknown result (probe
+    error) counts as STILL UP, because a false "paused" is by far the more
+    expensive mistake: memory_guard_loop AND idle_suspend_loop both skip while
+    paused, so claiming a pause that didn't happen leaves a live model with no
+    memory watchdog and no idle reclaim."""
+    uid = os.getuid()
+    deadline = time.time() + timeout
+    while True:
+        try:
+            loaded = subprocess.run(["launchctl", "print", f"gui/{uid}/{MLX_LABEL}"],
+                                    capture_output=True, timeout=10).returncode == 0
+        except Exception:
+            loaded = True
+        if not loaded and not model_online():
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.4)
+
+
 def agent_power(action):
     """Pause = bootout the model server (frees ALL its RAM; chat/Telegram
     replies are down until resume). Resume = bootstrap it back."""
     uid = os.getuid()
     if action == "pause":
         try:
-            subprocess.run(["launchctl", "bootout", f"gui/{uid}/{MLX_LABEL}"],
-                           capture_output=True, timeout=15)
+            r = subprocess.run(["launchctl", "bootout", f"gui/{uid}/{MLX_LABEL}"],
+                               capture_output=True, text=True, timeout=15)
         except Exception as e:
-            return {"ok": False, "error": type(e).__name__}
+            return {"ok": False, "error": "bootout failed: %s: %s" % (type(e).__name__, e)}
+        # The return code alone is not the answer: launchctl exits 3 ("No such
+        # process") when the job was already unloaded, which IS the state we
+        # want. So verify the end state and only write PAUSE_FILE once the
+        # server is really gone — the marker is what makes memory_guard and the
+        # idle loop stand down, so a pause file over a running model silently
+        # disables both safety loops (the exact failure this check exists for).
+        if not _mlx_primary_down():
+            tail = " ".join(((r.stderr or "") + " " + (r.stdout or "")).split())[-200:]
+            print(f"[agent_power] pause FAILED — model server still up after "
+                  f"bootout (rc={r.returncode}): {tail}", file=sys.stderr, flush=True)
+            return {"ok": False, "error": "bootout failed: "
+                    + (tail or f"rc={r.returncode}, server still responding")}
+        if r.returncode != 0:      # gone anyway (already unloaded) — note it
+            print(f"[agent_power] bootout rc={r.returncode} but the server is "
+                  f"gone: {' '.join((r.stderr or '').split())[-200:]}",
+                  file=sys.stderr, flush=True)
         with open(PAUSE_FILE, "w") as f:
             f.write(str(time.time()))
         try:                       # a deliberate pause supersedes any idle-suspend
@@ -2224,9 +2321,17 @@ def agent_power(action):
             except OSError:
                 pass
         try:
-            _mlx_start(uid)
+            started = _mlx_start(uid)
         except Exception as e:
-            return {"ok": False, "error": type(e).__name__}
+            return {"ok": False, "error": "start failed: %s: %s" % (type(e).__name__, e)}
+        if not started:
+            # The down-state markers stay cleared: the user asked for the model
+            # to run, and every wake path (chat turn, "Wake now") should keep
+            # trying. What must NOT happen is answering `loading: True` for a
+            # server launchd refused to start — that spins the UI forever.
+            return {"ok": False, "paused": False,
+                    "error": "launchctl would not start the model server "
+                             "(see the dashboard log for the bootstrap/kickstart error)"}
         return {"ok": True, "paused": False, "loading": True}
     return {"ok": False, "error": "unknown action"}
 
@@ -2296,6 +2401,13 @@ _SEED_MODELS = [
 ]
 
 _model_dl = {}          # id -> "downloading" | "done" | "error"
+# id -> the last download failure, human-readable. Cleared when a new attempt
+# starts and on success. Exists because `_model_dl[mid] = "error"` on its own
+# left the menu showing a dead "download failed" chip with no way to find out
+# why (the reason was in the dashboard log at best, and for the commonest cause
+# — a python without huggingface_hub — nowhere at all). models_payload() ships
+# it as `download_error`, so a state of "error" always has a message with it.
+_model_dl_err = {}
 
 
 def _model_registry():
@@ -2460,8 +2572,29 @@ def _model_downloaded(mid):
 
 
 def _hf_snapshot_dir(mid):
-    """Newest local snapshot dir of an HF repo in the hub cache, or None."""
-    snaps = os.path.join(_hf_cache_dir(mid), "snapshots")
+    """The local snapshot dir of an HF repo in the hub cache, or None.
+
+    refs/main FIRST — its content is the commit sha of the snapshot the hub
+    cache considers current — and newest-mtime only as a fallback when the ref
+    is missing or names a directory that isn't there. This mirrors
+    `_patch_local_snapshot_resolution()` in mlx-vlm-launch.py exactly, and that
+    agreement is the point: with `hf_offline` roster entries the LOADER resolves
+    a repo id through refs/main while the dashboard used to pick newest-mtime,
+    so after a re-download (or any touch of an older snapshot dir) the two could
+    disagree about which snapshot "the" model is — `downloaded`, `_draft_ready`
+    and the `--draft-model` path would then describe a different checkout than
+    the server actually loads."""
+    base = _hf_cache_dir(mid)
+    snaps = os.path.join(base, "snapshots")
+    try:
+        with open(os.path.join(base, "refs", "main")) as f:
+            sha = f.read().strip()
+        # a sha is one path segment; refuse anything that could escape snapshots/
+        if sha and "/" not in sha and ".." not in sha and \
+                os.path.isdir(os.path.join(snaps, sha)):
+            return os.path.join(snaps, sha)
+    except OSError:
+        pass
     try:
         cands = [os.path.join(snaps, d) for d in os.listdir(snaps)]
     except OSError:
@@ -2534,7 +2667,11 @@ def models_payload():
     for m in reg:
         out.append({**m, "active": m["id"] == active,
                     "downloaded": _model_downloaded(m["id"]) and _draft_ready(m),
-                    "downloading": _model_dl.get(m["id"]) == "downloading"})
+                    "downloading": _model_dl.get(m["id"]) == "downloading",
+                    # None unless the last attempt failed — pairs with
+                    # _model_dl[id] == "error" so the UI never shows a bare
+                    # failure state with nothing to explain it
+                    "download_error": _model_dl_err.get(m["id"])})
     _down = agent_paused() or agent_idle_suspended()   # process not resident
     ram = None if _down else _cached("mlx_ram", 60, _mlx_footprint_gb)
     bgm = bg_model()
@@ -2552,10 +2689,18 @@ def models_payload():
 
 
 def switch_model(mid):
-    if not any(m["id"] == mid for m in _model_registry()) and mid != active_model():
+    ent = _model_entry(mid)
+    if ent is None and mid != active_model():
         return {"ok": False, "error": "unknown model"}
     if not _model_downloaded(mid):
         return {"ok": False, "error": "model not downloaded yet"}
+    # Same definition of "ready" the menu shows: models_payload() reports
+    # `downloaded` as _model_downloaded AND _draft_ready, so without this the
+    # switch would accept a model the UI itself lists as not downloaded — and
+    # mlx-server.sh would then start with a --draft-model pointing at weights
+    # that aren't there (or, for an in-repo drafter, at nothing at all).
+    if ent is not None and not _draft_ready(ent):
+        return {"ok": False, "error": "drafter not downloaded yet"}
     with open(ACTIVE_MODEL_FILE, "w") as f:
         f.write(mid)
     _write_template_args(mid)      # per-model chat-template kwargs (thinking)
@@ -2566,7 +2711,10 @@ def switch_model(mid):
         pass
     try:
         if agent_paused():          # switching while paused implies waking up
-            agent_power("resume")
+            rs = agent_power("resume") or {}
+            if not rs.get("ok"):
+                return {"ok": False, "active": mid,
+                        "error": rs.get("error") or "could not resume the model server"}
         else:
             # Reliable model swap: `kickstart -k` does NOT dependably reload a
             # KeepAlive service — it kept serving the OLD model after the
@@ -2577,7 +2725,14 @@ def switch_model(mid):
             subprocess.run(["launchctl", "bootout", f"gui/{uid}/{MLX_LABEL}"],
                            capture_output=True, timeout=15)
             time.sleep(3)  # launchd needs a beat after bootout (avoids error 5)
-            _mlx_start(uid)
+            if not _mlx_start(uid):
+                # active-model / template-args / hermes model.default are
+                # already written, so the switch itself stands — but say the
+                # server didn't come up instead of answering `loading: True`
+                # and leaving the UI polling /api/health forever.
+                return {"ok": False, "active": mid,
+                        "error": "model server failed to start after the switch "
+                                 "(see the dashboard log for the launchctl error)"}
     except Exception as e:
         return {"ok": False, "error": f"restart failed: {e}"}
     _widget_cache.pop("sys_live", None)
@@ -2588,9 +2743,18 @@ _HF_PY = None
 
 
 def _hf_python():
-    """Interpreter for huggingface_hub downloads. The dashboard runs on Homebrew
-    python (no hf hub → menu downloads failed silently); the mlx-vlm venv always
-    has it, the framework python (mlx-lm's home) usually does. Probed once."""
+    """Interpreter for huggingface_hub downloads, or None if there isn't one.
+    The dashboard runs on Homebrew python (no hf hub → menu downloads failed
+    silently); the mlx-vlm venv always has it, the framework python (mlx-lm's
+    home) usually does.
+
+    Returns None rather than falling back to sys.executable: handing back an
+    interpreter that provably cannot `import huggingface_hub` only moved the
+    failure one step later, into a subprocess whose ModuleNotFoundError went to
+    a log nobody reads. Only a SUCCESSFUL probe is memoized — a negative result
+    is re-probed, so installing the venv fixes downloads without restarting the
+    dashboard (the probe is a handful of sub-second subprocesses, and it only
+    runs on the path that is already broken)."""
     global _HF_PY
     if _HF_PY:
         return _HF_PY
@@ -2607,16 +2771,32 @@ def _hf_python():
                 return py
         except Exception:
             continue
-    _HF_PY = sys.executable
-    return _HF_PY
+    return None
 
 
 def download_model(mid):
+    # Validate the id like switch_model does — this route took an arbitrary
+    # string straight from the request body into snapshot_download(), so a typo
+    # (or anything else) started a real multi-GB pull of a repo that is not on
+    # the roster and can never be switched to.
+    if _model_entry(mid) is None:
+        return {"ok": False, "error": "unknown model"}
     if _model_dl.get(mid) == "downloading":
         return {"ok": True, "status": "downloading"}
+    # Resolve the interpreter BEFORE the thread so a missing huggingface_hub is
+    # an immediate, actionable answer to the click instead of an "error" chip
+    # that appears seconds later with nothing behind it.
+    py = _hf_python()
+    if not py:
+        _model_dl[mid] = "error"
+        _model_dl_err[mid] = "no interpreter with huggingface_hub (venv missing?)"
+        print(f"[models] download {mid}: {_model_dl_err[mid]}",
+              file=sys.stderr, flush=True)
+        return {"ok": False, "error": _model_dl_err[mid]}
 
     def run():
         _model_dl[mid] = "downloading"
+        _model_dl_err.pop(mid, None)      # a new attempt clears the old reason
         try:
             ent = _model_entry(mid) or {}
             # (repo, snapshot_download kwargs) jobs. Roster hints:
@@ -2629,7 +2809,7 @@ def download_model(mid):
             dm, sub = ent.get("draft_model"), ent.get("draft_subfolder")
             if dm and dm != mid:
                 jobs.append((dm, {"allow_patterns": [sub.strip("/") + "/*"]} if sub else {}))
-            py = _hf_python()
+            errs = []
             for _id, kw in jobs:
                 r = subprocess.run(
                     [py, "-c",
@@ -2638,14 +2818,26 @@ def download_model(mid):
                      json.dumps({"repo_id": _id, **kw})],
                     capture_output=True, text=True, timeout=7200, env=_hermes_env())
                 if r.returncode != 0:
+                    tail = " ".join((r.stderr or "").split())[-300:]
+                    errs.append(f"{_id}: {tail or 'exit %d' % r.returncode}")
                     print(f"[models] download {_id} failed (rc={r.returncode}): "
                           f"{(r.stderr or '')[-600:]}", file=sys.stderr, flush=True)
             ok = _model_downloaded(mid) and _draft_ready(ent)
             _model_dl[mid] = "done" if ok else "error"
+            if ok:
+                _model_dl_err.pop(mid, None)
+            else:
+                # every "error" state carries a reason — including the subtle
+                # one where each subprocess exited 0 but the weights are still
+                # incomplete (partial mirror, ignore_patterns too broad)
+                _model_dl_err[mid] = ("; ".join(errs))[:600] if errs else (
+                    "download finished but the weights are still incomplete "
+                    "(missing shards or drafter)")
         except Exception as e:
             print(f"[models] download {mid} crashed: {type(e).__name__}: {e}",
                   file=sys.stderr, flush=True)
             _model_dl[mid] = "error"
+            _model_dl_err[mid] = f"{type(e).__name__}: {e}"[:600]
     threading.Thread(target=run, daemon=True).start()
     return {"ok": True, "status": "downloading"}
 
@@ -2718,10 +2910,122 @@ for _auxf in _AUX_FILES:
 # --------------------------------------------------------------------------
 # HTTP
 # --------------------------------------------------------------------------
+# SAME-ORIGIN GUARD (2026-09-03) — the only access control this API has.
+#
+# Threat model. The hub binds 127.0.0.1:7788 with no auth token, no session
+# cookie and no CSRF token, and nearly every route changes real state:
+# /api/chat runs the agent, /api/access grants the agent a folder,
+# /api/shortcuts/run executes, /api/config/import overwrites config. Two ways
+# an arbitrary web page the user happens to visit reaches all of that:
+#   1. CSRF. A cross-site `fetch()` with Content-Type: text/plain is a "simple
+#      request" — no preflight, so the browser just sends it. The attacker
+#      never needs to READ the (CORS-less) response: the side effect has
+#      already happened.
+#   2. DNS rebinding. evil.example answers 127.0.0.1 on its second lookup, so
+#      the attacker's page becomes genuinely same-origin with the hub and can
+#      read every GET as well.
+# The two matching defences, both free and token-less:
+#   * HOST must be a loopback name we actually serve on. A rebound request
+#     still carries `Host: evil.example`, so this closes rebinding — and it is
+#     applied to `/` and the static JS too, so a rebound page cannot even load
+#     the app shell to drive the API from inside.
+#   * ORIGIN, whenever the browser sends one, must be one of our own origins.
+#     Browsers always attach Origin to cross-origin fetch/XHR and to POSTs, so
+#     "no Origin header" reliably means "not a browser": curl, the launchd
+#     scripts and the Swift app's MessagesSync URLSession POST to
+#     /api/messages/ingest keep working untouched. That is what buys CSRF
+#     protection without a token. We apply it to GET as well as POST — no
+#     third-party page has any business reading this API, and several GETs
+#     (/api/expand, /api/hub, /api/history) return the user's private data.
+#     A literal `Origin: null` (sandboxed iframe, file://) fails the check.
+#   * SEC-FETCH-SITE: cross-site is refused on state-changing verbs as a second
+#     line for browsers that send the metadata header. It is deliberately NOT
+#     applied to GET: a plain cross-site NAVIGATION (the user clicking a link
+#     to the dashboard from any other page) sends exactly that header with no
+#     Origin, and refusing it would stop them opening their own hub.
+# NO CORS headers are added anywhere — nothing off-origin should ever be
+# granted read access. Extra hostnames (a tunnel, a second bind) go in the
+# comma-separated env var HERMES_DASH_ALLOWED_HOSTS.
+# --------------------------------------------------------------------------
+_SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+
+
+def _build_allowed_hosts():
+    """Loopback names x {with :DASH_PORT, without} + HERMES_DASH_ALLOWED_HOSTS.
+    Both forms are needed because a Host header may legally omit the port only
+    when it is the scheme default, but clients (and the WKWebView) vary."""
+    names = ["127.0.0.1", "localhost", "[::1]"]
+    names += [x.strip() for x in
+              os.environ.get("HERMES_DASH_ALLOWED_HOSTS", "").split(",") if x.strip()]
+    out = set()
+    for n in names:
+        n = n.lower()
+        out.add(n)
+        if not (":" in n and not n.endswith("]")):   # no explicit port yet
+            out.add("%s:%d" % (n, DASH_PORT))
+    return out
+
+
+ALLOWED_HOSTS = _build_allowed_hosts()
+
+
+def _hdr(headers, name):
+    """Case-insensitive header read that works for both the handler's
+    email.message.Message and a plain dict (so _request_allowed stays a pure,
+    directly unit-testable function)."""
+    if headers is None:
+        return None
+    try:
+        v = headers.get(name)
+    except Exception:
+        v = None
+    if v is None:
+        low = name.lower()
+        try:
+            for k, val in headers.items():
+                if str(k).lower() == low:
+                    return val
+        except Exception:
+            pass
+    return v
+
+
+def _request_allowed(method, headers):
+    """(ok, reason) for one request. Pure: no I/O, no handler state — the whole
+    decision lives here so it can be tested without standing up a server."""
+    host = (_hdr(headers, "Host") or "").strip().lower()
+    if not host or host not in ALLOWED_HOSTS:
+        return False, "forbidden host"
+    origin = (_hdr(headers, "Origin") or "").strip()
+    if origin:
+        try:
+            u = urllib.parse.urlsplit(origin)
+        except ValueError:
+            return False, "cross-origin request refused"
+        if u.scheme != "http" or (u.netloc or "").lower() not in ALLOWED_HOSTS:
+            return False, "cross-origin request refused"
+    if (method or "").upper() not in _SAFE_METHODS:
+        if (_hdr(headers, "Sec-Fetch-Site") or "").strip().lower() == "cross-site":
+            return False, "cross-origin request refused"
+    return True, ""
+
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
+
+    def _guard(self):
+        """Pre-dispatch gate for EVERY verb. Returns False after having already
+        answered 403, so callers just `if not self._guard(): return`."""
+        ok, reason = _request_allowed(self.command, self.headers)
+        if ok:
+            return True
+        print("[guard] refused %s %s host=%r origin=%r sec-fetch-site=%r (%s)"
+              % (self.command, self.path, self.headers.get("Host"),
+                 self.headers.get("Origin"), self.headers.get("Sec-Fetch-Site"),
+                 reason), file=sys.stderr, flush=True)
+        self._json({"error": reason}, 403)
+        return False
 
     def _json(self, obj, status=200):
         body = json.dumps(obj).encode()
@@ -2740,6 +3044,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- GET ----
     def do_GET(self):
+        if not self._guard():          # Host/Origin check covers / and static too
+            return
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         if path in ("/", "/index.html"):
@@ -2868,6 +3174,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- POST ----
     def do_POST(self):
+        if not self._guard():          # + Sec-Fetch-Site on state-changing verbs
+            return
         path = urllib.parse.urlparse(self.path).path
 
         if path in POST_ROUTES:

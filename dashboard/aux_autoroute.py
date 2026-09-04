@@ -36,6 +36,8 @@
 #
 # Modes: auto (route + answer inline) · suggest (just flag: UI highlights the
 # escalate button with the reason) · off. Stored in settings.json → auto_route.
+# The GLOBAL master switch (settings.json claude_escalation.enabled, owned by
+# aux_claudebridge) overrides all three: off = treat every turn as mode "off".
 
 import re
 import sys
@@ -95,6 +97,19 @@ def ar_score(text):
     if _AR_COMMANDISH.match(t):
         score -= 3; why.append("command-like")
     return round(score, 1), why
+
+
+def _ar_escalation_on():
+    """The Claude master switch (aux_claudebridge.claude_escalation_enabled).
+    Looked up through globals() at CALL time because aux_autoroute sorts BEFORE
+    aux_claudebridge in the aux loader, so the name does not exist yet at exec
+    time. Missing helper = bridge module absent = treat as ON and let
+    claude_think's own absence do the gating (fail open, same as claude_think)."""
+    fn = globals().get("claude_escalation_enabled")
+    try:
+        return bool(fn()) if callable(fn) else True
+    except Exception:
+        return True
 
 
 def _ar_settings():
@@ -199,7 +214,14 @@ def _ar_think_thread(job, session, q, depth, reason, score):
 def _ar_before(job, session):
     """Decide from the user's question and (maybe) start Claude in parallel."""
     mode, min_score = _ar_settings()
-    if mode == "off":
+    # Master switch OFF behaves EXACTLY like mode "off", and is checked here
+    # rather than only at the choke point so a disabled bridge costs nothing:
+    # no scoring, no thread spawn, and — critically — no job["deep"] =
+    # {"state": "thinking"} that would make the UI render a deep-card spinner
+    # for an answer that can never arrive. The stored auto_route.mode is NOT
+    # touched: flipping escalation back on must restore the user's routing mode
+    # exactly as they left it.
+    if mode == "off" or not _ar_escalation_on():
         return
     q = _ar_last_user_text(session)
     score, why = ar_score(q)
@@ -236,7 +258,11 @@ def _ar_get(ctx):
     mode, mn = _ar_settings()
     with _AR_LOCK:
         st = dict(_AR_STATS)
-    return {"ok": True, "mode": mode, "min_score": mn, "stats": st}
+    # claude_escalation rides along so a UI that already polls this endpoint can
+    # render the master switch without a second request (the authoritative
+    # read/write pair is GET/POST /api/claude/escalate in aux_claudebridge).
+    return {"ok": True, "mode": mode, "min_score": mn, "stats": st,
+            "claude_escalation": _ar_escalation_on()}
 
 
 def _ar_post(ctx):
