@@ -17,6 +17,29 @@
 # request). Falls back to mlx-lm only if the venv is missing.
 set -euo pipefail
 
+# --- On-demand gate (2026-09-01) --------------------------------------------
+# Same gate as mlx-server.sh: with model-autostart-off present, the background
+# lane only starts on an explicit fresh token. Nothing in the dashboard mints
+# the bg token automatically — to run this lane while on-demand mode is active:
+#   touch ~/.hermes/dashboard/model-start-ok-bg && \
+#   launchctl kickstart gui/$(id -u)/com.hermes.mlx-bg
+GATE_FILE="$HOME/.hermes/dashboard/model-autostart-off"
+START_TOKEN="$HOME/.hermes/dashboard/model-start-ok-bg"
+if [ -f "$GATE_FILE" ]; then
+  fresh=0
+  if [ -f "$START_TOKEN" ]; then
+    now="$(date +%s)"
+    mt="$(stat -f %m "$START_TOKEN" 2>/dev/null || echo 0)"
+    if [ $(( now - mt )) -le 180 ]; then fresh=1; fi
+  fi
+  if [ "$fresh" = 1 ]; then
+    rm -f "$START_TOKEN"
+  else
+    echo "[mlx-bg] on-demand mode: no fresh start token — not loading the model"
+    exit 0
+  fi
+fi
+
 DEFAULT_BG_MODEL="mlx-community/Qwen3.5-9B-4bit"
 BG_FILE="$HOME/.hermes/dashboard/bg-model"
 MODEL="$(cat "$BG_FILE" 2>/dev/null || echo "$DEFAULT_BG_MODEL")"

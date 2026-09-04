@@ -49,6 +49,8 @@ WT_LOG_MAX = 1024 * 1024                                    # 1 MB single-gen ro
 
 TELEGRAM_MAX = 4096            # per-message Telegram cap (hermes send chunks here)
 SEND_MAX = 14000               # runaway ceiling for a whole brief (~3-4 messages)
+SEND_TIMEOUT = 60                # hermes CLI import + Telegram round trip
+
 RULES_CAP    = 40
 FEED_N       = 15
 RECENT_N     = 20
@@ -321,6 +323,9 @@ def _wt_load():
                     "minute": _clamp_int(ev.get("minute", 0), 0, 59, 0),
                     "min_items": _clamp_int(ev.get("min_items", 1), 1, 6, 1),
                     "channels": _valid_channels(ev.get("channels"), ["telegram", "hub"])}
+    ms = d.get("master") if isinstance(d.get("master"), dict) else {}
+    d["master"] = {"briefings": bool(ms.get("briefings", True)),
+                   "news": bool(ms.get("news", True))}
     bk = d.get("breaking") if isinstance(d.get("breaking"), dict) else {}
     d["breaking"] = {"enabled": bool(bk.get("enabled", True)),
                      "override_quiet": bool(bk.get("override_quiet", True)),
@@ -859,6 +864,22 @@ def _today_str(ts=None):
     return time.strftime("%Y-%m-%d", time.localtime(ts))
 
 
+def _slept_through(cur_min, sched_min, cutoff_min, grace_min=120):
+    """A scheduled push still pending long after its slot (the Mac slept
+    through it) is stale — skip it for today. Measured from the SCHEDULED
+    time, not just the clock: the old absolute cutoff alone made any slot at
+    or past it unreachable (a brief set to 19:00 or an evening wrap at 22:30
+    was marked done without ever sending)."""
+    return cur_min >= cutoff_min and cur_min - sched_min > grace_min
+
+
+def _master_on(cfg, key):
+    """Master toggles: 'briefings' gates the 8am/midday/evening pushes,
+    'news' gates breaking alerts + rss_keyword watch rules."""
+    m = cfg.get("master") if isinstance(cfg.get("master"), dict) else {}
+    return bool(m.get(key, True))
+
+
 def _wt_gate(rule, signature, now_ts, cfg, state):
     """Returns a suppression reason ('' = pass).  Pure — no side effects."""
     if not rule.get("enabled", True):
@@ -893,14 +914,35 @@ def _wt_send_telegram(text):
     text = _strip_emoji(text)
     if len(text) > SEND_MAX:
         text = text[:SEND_MAX - 1].rstrip() + "…"
+    # --json (not --quiet): quiet mode prints NOTHING on failure, so every
+    # delivery problem used to surface as a bare "exit 1". The JSON payload
+    # carries the real reason ({error} / {skipped} / {success}).
+    # 60s: the hermes CLI is a slow venv import plus a real Telegram round
+    # trip; 20s timed out under load and the day's brief was lost.
     try:
-        p = subprocess.run([HERMES, "send", "--to", "telegram", "--quiet", text],
-                           capture_output=True, text=True, timeout=20,
+        p = subprocess.run([HERMES, "send", "--to", "telegram", "--json", text],
+                           capture_output=True, text=True, timeout=SEND_TIMEOUT,
                            env=_hermes_env())
+    except subprocess.TimeoutExpired:
+        return False, "TimeoutExpired: hermes send exceeded %ds" % SEND_TIMEOUT
     except Exception as e:
         return False, type(e).__name__ + ": " + str(e)
+    out = (p.stdout or "").strip()
+    payload = {}
+    if "{" in out:
+        try:
+            payload = json.loads(out[out.index("{"):])
+        except Exception:
+            payload = {}
+    if payload.get("error"):
+        return False, str(payload["error"])[:200]
+    if payload.get("skipped"):
+        # `skipped: true` exits 0 (send_message_tool's cron-duplicate short
+        # circuit) — still NOT a delivery; surface its reason/note
+        return False, "skipped: " + str(payload.get("reason") or
+                                        payload.get("note") or "")[:180]
     if p.returncode != 0:
-        return False, ((p.stderr or p.stdout or "").strip()[:200] or
+        return False, ((p.stderr or out).strip()[:200] or
                        "exit %d" % p.returncode)
     return True, ""
 
@@ -1277,9 +1319,9 @@ _SYNTH_SYSTEM = (
     "already-correct draft assembled from cached data. Rewrite it into a crisp, "
     "scannable brief a busy person reads in under 60 seconds.\n"
     "RULES: Keep EXACTLY these section headers as markdown '##' lines and in this "
-    "order: 'Your day', 'World & tech front page', 'AI & Labs', 'Market movers', "
-    "'Underground signal', 'Look-ahead'. Use 12-hour clock times. NO emoji of any "
-    "kind.\n"
+    "order: 'For you — moves & people', 'Your day', 'World front page', 'AI & Labs', "
+    "'Underground signal', 'Look-ahead'. Never add, drop, or rename a section. "
+    "Use 12-hour clock times. NO emoji of any kind.\n"
     "CRITICAL — LINKS: The draft contains markdown links written as [text](url). "
     "You MUST preserve every link EXACTLY, keeping its full URL verbatim inside the "
     "parentheses. Never drop a link, never shorten or alter a URL, never replace a "
@@ -1670,6 +1712,17 @@ _INTEL_AGENT_PROMPT = (
     "objects with keys title, source, url, why (one line). Copy URLs verbatim.")
 
 
+_intel_skip_last = [0.0]
+
+
+def _intel_note_skip(why):
+    """Log a skipped agent pass at most once per hour (the loop polls 5-minutely)."""
+    now = time.time()
+    if now - _intel_skip_last[0] >= 3600:
+        _intel_skip_last[0] = now
+        _wt_log_err("intel agent pass skipped: " + why)
+
+
 def _intel_agent_pass():
     """When web_search is usable, run ONE `hermes -z` research pass and return
     parsed items. Dormant (returns []) until a web provider is configured."""
@@ -1677,12 +1730,21 @@ def _intel_agent_pass():
         return []
     try:
         bl = globals().get("bg_lane")
-        extra = []
+        lane = {"lane": "primary", "hermes_args": []}
         if callable(bl):
             try:
-                extra = list(bl().get("hermes_args") or [])   # background lane
+                lane = bl() or lane                            # background lane
             except Exception:
-                extra = []
+                pass
+        extra = list(lane.get("hermes_args") or [])
+        if lane.get("lane") != "bg":
+            # bg lane down -> this run would land on the PRIMARY. Only use it
+            # when it is genuinely up and not paused; never wake it for
+            # background research, never hang 180s against a dead endpoint.
+            if agent_paused() or not model_online():
+                _intel_note_skip("no model lane online (primary paused/asleep, "
+                                 "background lane down)")
+                return []
         p = subprocess.run([HERMES] + extra + ["-z", _INTEL_AGENT_PROMPT],
                            capture_output=True, text=True, timeout=180,
                            env=_hermes_env())
@@ -2093,16 +2155,19 @@ def _midday_compose(cfg):
 def _midday_tick(cfg, state, now_ts):
     """Once/day at ~3pm: send the pulse only if noteworthy; date-guarded."""
     md = cfg.get("midday", {})
-    if not md.get("enabled", True):
+    if not _master_on(cfg, "briefings") or not md.get("enabled", True):
         return
     today = _today_str(now_ts)
     if state.get("last_midday_date") == today:
         return
+    if _in_quiet(now_ts, cfg.get("quiet_hours", {})):
+        return                           # retried next pass; window caps below
     lt = time.localtime(now_ts)
     cur_min = lt.tm_hour * 60 + lt.tm_min
-    if cur_min < md.get("hour", 15) * 60 + md.get("minute", 0):
+    md_min = md.get("hour", 15) * 60 + md.get("minute", 0)
+    if cur_min < md_min:
         return
-    if cur_min >= 18 * 60:               # slept through the window — skip today
+    if _slept_through(cur_min, md_min, 18 * 60):   # slept through the window — skip today
         _wt_save_state(lambda s: s.__setitem__("last_midday_date", today))
         state["last_midday_date"] = today
         return
@@ -2190,16 +2255,19 @@ def _evening_tick(cfg, state, now_ts):
     """Once/day at ~6pm: a short end-of-day wrap; catch-up until ~10pm, then the
     day is done. Date-guarded; notify-only (no actions)."""
     ev = cfg.get("evening", {})
-    if not ev.get("enabled", True):
+    if not _master_on(cfg, "briefings") or not ev.get("enabled", True):
         return
     today = _today_str(now_ts)
     if state.get("last_evening_date") == today:
         return
+    if _in_quiet(now_ts, cfg.get("quiet_hours", {})):
+        return                           # retried next pass; window caps below
     lt = time.localtime(now_ts)
     cur_min = lt.tm_hour * 60 + lt.tm_min
-    if cur_min < ev.get("hour", 18) * 60 + ev.get("minute", 0):
+    ev_min = ev.get("hour", 18) * 60 + ev.get("minute", 0)
+    if cur_min < ev_min:
         return
-    if cur_min >= 22 * 60:               # slept through the window — skip today
+    if _slept_through(cur_min, ev_min, 22 * 60):   # slept through the window — skip today
         _wt_save_state(lambda s: s.__setitem__("last_evening_date", today))
         state["last_evening_date"] = today
         return
@@ -2318,7 +2386,7 @@ def _breaking_pass(cfg, state, now_ts):
     """Gate + deliver + log breaking candidates.  Runs every loop pass; the
     signature store makes re-scans of the same story silent (no log flood)."""
     bc = cfg.get("breaking", {})
-    if not bc.get("enabled", True):
+    if not _master_on(cfg, "news") or not bc.get("enabled", True):
         return
     cands = _breaking_scan(cfg)
     if not cands:
@@ -2428,13 +2496,25 @@ def _prewarm():
 
 def _brief_tick(cfg, state, now_ts):
     br = cfg.get("brief", {})
-    if not br.get("enabled", True):
+    if not _master_on(cfg, "briefings") or not br.get("enabled", True):
+        return
+    # respect quiet hours: hold the brief until quiet ends (the date guard only
+    # flips after a compose, so it fires on the first pass past the quiet edge)
+    if _in_quiet(now_ts, cfg.get("quiet_hours", {})):
         return
     lt = time.localtime(now_ts)
     today = _today_str(now_ts)
     at_or_past = (lt.tm_hour > br.get("hour", 8) or
                   (lt.tm_hour == br.get("hour", 8) and lt.tm_min >= br.get("minute", 0)))
     if not at_or_past or state.get("last_brief_date") == today:
+        return
+    if _slept_through(lt.tm_hour * 60 + lt.tm_min,
+                      br.get("hour", 8) * 60 + br.get("minute", 0), 18 * 60):
+        # woke long past the morning window — the widget refreshes on its own
+        # loop and the evening wrap covers the day, so a 9pm "8am World Brief"
+        # push is noise. Mark the day done without sending.
+        _wt_save_state(lambda s: s.__setitem__("last_brief_date", today))
+        state["last_brief_date"] = today
         return
     _prewarm()
     comp = _brief_compose(run_synthesis=True)
@@ -2454,8 +2534,11 @@ def _brief_tick(cfg, state, now_ts):
 
 
 def _rule_pass(cfg, state, now_ts):
+    news_on = _master_on(cfg, "news")
     for rule in cfg.get("rules", []):
         if not rule.get("enabled", True):
+            continue
+        if rule.get("type") == "rss_keyword" and not news_on:
             continue
         try:
             fire, sig, ctx = _evaluate(rule)
@@ -2633,7 +2716,8 @@ def watchtower_get_handler(ctx):
         recent = list(reversed(_wt_log_read(RECENT_N)))
         return {"ok": True, "quiet_hours": cfg["quiet_hours"],
                 "daily_cap": cfg["daily_cap"], "brief": cfg["brief"],
-                "midday": cfg["midday"], "breaking": cfg["breaking"],
+                "midday": cfg["midday"], "evening": cfg["evening"],
+                "breaking": cfg["breaking"], "master": cfg["master"],
                 "rules": cfg["rules"], "stats": _rule_stats(),
                 "recent": recent, "live_types": list(LIVE_TYPES),
                 "stub_types": list(STUB_TYPES)}
@@ -2770,6 +2854,36 @@ def _op_set_midday(b):
     return {"ok": True, "midday": d["midday"]}
 
 
+def _op_set_evening(b):
+    def _mut(d):
+        ev = dict(d.get("evening", {}))
+        if "enabled" in b:
+            ev["enabled"] = bool(b["enabled"])
+        if "hour" in b:
+            ev["hour"] = _clamp_int(b["hour"], 16, 23, ev.get("hour", 18))
+        if "minute" in b:
+            ev["minute"] = _clamp_int(b["minute"], 0, 59, ev.get("minute", 0))
+        if "min_items" in b:
+            ev["min_items"] = _clamp_int(b["min_items"], 1, 6, ev.get("min_items", 1))
+        if "channels" in b:
+            ev["channels"] = _valid_channels(b["channels"], ["telegram", "hub"])
+        d["evening"] = ev
+    d = _wt_save_config(_mut)
+    return {"ok": True, "evening": d["evening"]}
+
+
+def _op_set_master(b):
+    def _mut(d):
+        m = dict(d.get("master", {}))
+        if "briefings" in b:
+            m["briefings"] = bool(b["briefings"])
+        if "news" in b:
+            m["news"] = bool(b["news"])
+        d["master"] = m
+    d = _wt_save_config(_mut)
+    return {"ok": True, "master": d["master"]}
+
+
 def _op_set_breaking(b):
     def _mut(d):
         bk = dict(d.get("breaking", {}))
@@ -2880,6 +2994,7 @@ _WT_OPS = {
     "toggle_rule": _op_toggle_rule, "delete_rule": _op_delete_rule,
     "set_quiet_hours": _op_set_quiet, "set_daily_cap": _op_set_cap,
     "set_brief": _op_set_brief, "set_midday": _op_set_midday,
+    "set_evening": _op_set_evening, "set_master": _op_set_master,
     "set_breaking": _op_set_breaking, "mark_reaction": _op_mark_reaction,
     "mute_rule": _op_mute_rule, "test_rule": _op_test_rule,
 }

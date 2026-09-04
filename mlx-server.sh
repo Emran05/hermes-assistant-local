@@ -3,6 +3,30 @@
 # Run this FIRST (in its own terminal / as a service), then start Hermes.
 set -euo pipefail
 
+# --- On-demand gate (2026-09-01) --------------------------------------------
+# When ~/.hermes/dashboard/model-autostart-off exists, this script refuses to
+# load the model unless the dashboard minted a FRESH start token (written by
+# _mlx_start on an explicit wake/resume/switch — i.e. the user actually asked).
+# This blocks login autostart, the app's blind `launchctl kickstart` at launch,
+# and any stray poke, so the ~18GB model never burns battery uninvited.
+# Delete the marker file to restore always-on behavior.
+GATE_FILE="$HOME/.hermes/dashboard/model-autostart-off"
+START_TOKEN="$HOME/.hermes/dashboard/model-start-ok"
+if [ -f "$GATE_FILE" ]; then
+  fresh=0
+  if [ -f "$START_TOKEN" ]; then
+    now="$(date +%s)"
+    mt="$(stat -f %m "$START_TOKEN" 2>/dev/null || echo 0)"
+    if [ $(( now - mt )) -le 180 ]; then fresh=1; fi
+  fi
+  if [ "$fresh" = 1 ]; then
+    rm -f "$START_TOKEN"
+  else
+    echo "[mlx-server] on-demand mode: no fresh start token — not loading the model"
+    exit 0
+  fi
+fi
+
 # --- Model choice -----------------------------------------------------------
 # Primary: fast, reliable orchestration model. ~18-20GB in 4-bit, leaves the
 # M5's memory free for everything else. This is the right default for an

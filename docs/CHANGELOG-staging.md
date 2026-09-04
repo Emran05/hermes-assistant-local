@@ -314,3 +314,17 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   install-services.sh installs the bg service. Primary switched to Qwen3.8 through
   the real switch path (hermes model.default updated). VERIFIED: briefing regenerated
   on :8081 (primary saw 0 requests); 9B tool suite 6/6 at ~88 tok/s, 7GB.
+- `<on-demand-model>` (2026-09-01) Model servers are ON-DEMAND: plists RunAtLoad/
+  KeepAlive false, `model-autostart-off` gate in mlx-server*.sh (fresh start token
+  minted only by server.py `_mlx_start` — wake/resume/switch/restart), `main()` marks
+  a down un-paused model asleep at dashboard start. Watchtower `master {briefings,
+  news}` toggles + `set_evening` op + evening/breaking-override controls in the
+  Mind-view card; brief/midday/evening hold during quiet hours. User state: both
+  masters OFF, model paused.
+- `<bugfix-2026-09-01>` Second pass, verified live: `hermes send --json` (quiet
+  hid every error) + 60s send budget; intel agent pass no longer spawns `hermes -z`
+  against a paused/asleep model (109×180s timeouts in dashboard.log; log shows
+  "intel agent pass skipped" once/hour now); `_slept_through` relative cutoff so a
+  brief ≥18:00 / evening ≥22:00 can actually send (9/9 cases); chat wakes a model
+  that is down without the asleep marker + idle loop self-heals the marker
+  (`_mlx_proc_alive`); schedule time inputs echo the clamped value.

@@ -56,8 +56,11 @@ cat > "$MLX_PLIST" <<EOF
     <key>PATH</key><string>$SVC_PATH</string>
     <key>HOME</key><string>$HOME</string>
   </dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <!-- On-demand (2026-09-01): the model does NOT start at login and is not
+       kept alive; the dashboard starts it (bootstrap+kickstart, with a start
+       token for mlx-server.sh's gate) when the user actually needs it. -->
+  <key>RunAtLoad</key><false/>
+  <key>KeepAlive</key><false/>
   <key>ThrottleInterval</key><integer>15</integer>
   <key>StandardOutPath</key><string>$LOGS/mlx-server.log</string>
   <key>StandardErrorPath</key><string>$LOGS/mlx-server.log</string>
@@ -79,8 +82,8 @@ cat > "$BG_PLIST" <<EOF
     <key>PATH</key><string>$SVC_PATH</string>
     <key>HOME</key><string>$HOME</string>
   </dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><false/>
+  <key>KeepAlive</key><false/>
   <key>ThrottleInterval</key><integer>15</integer>
   <key>StandardOutPath</key><string>$LOGS/mlx-bg.log</string>
   <key>StandardErrorPath</key><string>$LOGS/mlx-bg.log</string>
@@ -144,11 +147,12 @@ launchctl bootstrap "gui/$UID_N" "$BG_PLIST"
 launchctl bootstrap "gui/$UID_N" "$DASH_PLIST"
 launchctl bootstrap "gui/$UID_N" "$SERVE_PLIST"
 
-echo "✓ installed + started:"
-echo "    $MLX_LABEL   (model server :8080, log: $LOGS/mlx-server.log)"
-echo "    $BG_LABEL       (background model :8081, log: $LOGS/mlx-bg.log)"
-echo "    $DASH_LABEL  (dashboard   :7788, log: $LOGS/dashboard.log)"
-echo "    $SERVE_LABEL     (agent backend :9119, log: $LOGS/serve.log)"
-echo "  They start at login and restart automatically if they crash."
+echo "✓ installed:"
+echo "    $MLX_LABEL   (model server :8080, ON-DEMAND — starts on first use, log: $LOGS/mlx-server.log)"
+echo "    $BG_LABEL       (background model :8081, ON-DEMAND, log: $LOGS/mlx-bg.log)"
+echo "    $DASH_LABEL  (dashboard   :7788, always-on, log: $LOGS/dashboard.log)"
+echo "    $SERVE_LABEL     (agent backend :9119, always-on, log: $LOGS/serve.log)"
+echo "  Dashboard + serve start at login; the model servers stay OFF until a"
+echo "  chat/Telegram turn (or the menu's Wake now) starts them."
 echo "  Manage:  launchctl kickstart -k gui/$UID_N/$DASH_LABEL   (restart)"
 echo "           $0 --uninstall                                   (remove)"

@@ -100,6 +100,9 @@
     s.textContent = [
       "#mind-extra-watchtower .wt-eye{color:var(--muted)}",
       ".wt-controls{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:14px}",
+      ".wt-master{margin-bottom:10px}",
+      ".wt-master .wt-ctl{background:color-mix(in srgb,var(--iris) 9%,var(--glass-2));",
+      "border-color:color-mix(in srgb,var(--iris) 30%,var(--hairline))}",
       ".wt-ctl{flex:1 1 150px;min-width:140px;background:var(--glass-2);border:1px solid var(--hairline);",
       "border-radius:12px;padding:9px 11px}",
       ".wt-ctl label{display:block;font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;",
@@ -222,7 +225,9 @@
     var tiny = rules.length + (rules.length === 1 ? " rule · " : " rules · ") + enabledCount + " on";
 
     var html = "";
-    html += controlsHtml(brief, qh, data.daily_cap, data.midday || {}, data.breaking || {});
+    html += masterHtml(data.master || {});
+    html += controlsHtml(brief, qh, data.daily_cap, data.midday || {}, data.breaking || {},
+      data.evening || {});
     html += '<div class="wt-eb" id="wt-ctl-eb"></div>';
     html += '<div class="wt-band">Watches<span class="wt-brule"></span></div>';
     html += rulesHtml(rules, stats);
@@ -231,8 +236,9 @@
     html += '<div class="wt-band">Recent fires<span class="wt-brule"></span></div>';
     html += recentHtml(data.recent || []);
     html += '<div class="wt-hint">Watchtower only notifies — it never runs a tool, never acts, ' +
-      "and delivers to your Telegram home channel only. Quiet hours, per-rule cooldown, and a daily " +
-      "cap keep it quiet.</div>";
+      "and delivers to your Telegram home channel only. The two switches up top silence all " +
+      "daily briefings or all news updates in one flip; quiet hours, per-rule cooldown, and a " +
+      "daily cap keep the rest polite.</div>";
 
     var s = mount(grid, html, tiny);
     if (!s) return;
@@ -242,7 +248,19 @@
     } catch (e) {}
   }
 
-  function controlsHtml(brief, qh, cap, midday, breaking) {
+  function masterHtml(master) {
+    var bOn = master.briefings !== false;
+    var nOn = master.news !== false;
+    return '<div class="wt-controls wt-master">' +
+      '<div class="wt-ctl"><label>Daily briefings</label><div class="wt-row2">' +
+      toggle("wt-master-briefs", bOn) +
+      '<span class="tiny" style="color:var(--faint)">8am · midday · evening</span></div></div>' +
+      '<div class="wt-ctl"><label>News updates</label><div class="wt-row2">' +
+      toggle("wt-master-news", nOn) +
+      '<span class="tiny" style="color:var(--faint)">breaking · news keywords</span></div></div></div>';
+  }
+
+  function controlsHtml(brief, qh, cap, midday, breaking, evening) {
     var briefOn = brief.enabled !== false;
     var h = num(brief.hour, 8), m = num(brief.minute, 0);
     var hh = (h < 10 ? "0" : "") + h, mm = (m < 10 ? "0" : "") + m;
@@ -250,6 +268,10 @@
     var mh = num(midday.hour, 15), mmin = num(midday.minute, 0);
     var mhh = (mh < 10 ? "0" : "") + mh, mmm = (mmin < 10 ? "0" : "") + mmin;
     var brkOn = breaking.enabled !== false;
+    var brkQuiet = breaking.override_quiet !== false;
+    var eveOn = evening.enabled !== false;
+    var eh = num(evening.hour, 18), emin = num(evening.minute, 0);
+    var ehh = (eh < 10 ? "0" : "") + eh, emm = (emin < 10 ? "0" : "") + emin;
     return '<div class="wt-controls">' +
       '<div class="wt-ctl"><label>8am World Brief</label><div class="wt-row2">' +
       toggle("wt-brief-on", briefOn) +
@@ -258,11 +280,18 @@
       '<div class="wt-ctl"><label>Midday pulse</label><div class="wt-row2">' +
       toggle("wt-mid-on", midOn) +
       '<input class="wt-inp wt-time" id="wt-mid-time" value="' + E(mhh + ":" + mmm) +
-      '" placeholder="15:00" title="Sends only when something noteworthy changed"></div></div>' +
+      '" placeholder="15:00" title="11:00-17:59. Sends only when something noteworthy changed"></div></div>' +
+      '<div class="wt-ctl"><label>Evening wrap</label><div class="wt-row2">' +
+      toggle("wt-eve-on", eveOn) +
+      '<input class="wt-inp wt-time" id="wt-eve-time" value="' + E(ehh + ":" + emm) +
+      '" placeholder="18:00" title="16:00-23:59. Short end-of-day wrap; sends only when noteworthy"></div></div>' +
       '<div class="wt-ctl"><label>Breaking alerts</label><div class="wt-row2">' +
       toggle("wt-brk-on", brkOn) +
       '<span class="tiny" style="color:var(--faint)">cap ' +
-      E(String(num(breaking.daily_cap, 5))) + "/day</span></div></div>" +
+      E(String(num(breaking.daily_cap, 5))) + "/day</span></div>" +
+      '<div class="wt-row2" style="margin-top:6px">' +
+      toggle("wt-brk-quiet", brkQuiet) +
+      '<span class="tiny" style="color:var(--faint)" title="On: urgent alerts page you even during quiet hours">can override quiet hours</span></div></div>' +
       '<div class="wt-ctl"><label>Quiet hours</label><div class="wt-row2">' +
       '<input class="wt-inp wt-time" id="wt-qh-start" value="' + E(qh.start || "22:00") + '">' +
       '<span class="tiny" style="color:var(--faint)">to</span>' +
@@ -431,6 +460,20 @@
   function wire(card, rules, brief) {
     var d = doc(); if (!d) return;
 
+    // master toggles — one flip silences a whole family of pushes
+    var mBriefs = card.querySelector("#wt-master-briefs");
+    if (mBriefs) mBriefs.addEventListener("click", function () {
+      var on = !mBriefs.classList.contains("on");
+      setTog(mBriefs, on);
+      op({ op: "set_master", briefings: on }).catch(function () {});
+    });
+    var mNews = card.querySelector("#wt-master-news");
+    if (mNews) mNews.addEventListener("click", function () {
+      var on = !mNews.classList.contains("on");
+      setTog(mNews, on);
+      op({ op: "set_master", news: on }).catch(function () {});
+    });
+
     // brief toggle + time
     var briefTog = card.querySelector("#wt-brief-on");
     if (briefTog) briefTog.addEventListener("click", function () {
@@ -442,7 +485,13 @@
     if (briefTime) briefTime.addEventListener("change", function () {
       var m = /^(\d{1,2}):(\d{2})$/.exec(briefTime.value.trim());
       if (!m) { ctlErr(card, "Time must be HH:MM"); return; }
-      op({ op: "set_brief", hour: Number(m[1]), minute: Number(m[2]) }).catch(function () {});
+      var th = Number(m[1]), tm = Number(m[2]);
+      op({ op: "set_brief", hour: th, minute: tm })
+        .then(function (r) {
+          if (!r || r.ok === false) { ctlErr(card, (r && r.error) || "bad time"); return; }
+          timeSaved(card, briefTime, r.brief, "Brief time (00:00-23:59)", th, tm);
+        })
+        .catch(function () {});
     });
 
     // midday pulse toggle + time
@@ -456,17 +505,47 @@
     if (midTime) midTime.addEventListener("change", function () {
       var m = /^(\d{1,2}):(\d{2})$/.exec(midTime.value.trim());
       if (!m) { ctlErr(card, "Time must be HH:MM"); return; }
-      op({ op: "set_midday", hour: Number(m[1]), minute: Number(m[2]) })
-        .then(function (r) { if (!r || r.ok === false) ctlErr(card, (r && r.error) || "bad time"); })
+      var th = Number(m[1]), tm = Number(m[2]);
+      op({ op: "set_midday", hour: th, minute: tm })
+        .then(function (r) {
+          if (!r || r.ok === false) { ctlErr(card, (r && r.error) || "bad time"); return; }
+          timeSaved(card, midTime, r.midday, "Midday runs 11:00-17:59 —", th, tm);
+        })
         .catch(function () {});
     });
 
-    // breaking alerts toggle
+    // evening wrap toggle + time
+    var eveTog = card.querySelector("#wt-eve-on");
+    if (eveTog) eveTog.addEventListener("click", function () {
+      var on = !eveTog.classList.contains("on");
+      setTog(eveTog, on);
+      op({ op: "set_evening", enabled: on }).catch(function () {});
+    });
+    var eveTime = card.querySelector("#wt-eve-time");
+    if (eveTime) eveTime.addEventListener("change", function () {
+      var m = /^(\d{1,2}):(\d{2})$/.exec(eveTime.value.trim());
+      if (!m) { ctlErr(card, "Time must be HH:MM"); return; }
+      var th = Number(m[1]), tm = Number(m[2]);
+      op({ op: "set_evening", hour: th, minute: tm })
+        .then(function (r) {
+          if (!r || r.ok === false) { ctlErr(card, (r && r.error) || "bad time"); return; }
+          timeSaved(card, eveTime, r.evening, "Evening runs 16:00-23:59 —", th, tm);
+        })
+        .catch(function () {});
+    });
+
+    // breaking alerts toggle + quiet-hours override
     var brkTog = card.querySelector("#wt-brk-on");
     if (brkTog) brkTog.addEventListener("click", function () {
       var on = !brkTog.classList.contains("on");
       setTog(brkTog, on);
       op({ op: "set_breaking", enabled: on }).catch(function () {});
+    });
+    var brkQuietTog = card.querySelector("#wt-brk-quiet");
+    if (brkQuietTog) brkQuietTog.addEventListener("click", function () {
+      var on = !brkQuietTog.classList.contains("on");
+      setTog(brkQuietTog, on);
+      op({ op: "set_breaking", override_quiet: on }).catch(function () {});
     });
 
     // quiet hours
@@ -574,6 +653,17 @@
     if (on) el.classList.add("on"); else el.classList.remove("on");
     el.setAttribute("aria-checked", on ? "true" : "false");
   }
+  // After a schedule-time save: show what the backend actually stored. The
+  // ops clamp the hour to a window (brief 0-23, midday 11-17, evening 16-23)
+  // and always answer ok:true, so a typed 06:00 evening silently became 16:00
+  // while the field kept showing 06:00. Write the stored value back and say so.
+  function timeSaved(card, input, cfg, label, typedH, typedM) {
+    if (!cfg || typeof cfg.hour !== "number") return;
+    var h = num(cfg.hour, typedH), m = num(cfg.minute, typedM);
+    var txt = (h < 10 ? "0" : "") + h + ":" + (m < 10 ? "0" : "") + m;
+    if (input) input.value = txt;
+    if (h !== typedH || m !== typedM) ctlErr(card, label + " saved as " + txt);
+  }
   function ctlErr(card, msg) {
     var eb = card.querySelector("#wt-ctl-eb"); if (!eb) return;
     eb.textContent = msg || "";
@@ -601,8 +691,8 @@
     var p = card.querySelector("#wt-preview"); if (!p) return;
     p.style.display = "";
     var secs = (j && j.sections) || {};
-    var order = [["day", "Your day"], ["world", "World & tech"], ["markets", "Market movers"],
-      ["underground", "Underground signal"], ["lookahead", "Look-ahead"]];
+    var order = [["foryou", "For you"], ["day", "Your day"], ["world", "World front page"],
+      ["ai", "AI & Labs"], ["underground", "Underground signal"], ["lookahead", "Look-ahead"]];
     var out = order.map(function (kv) {
       var s = secs[kv[0]] || {};
       var lines = (s.lines && s.lines.length) ? s.lines.slice(0, 4).join("\n") : (s.note || "nothing yet");

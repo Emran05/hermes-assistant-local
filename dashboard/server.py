@@ -904,7 +904,10 @@ def _finish_chat_job(job, session):
 
 def _chat_worker(job, session, prompt):
     try:
-        if agent_idle_suspended():          # model asleep to save RAM — wake it
+        # asleep (idle-suspend) — or down WITHOUT a marker (crash, external
+        # bootout, refused start): a genuine user turn wakes it either way.
+        # A deliberate pause never reaches here (/api/chat fails fast).
+        if agent_idle_suspended() or (not agent_paused() and not model_online()):
             job["status"] = "Waking the model from sleep — about 30s…"
             if not agent_wake(wait=True):
                 job.update(reply="The model was asleep and didn't wake in time — "
@@ -1129,6 +1132,31 @@ def briefing_loop():
         time.sleep(60)
 
 
+_DOWN_PERSIST_S = 60          # two consecutive 30s ticks of genuine down-ness
+_down_seen_at = [0.0]         # first tick the loop saw it down with no process
+
+
+def _start_token_fresh():
+    """An unconsumed start token (<180s, mlx-server.sh's window) means a start
+    is in flight — never treat that as 'down'."""
+    try:
+        return time.time() - os.path.getmtime(MODEL_START_TOKEN) <= 180
+    except OSError:
+        return False
+
+
+def _mlx_proc_alive():
+    """Is any model-server process present (either backend, either lane)?
+    Cheap pgrep — used to tell 'loading right now' from 'genuinely down'.
+    Unknown (probe failed) counts as alive so we never mark a loading model."""
+    try:
+        return bool(subprocess.run(["pgrep", "-f", "mlx_lm server|mlx-vlm-launch"],
+                                   capture_output=True, text=True,
+                                   timeout=5).stdout.strip())
+    except Exception:
+        return True
+
+
 def _mlx_footprint_gb():
     """Real memory (phys_footprint) of the MLX server, in GB — ps RSS
     under-reports MLX's Metal/unified allocations, so use footprint(1)."""
@@ -1189,21 +1217,42 @@ IDLE_SUSPEND_MIN = float(os.environ.get("IDLE_SUSPEND_MIN", "10"))
 _last_user_activity = time.time()   # bumped on every genuine user turn
 
 
+MODEL_START_TOKEN = os.path.join(DATA, "model-start-ok")
+
+
+def _mlx_start(uid=None):
+    """Load + start the model server regardless of the plist's RunAtLoad
+    (on-demand mode, 2026-09-01: RunAtLoad/KeepAlive are false). Mints the
+    start token (mlx-server.sh's gate refuses to load the model without a
+    fresh one when model-autostart-off exists — this is what separates a real
+    user-intent start from the app's blind kickstart), bootstraps the job
+    (tolerating 'already loaded'), then kickstarts it (no-op when running)."""
+    uid = os.getuid() if uid is None else uid
+    try:
+        with open(MODEL_START_TOKEN, "w") as f:
+            f.write(str(time.time()))
+    except OSError:
+        pass
+    r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", MLX_PLIST],
+                       capture_output=True, text=True, timeout=20)
+    if r.returncode != 0 and "already" not in (r.stderr or "").lower():
+        time.sleep(3)  # launchd needs a beat after a recent bootout
+        subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", MLX_PLIST],
+                       capture_output=True, timeout=20)
+    subprocess.run(["launchctl", "kickstart", f"gui/{uid}/{MLX_LABEL}"],
+                   capture_output=True, timeout=15)
+
+
 def _mlx_restart():
     """Reliable model-server restart (kickstart -k does NOT reload the KeepAlive
     service — it kept the old process). bootout fully frees the balloon, then
-    bootstrap reloads the active model with a fresh, empty cache."""
+    _mlx_start reloads the active model with a fresh, empty cache."""
     uid = os.getuid()
     try:
         subprocess.run(["launchctl", "bootout", f"gui/{uid}/{MLX_LABEL}"],
                        capture_output=True, timeout=15)
         time.sleep(3)
-        r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", MLX_PLIST],
-                           capture_output=True, text=True, timeout=20)
-        if r.returncode != 0 and "already" not in (r.stderr or "").lower():
-            time.sleep(3)
-            subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", MLX_PLIST],
-                           capture_output=True, timeout=20)
+        _mlx_start(uid)
         return True
     except Exception as e:
         print(f"[memory_guard] restart failed: {e}", file=sys.stderr)
@@ -1308,12 +1357,7 @@ def agent_wake(wait=True, timeout=90):
     model is (or came) online. Safe to call when already awake (idempotent)."""
     uid = os.getuid()
     try:
-        r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", MLX_PLIST],
-                           capture_output=True, text=True, timeout=20)
-        if r.returncode != 0 and "already" not in (r.stderr or "").lower():
-            time.sleep(3)  # launchd needs a beat after a recent bootout
-            subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", MLX_PLIST],
-                           capture_output=True, timeout=20)
+        _mlx_start(uid)
     except Exception as e:
         print(f"[idle_suspend] wake bootstrap failed: {e}", file=sys.stderr)
         return False
@@ -1360,7 +1404,31 @@ def idle_suspend_loop():
                     agent_wake(wait=False)
                 continue
             if not model_online():
+                # down but not marked asleep (crash, external bootout, a start
+                # the on-demand gate refused): mark it asleep so chat / Telegram
+                # cross-surface wake / "Wake now" bring it back on real use —
+                # the rule main() applies at boot. Only once the down state has
+                # PERSISTED across ticks (>= _DOWN_PERSIST_S) with no server
+                # process and no fresh start token: switch_model / _mlx_restart /
+                # resume / thinking-toggle all go bootout -> sleep 3 -> start,
+                # a ~4s window with nothing running, and a stale marker while
+                # online would silence memory_guard AND stop idle-suspend
+                # (RAM never reclaimed).
+                if (not _chat_jobs_active() and not globals().get("_briefing_generating")
+                        and not _mlx_proc_alive() and not _start_token_fresh()):
+                    if _down_seen_at[0] <= 0:
+                        _down_seen_at[0] = time.time()
+                    elif (time.time() - _down_seen_at[0] >= _DOWN_PERSIST_S
+                          and not agent_paused()):
+                        with open(IDLE_SUSPEND_FILE, "w") as _f:
+                            _f.write(str(time.time()))
+                        _down_seen_at[0] = 0.0
+                        print("[idle_suspend] model down without a marker — marked "
+                              "asleep; next user turn wakes it", file=sys.stderr)
+                else:
+                    _down_seen_at[0] = 0.0
                 continue                # nothing running to suspend
+            _down_seen_at[0] = 0.0
             if _chat_jobs_active() or globals().get("_briefing_generating"):
                 continue                # a turn is in flight — never suspend mid-work
             idle_for = time.time() - max(_last_user_activity,
@@ -2156,12 +2224,7 @@ def agent_power(action):
             except OSError:
                 pass
         try:
-            r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", MLX_PLIST],
-                               capture_output=True, text=True, timeout=20)
-            if r.returncode != 0 and "already" not in (r.stderr or "").lower():
-                time.sleep(3)  # launchd needs a beat after a recent bootout
-                subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", MLX_PLIST],
-                               capture_output=True, timeout=20)
+            _mlx_start(uid)
         except Exception as e:
             return {"ok": False, "error": type(e).__name__}
         return {"ok": True, "paused": False, "loading": True}
@@ -2433,12 +2496,7 @@ def switch_model(mid):
             subprocess.run(["launchctl", "bootout", f"gui/{uid}/{MLX_LABEL}"],
                            capture_output=True, timeout=15)
             time.sleep(3)  # launchd needs a beat after bootout (avoids error 5)
-            r = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", MLX_PLIST],
-                               capture_output=True, text=True, timeout=20)
-            if r.returncode != 0 and "already" not in (r.stderr or "").lower():
-                time.sleep(3)
-                subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", MLX_PLIST],
-                               capture_output=True, timeout=20)
+            _mlx_start(uid)
     except Exception as e:
         return {"ok": False, "error": f"restart failed: {e}"}
     _widget_cache.pop("sys_live", None)
@@ -2962,6 +3020,19 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    # On-demand model (2026-09-01): the mlx services no longer start at login.
+    # If the model is down and not deliberately paused, mark it idle-suspended
+    # so every existing wake path (chat worker, the idle loop's Telegram
+    # cross-surface wake, the menu's "Wake now") treats it as asleep and
+    # starts it on real use.
+    try:
+        if not agent_paused() and not agent_idle_suspended() and not model_online():
+            with open(IDLE_SUSPEND_FILE, "w") as _f:
+                _f.write(str(time.time()))
+            print("[autostart] model down at dashboard start — marked asleep; "
+                  "first user turn wakes it", file=sys.stderr)
+    except Exception as _e:
+        print(f"[autostart] init check failed: {_e}", file=sys.stderr)
     threading.Thread(target=briefing_loop, daemon=True).start()
     threading.Thread(target=memory_guard_loop, daemon=True).start()
     threading.Thread(target=idle_suspend_loop, daemon=True).start()

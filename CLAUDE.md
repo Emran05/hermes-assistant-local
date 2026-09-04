@@ -110,6 +110,41 @@ and explicit agent tool calls (web search etc.) touch the internet.
   NON-question sentence, or filename + write/implement/refactor. Test set:
   25/25 benign allowed, 12/12 harmful + 10/10 codegen refused, injected-context
   caught (`scratchpad t_gate.py` pattern). The tool-lockout remains the real control.
+- **Notification master toggles (2026-09-01)** — watchtower.json `master:
+  {briefings, news}` (normalized in `_wt_load`, flipped via `/api/watchtower`
+  op `set_master`): `briefings` gates the 8am/midday/evening ticks, `news`
+  gates `_breaking_pass` + rss_keyword rules. New op `set_evening` (+`evening`
+  and `master` now in the GET payload — evening previously had NO toggle
+  anywhere). UI: two accent master switches + Evening wrap + breaking
+  "can override quiet hours" controls in the Mind-view Watchtower card.
+  Also: brief/midday/evening ticks now hold during quiet hours, and a wake
+  after 6 PM marks the morning brief done WITHOUT sending (the widget still
+  refreshes via briefing_loop; the evening wrap covers the day). ALL Telegram
+  pushes flow through `_wt_send_telegram` (verified: only call site sending),
+  so these gates are the complete off-switch; `~/.hermes/cron/` ticker runs
+  but has zero jobs.
+- **Watchtower/idle bug fixes (2026-09-01, second pass)** — (1) `_wt_send_telegram`
+  calls `hermes send --json` (NOT `--quiet`: quiet mode prints nothing on failure,
+  so every delivery problem logged as a bare "exit 1"), parses `{error|skipped|
+  success}`, `SEND_TIMEOUT=60` (20s timed out under load and the day's brief was
+  lost — the date guard flips after compose). (2) `_intel_agent_pass` skips (one
+  log line/hour) unless a lane is genuinely up: `bg_lane()` silently falls back
+  to the PRIMARY when :8081 is down, so with on-demand models it spawned an
+  hourly `hermes -z` against a paused/asleep model (109 × 180s timeouts in the
+  log). Background work never wakes the model. (3) `_slept_through(cur, sched,
+  cutoff)` replaces the absolute "after 18:00 / 22:00 mark done without sending"
+  cutoffs in the brief/midday/evening ticks — measured from the SCHEDULED slot
+  (+120 min grace), because a brief set to ≥18:00 or an evening wrap at ≥22:00
+  could never send. (4) `_chat_worker` wakes the model when it is down WITHOUT
+  the asleep marker (crash / external bootout / refused start), not only when
+  marked; `idle_suspend_loop` self-heals that marker only after the down
+  state persists >=60s across ticks with no server process (`_mlx_proc_alive()`
+  pgrep), no fresh start token and no job in flight — the ~4s bootout->start
+  gap of switch/restart/resume must never mark a loading model (a stale marker
+  while online would silence memory_guard and stop idle-suspend). (5) Schedule time inputs write back the
+  clamped value (`timeSaved()` in aux_watchtower.js) — the ops clamp hours
+  (brief 0-23, midday 11-17, evening 16-23) yet always answer ok:true, so a
+  typed 06:00 evening silently became 16:00 while the field still showed 06:00.
 - **Live System widget** — `/api/sys` (2s cache) + a 3s client updater (`liveSystem`) patches the meters in place without a full hub re-render; shows a pulsing "live" dot.
 - **Markets widget** — Yahoo chart; sparkline is anchored at the previous close so its shape matches the daily %; meta shows "at close · <date>" / "live" from `marketState`+`regularMarketTime` (don't present holiday/last-session data as live).
 - **Modular widget hub** — the Hub view is a widget registry, not fixed HTML.
@@ -231,10 +266,24 @@ and explicit agent tool calls (web search etc.) touch the internet.
   `computer_use` is in `_HERMES_CORE_TOOLS`, auto-enabled on all platforms
   when the driver exists. Background control — does not steal cursor/keyboard.
   `hermes computer-use doctor` for the health matrix.
-- **Always-on** — `install-services.sh` installs launchd agents
-  `com.hermes.mlx-server`, `com.hermes.dashboard`, `com.hermes.serve`
-  (RunAtLoad + KeepAlive, logs in `~/.hermes/logs/`). `--uninstall` removes.
-  The Telegram gateway service is separate (managed by `hermes gateway`).
+- **Services** — `install-services.sh` installs launchd agents. Dashboard +
+  serve are always-on (RunAtLoad + KeepAlive); the MODEL services
+  (`com.hermes.mlx-server`, `com.hermes.mlx-bg`) are ON-DEMAND since
+  2026-09-01 (battery): RunAtLoad=false, KeepAlive=false, plus a gate at the
+  top of mlx-server.sh / mlx-server-bg.sh — with
+  `~/.hermes/dashboard/model-autostart-off` present the script exits unless a
+  FRESH (<180s) start token exists (`model-start-ok` / `model-start-ok-bg`).
+  Only server.py's `_mlx_start()` mints the primary token (used by
+  agent_wake / resume / switch_model / `_mlx_restart`), so the app's blind
+  `ensureServices()` kickstart at launch and login autostart are inert; a
+  crash stays down until the next chat/Telegram wake. Nothing mints the bg
+  token — start that lane by touching it manually. `main()` marks a down,
+  un-paused model idle-suspended at dashboard start so chat/Telegram/"Wake
+  now" wake it transparently. A pause now genuinely survives reboots (it
+  didn't before — RunAtLoad used to resurrect the model at login). Delete
+  `model-autostart-off` + rerun install-services.sh with true/true to restore
+  always-on. `--uninstall` removes. Telegram gateway separate (`hermes
+  gateway`). Logs in `~/.hermes/logs/`.
 - **App** — `/Applications/Hermes Assistant.app`, real Swift/AppKit WKWebView
   shell (source `app/main.swift`, rebuild `app/build-app.sh`).
 
