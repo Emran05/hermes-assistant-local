@@ -49,7 +49,7 @@ Everything below is grounded in code read on 2026-07-05:
   `send_exec_approval()` (line ~4204) — inline keyboard
   `[Allow Once | Session] / [Always | Deny]`, callback data
   `ea:{once|session|always|deny}:{id}`; callback handler (line ~4929)
-  checks `_is_callback_user_authorized` (locked to user 8487169327), edits
+  checks `_is_callback_user_authorized` (locked to user <YOUR_TELEGRAM_USER_ID>), edits
   the message to show the decision, calls `resolve_gateway_approval()`.
 - Config: `~/.hermes/config.yaml` `approvals:\n  mode: manual` (line ~110);
   `command_allowlist` is absent today (empty — keep it that way).
@@ -138,7 +138,7 @@ serialization (never truncate the serialized line — that corrupts JSON).
 ```json
 {"ts": 1751712345.12, "ev": "request", "job": "ab12cd34ef56",
  "session": "canary-1751712340", "serve_sid": "s_9f...",
- "command": "rm -rf /Users/emrannasseri/.hermes/dashboard/approval-canary/scratch",
+ "command": "rm -rf ~/.hermes/dashboard/approval-canary/scratch",
  "pattern_key": "<non-empty, derived from the regex>",
  "description": "recursive delete", "allow_permanent": true}
 
@@ -168,7 +168,7 @@ serialization (never truncate the serialized line — that corrupts JSON).
   "serve_up": true,
   "yolo_env_in_plist": false,
   "log": {
-    "path": "/Users/emrannasseri/.hermes/dashboard/approval-log.jsonl",
+    "path": "~/.hermes/dashboard/approval-log.jsonl",
     "exists": true,
     "requests_7d": 4,
     "responds_7d": 4,
@@ -456,7 +456,7 @@ dangerous command:
    card is still up but the turn completes as BLOCKED-timeout — when
    `done:true` arrives the card auto-removes (existing behavior, keep).
 
-Telegram (@emran_hermes_bot, upstream-rendered — we verify, not restyle):
+Telegram (@your_hermes_bot, upstream-rendered — we verify, not restyle):
 
 1. Bot message: "Command Approval Required" + `<pre>` command (truncated
    at 3,800 chars) + Reason line.
@@ -465,7 +465,7 @@ Telegram (@emran_hermes_bot, upstream-rendered — we verify, not restyle):
    and the keyboard disappears; agent proceeds/halts within 15s.
 4. A second tap on a stale keyboard → "This approval has already been
    resolved." A non-authorized user's tap → "not authorized" (gateway is
-   locked to user 8487169327).
+   locked to user <YOUR_TELEGRAM_USER_ID>).
 
 ### New JS file: `dashboard/aux_approve.js` (served at `/aux_approve.js`)
 
@@ -693,7 +693,7 @@ builder — it is known-good and already emoji-free.)
   `rm -rf` of the canary path is.
 - **Local-first:** everything talks to `127.0.0.1:7788` / `:9119`; no
   inference or data leaves the machine; the only remote surface exercised
-  is Telegram transport, already locked to user 8487169327 — the drill
+  is Telegram transport, already locked to user <YOUR_TELEGRAM_USER_ID> — the drill
   additionally verifies that lock's UX (stale/unauthorized taps).
 - **No secrets:** `_alog` records only the already-redacted command
   payloads serve emits; the health endpoint reads config.yaml for
@@ -718,7 +718,7 @@ manual`.
 ### T0 — static & unit (run anytime, no agent turn)
 
 ```bash
-cd /Users/emrannasseri/HermesAssistant
+cd ~/HermesAssistant
 python3 -m py_compile dashboard/server.py dashboard/hermes_rpc.py dashboard/aux_approvals.py
 node --check dashboard/aux_approve.js
 python3 dashboard/approval_canary.py check
@@ -830,7 +830,7 @@ new `request` line in the log. Restore:
 
 ### T7 — Telegram drills (manual, phone in hand)
 
-`python3 dashboard/approval_canary.py arm`, then DM @emran_hermes_bot:
+`python3 dashboard/approval_canary.py arm`, then DM @your_hermes_bot:
 `Use your terminal tool to run exactly this shell command, with no changes
 and no additional commands: rm -rf ~/.hermes/dashboard/approval-canary/scratch`
 

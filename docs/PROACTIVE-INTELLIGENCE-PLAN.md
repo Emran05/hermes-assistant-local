@@ -23,7 +23,7 @@ Real modules this plan touches (verified in the checkout):
 - **Cron** — `hermes cron {create,run,tick,list,...}`, jobs in `~/.hermes/cron/`.
 - **Safety rails** — `mlx_admission()` + `memory_guard_loop` (`MLX_SOFT_GB=50`/`MLX_HARD_GB=56`)
   in `server.py`; 17-class approval tiers in `dashboard/permissions.py` (aux_trust);
-  Telegram gateway locked to user `8487169327`.
+  Telegram gateway locked to user `<YOUR_TELEGRAM_USER_ID>`.
 
 ---
 
@@ -261,7 +261,7 @@ each with `useful/noise` buttons wired to the existing `_op_mark_reaction`, a *w
 `suggested_action`, and (where consequential) an approval-gated "draft the intro" button.
 
 **c) Telegram** — reserved for the `pierce now` band only; the disciplined channel, locked to
-`8487169327`.
+`<YOUR_TELEGRAM_USER_ID>`.
 
 **Precision / anti-spam — "earn the interrupt" (the most-researched part):**
 - **Bounded deferral is the default** (Horvitz MSR TR-2005-87): non-breaking items accrue and
@@ -346,7 +346,7 @@ zero account grants and produces, at *tomorrow's 8am brief*, a "For you" section
   admission-gated by `mlx_admission()` (refuse ≥50GB) with the `memory_guard_loop` 56GB watchdog as
   backstop. Heavy synthesis is queued to the 2–3 scheduled windows, never continuous — exactly the
   guardrail the always-on category is documented to lack.
-- **Telegram-locked.** The `pierce now` channel remains the gateway locked to user `8487169327`.
+- **Telegram-locked.** The `pierce now` channel remains the gateway locked to user `<YOUR_TELEGRAM_USER_ID>`.
 
 ---
 

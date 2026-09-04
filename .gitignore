@@ -9,3 +9,10 @@ __pycache__/
 *.log
 # Graphify generated artifacts (~5MB, rebuild with `graphify update .`)
 graphify-out/
+
+# release/build artifacts (release.yml packages into dist/; update.sh unpacks
+# tarballs in a temp dir and leaves nothing here)
+dist/
+HermesAssistant-*.zip
+HermesAssistant-*-source.tar.gz
+SHA256SUMS

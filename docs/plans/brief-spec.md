@@ -1,5 +1,5 @@
 # World Brief — content spec (user-defined 2026-07-05)
-Delivery: 8:00am daily → Telegram (@emran_hermes_bot DM) + dashboard Briefing widget.
+Delivery: 8:00am daily → Telegram (@your_hermes_bot DM) + dashboard Briefing widget.
 NOT a personal-agenda ping. Composition (in order):
 1. Your day: calendar events, open tasks, anything the agent flagged overnight.
 2. World & tech front page: top 2-3 per News Desk section (Tech/World/Business/Science).

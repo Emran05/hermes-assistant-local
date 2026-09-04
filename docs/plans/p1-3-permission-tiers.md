@@ -302,7 +302,7 @@ steps 2–5.
 **`GET /api/permissions`** → 200
 
 ```json
-{"ok": true, "trusted": true, "path": "/Users/emrannasseri/.hermes/permissions.json",
+{"ok": true, "trusted": true, "path": "~/.hermes/permissions.json",
  "exists": true,
  "classes": [
    {"id": "destructive-delete", "label": "Destructive deletes", "risk": "high",

@@ -103,7 +103,7 @@ The exact auth URL, one line (parity with SKILL.md; convenience for the user).
 
 ### `~/.hermes/dashboard/google_status.json` (our cache; not sensitive — no tokens)
 ```json
-{ "connected": true, "partial": false, "email": "nasseriemran@gmail.com",
+{ "connected": true, "partial": false, "email": "you@example.com",
   "scopes": ["…gmail.readonly","…gmail.compose","…calendar.events"],
   "missing": [], "reason": "", "checked_at": 1751700123.4 }
 ```
@@ -342,7 +342,7 @@ provider returns; Google data flows through the same `RENDER['today']`.
   at 2050-2055; wrapper pattern from `aux_trust.js:18-22`.
 - **Telegram notify (optional, expiry only):** `hermes send -t telegram "…"`
   (confirmed subcommand; reuses `~/.hermes/.env` bot token, locked to user
-  8487169327; no gateway/LLM needed).
+  <YOUR_TELEGRAM_USER_ID>; no gateway/LLM needed).
 - **`.gitignore`:** add `google_token.json`, `google_client_secret.json`,
   `google_oauth_pending.json`, `google_oauth_last_url.txt` guards (they live in
   `~/.hermes`, already outside the repo, but add belt-and-suspenders patterns if
@@ -476,7 +476,7 @@ All commands use the venv python `V=~/.hermes/hermes-agent/venv/bin/python`.
    → JSON, no `invalid_scope`; `cat ~/.hermes/google_token.json | jq .scopes` ==
    the three SAFE_SCOPES exactly.
 5. **Draft works, send refuses.** `$V dashboard/google_draft.py --to
-   nasseriemran@gmail.com --subject "Hermes test" --body "draft only"` → a draft
+   you@example.com --subject "Hermes test" --body "draft only"` → a draft
    appears in Gmail → Drafts (verify in the web UI); then
    `python …/google_api.py gmail send --to x --subject y --body z` → exits with
    "sending is disabled by Hermes safety policy" (neuter confirmed);

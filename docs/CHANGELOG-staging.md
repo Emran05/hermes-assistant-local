@@ -408,3 +408,54 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   `run_agent()` also catches OSError, so a spawn failure can't kill a job thread
   before it sets done=True. VERIFIED: 29/29 harness cases (stubbed launchctl /
   model_online / subprocess) — no service restart, no model server touched.
+- `<release-and-update>` (2026-09-03) Turned the checkout into software other
+  people can install and keep updated. NEW: repo-root `VERSION` (1.0.0 — the
+  owner calls this the first public release; single source of truth — `app/build-app.sh` now stamps it + the short sha into
+  `CFBundleShortVersionString`/`CFBundleVersion`, and honours
+  `HERMES_SKIP_INSTALL=1` so CI can build without touching /Applications);
+  `dashboard/aux_update.py` (`/api/version`, `/api/update/check|status`, POST
+  `/api/update/apply|channel`) — GitHub Releases with ETag + a 6h cache in
+  `~/.hermes/dashboard/update-check.json` under a ≤5s budget, falling back to a
+  token (`GITHUB_TOKEN`/`HERMES_UPDATE_TOKEN`/`gh auth token`, for a private
+  repo) and then `git ls-remote --tags origin`, semver compare that gets
+  `v0.10.0 > v0.9.1` and prereleases right, plus a daemon re-check at boot+60s
+  and every 6h; `dashboard/aux_update.js` — ONE card in Settings › System & Data
+  (appends to `#sec-system`, or to `#view-mind` for the shell's relocator; NO
+  edit to aux_settings_shell.js) with the version line, channel selector, check
+  button, escaped 12-line release-notes preview, live log tail while applying,
+  the "dashboard restarts itself / app window reloads on reconnect" note, the
+  FDA re-grant warning when the release ships an app bundle, and a dot on the
+  `#tab-mind` gear; root `update.sh` (git AND tarball installs, SHA256SUMS
+  verification, refuses a dirty tree — or stashes with `--force`, re-runs
+  install-services.sh, leaves the on-demand model services asleep, `--dry-run`,
+  `--rebuild-app`, logs to `~/.hermes/logs/update.log`, writes update-state.json,
+  never touches ~/.hermes data) started DETACHED (`start_new_session`) so it
+  survives the dashboard restart it causes; root `install.sh` (preflight with
+  per-check remediation, ~/.hermes scaffold, non-destructive .env/config.yaml
+  seeds, hermes-CLI pointer, optional mlx-vlm venv, opt-in `--app`, then
+  install-services.sh, `--dry-run`); `.github/workflows/ci.yml` (py_compile /
+  bash -n / node --check + a gate that fails on a committed `/Users/<name>` path)
+  and `release.yml` (tag==VERSION, build, Developer-ID+notarise when the Apple
+  secrets exist else ad-hoc, zip + source tarball + SHA256SUMS, notes from
+  CHANGELOG.md); README/CHANGELOG/LICENSE(MIT)/SECURITY. Also scrubbed the bot
+  handle, Telegram user id, email and 8 files' worth of `/Users/<name>` paths out
+  of CLAUDE.md + docs/. VERIFIED: 105/105 python harness cases (semver incl.
+  v0.10.0>v0.9.1 and prerelease ordering, ls-remote tag parsing with `^{}`
+  peeling, release-JSON parsing, cache/ETag/304/token/stale paths against a
+  stubbed opener, apply refusals, status pid reconciliation) + 66/66 headless JS
+  cases (escaping incl. XSS through every field, 12-hour clock, disabled states,
+  FDA warnings) + live read-only checks against the real GitHub API and origin +
+  `./update.sh --dry-run` / `./install.sh --dry-run` + both workflow YAMLs parsed.
+  Also PROVED the detachment on a throwaway launchd job (com.hermes.updtest,
+  removed after): a `nohup` + `start_new_session` child runs to completion after
+  `launchctl bootout` of the job that spawned it — so update.sh survives the
+  dashboard bootout/bootstrap that install-services.sh performs mid-update, and
+  the hub cannot be left unloaded by its own updater.
+  RELEASE REPO: releases come from the PUBLIC `Emran05/hermes-assistant-local`;
+  the slug resolves env `HERMES_UPDATE_REPO` → the github.com slug on `origin`
+  → that public default (`_upd_repo()` / `repo_slug()`), so this private working
+  repo is never hardcoded and a user's clone checks the repo they cloned.
+  PENDING: `index.html` needs `<script src="/aux_update.js"></script>` (the
+  routes only exist after a dashboard restart), and no `v*` tag has been pushed
+  to either remote yet — `git ls-remote --tags origin` is empty, so the stable
+  channel correctly answers "no release found" until the first tag lands.

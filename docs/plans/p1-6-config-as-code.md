@@ -131,7 +131,7 @@ older (simple mtime GC in the same call). One-step recovery from a bad restore.
 
 ## Backend
 
-**New module: `/Users/emrannasseri/HermesAssistant/dashboard/config_snapshot.py`**
+**New module: `~/HermesAssistant/dashboard/config_snapshot.py`**
 exec'd into server.py globals (expanders_extra pattern). It may USE server
 globals defined above the exec point (`read_json`, `write_json`, `get_layout`,
 `save_layout`, `get_settings`, `SETTINGS_FILE`, `LAYOUT_FILE`, `MODELS_FILE`,
@@ -354,7 +354,7 @@ Total inline surface: ~14 lines, no shared-file surgery beyond dispatch.
 
 ## Frontend
 
-**New file: `/Users/emrannasseri/HermesAssistant/dashboard/config.js`**,
+**New file: `~/HermesAssistant/dashboard/config.js`**,
 served at `/config.js`, loaded AFTER the inline script and after expand.js so
 it can use `esc`, `animate`, `icon`, `$`, `renderHub` — and its assignments
 win.
@@ -565,7 +565,7 @@ curl -s -X POST localhost:7788/api/config/import -d '{"dry_run":false}'
 python3 - <<'EOF'
 import json; p='docs/state-snapshot.json'; s=json.load(open(p))
 s['agent_config']['approvals.mode']='manual'
-s['dashboard']['settings']['quicklinks']=[{"label":"x","url":"https://x.com/8487169327:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]
+s['dashboard']['settings']['quicklinks']=[{"label":"x","url":"https://x.com/<YOUR_TELEGRAM_USER_ID>:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]
 json.dump(s,open(p,'w'))
 EOF
 curl -s -X POST localhost:7788/api/config/import -d '{"dry_run":true}'

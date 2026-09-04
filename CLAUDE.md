@@ -315,9 +315,9 @@ and explicit agent tool calls (web search etc.) touch the internet.
   is made visible; the machinery itself is Hermes's (curator prunes skills on a
   7-day cycle, memory flushes each session).
 - **Telegram gateway** — launchd `ai.hermes.gateway.plist` (installed via
-  `hermes gateway install`). Bot **@emran_hermes_bot**; only user 8487169327
-  (the user's Telegram, display "Enzo Renny") may command it.
-  `TELEGRAM_*` in `~/.hermes/.env` (~line 339).
+  `hermes gateway install`). Your own bot (created with @BotFather); the
+  allowlist is `TELEGRAM_ALLOWED_USERS` in `~/.hermes/.env` — only the numeric
+  user ids listed there may command it. All `TELEGRAM_*` keys live in that file.
 - **Computer use** — cua-driver 0.7.0 (`/Applications/CuaDriver.app`,
   `com.trycua.driver`), TCC granted (Accessibility + Screen Recording).
   `computer_use` is in `_HERMES_CORE_TOOLS`, auto-enabled on all platforms
@@ -343,6 +343,35 @@ and explicit agent tool calls (web search etc.) touch the internet.
   gateway`). Logs in `~/.hermes/logs/`.
 - **App** — `/Applications/Hermes Assistant.app`, real Swift/AppKit WKWebView
   shell (source `app/main.swift`, rebuild `app/build-app.sh`).
+- **Versioning + self-update (2026-09-03)** — repo-root `VERSION` (currently
+  1.0.0) is the single source of truth; `app/build-app.sh` stamps it +
+  `git rev-parse --short HEAD` into `CFBundleShortVersionString`/
+  `CFBundleVersion` (and honours `HERMES_SKIP_INSTALL=1`, which CI uses to build
+  without touching /Applications). `dashboard/aux_update.py` serves
+  `/api/version`, `/api/update/check|status`, POST `/api/update/apply|channel`;
+  the check tries GitHub Releases (ETag + 6h cache in
+  `~/.hermes/dashboard/update-check.json`, ≤5s budget), then the same call with
+  a token (`GITHUB_TOKEN`/`HERMES_UPDATE_TOKEN`/`gh auth token` — for a private
+  repo), then `git ls-remote --tags origin`; a daemon thread re-checks at
+  boot+60s and every 6h. **Release repo slug** (`_upd_repo()` in aux_update.py,
+  `repo_slug()` in update.sh): env `HERMES_UPDATE_REPO` → the github.com slug
+  parsed off `git remote get-url origin` → default
+  `Emran05/hermes-assistant-local` (the PUBLIC repo releases are published
+  from; this private working repo is never hardcoded). Channel
+  `update.channel` = `stable` (tags) | `main` (origin/main, git checkouts only)
+  in settings.json. `aux_update.js` renders
+  ONE card into Settings › System & Data (it appends to `#sec-system`, or to
+  `#view-mind` and lets the shell's relocator re-home it — no edit to
+  aux_settings_shell.js) plus a dot on the `#tab-mind` gear. Applying starts
+  root `update.sh` DETACHED (`start_new_session`, log
+  `~/.hermes/logs/update.log`) so it survives the dashboard restart
+  install-services.sh performs; state in
+  `~/.hermes/dashboard/update-state.json`. `update.sh` handles both git and
+  tarball installs (SHA256SUMS-verified), refuses a dirty tree, never touches
+  `~/.hermes` data, and only PRINTS instructions when `app/` changed (a rebuild
+  drops FDA — see the Message Center note). `install.sh` is the fresh-Mac
+  bootstrap; `.github/workflows/{ci,release}.yml` gate syntax + home-path
+  hygiene and build/sign/publish on a `v*` tag.
 
 - **DeepSeek Harness (`dsh`) spike — 2026-08-18, NOT integrated** — installed
   locally (not global) at `~/.hermes/dsh` (`@deepseek-ai/dsh@0.1.0-rc.7`, MIT,
@@ -360,7 +389,10 @@ and explicit agent tool calls (web search etc.) touch the internet.
 
 ## Commands
 ```bash
+./install.sh --dry-run                # fresh-Mac bootstrap (preflight + plan)
 ./install-services.sh                 # (re)install + start the three services
+./update.sh --dry-run                 # what an update would do (stable channel)
+cat VERSION; curl -s localhost:7788/api/version   # what's running
 launchctl kickstart -k gui/$(id -u)/com.hermes.dashboard   # restart dashboard
 tail -f ~/.hermes/logs/{dashboard,serve,gateway}.log        # logs
 hermes gateway status                 # Telegram gateway health

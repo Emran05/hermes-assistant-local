@@ -215,11 +215,11 @@ honestly. `note` carries failure reasons ("window closed before after-frame",
 hooks:
   pre_tool_call:
     - matcher: "computer_use"          # fullmatch — exactly this tool
-      command: "/Users/emrannasseri/.hermes/agent-hooks/cua-shot.py"
+      command: "~/.hermes/agent-hooks/cua-shot.py"
       timeout: 15
   post_tool_call:
     - matcher: "computer_use"
-      command: "/Users/emrannasseri/.hermes/agent-hooks/cua-shot.py"
+      command: "~/.hermes/agent-hooks/cua-shot.py"
       timeout: 15
 ```
 
@@ -232,8 +232,8 @@ NOT accepted):
 
 ```json
 {"approvals": [
-  {"event": "pre_tool_call",  "command": "/Users/emrannasseri/.hermes/agent-hooks/cua-shot.py"},
-  {"event": "post_tool_call", "command": "/Users/emrannasseri/.hermes/agent-hooks/cua-shot.py"}
+  {"event": "pre_tool_call",  "command": "~/.hermes/agent-hooks/cua-shot.py"},
+  {"event": "post_tool_call", "command": "~/.hermes/agent-hooks/cua-shot.py"}
 ]}
 ```
 
@@ -250,7 +250,7 @@ gateway to register (docs: restart needed for channels to pick up new hooks).
 
 One script, both events (it branches on `hook_event_name` from stdin — one
 command string means exactly two allowlist entries). Shebang:
-`#!/Users/emrannasseri/.hermes/hermes-agent/venv/bin/python` (the venv has
+`#!~/.hermes/hermes-agent/venv/bin/python` (the venv has
 Pillow + the checkout's deps; the dashboard's stdlib-only rule does not apply
 here — this runs in agent-land, same as the P1.2 checkpoint driver).
 
@@ -550,7 +550,7 @@ curl -s "localhost:7788/api/recorder/shot?id=$ID&phase=before&max=480" | python3
 # 5. deny path: trigger another action, DENY it in the approval sheet
 #   -> row exists, detail shows status blocked, both frames present, pixels identical-ish
 
-# 6. cross-surface: Telegram "click ..." drill (locked to user 8487169327) OR
+# 6. cross-surface: Telegram "click ..." drill (locked to user <YOUR_TELEGRAM_USER_ID>) OR
 hermes -z "computer_use: press key cmd+s in TextEdit"   # -z fails closed on approval — expected;
 #   the pre hook fired anyway -> before frame present, post status:"error"  (acceptance #5 analog)
 

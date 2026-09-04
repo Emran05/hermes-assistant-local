@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  static-checks:
+    name: Syntax + hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile every Python file
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(git ls-files '*.py')
+          printf '%s\n' "${files[@]}"
+          python3 -m py_compile "${files[@]}"
+
+      - name: Parse every shell script
+        run: |
+          set -euo pipefail
+          rc=0
+          while IFS= read -r f; do
+            echo "bash -n $f"
+            bash -n "$f" || rc=1
+          done < <(git ls-files '*.sh')
+          exit $rc
+
+      - name: Parse every dashboard JavaScript file
+        run: |
+          set -euo pipefail
+          rc=0
+          while IFS= read -r f; do
+            case "$f" in dashboard/motion.min.js) echo "skip  $f"; continue ;; esac
+            echo "node --check $f"
+            node --check "$f" || rc=1
+          done < <(git ls-files 'dashboard/*.js')
+          exit $rc
+
+      # A home directory path in a tracked file means the tree only works on one
+      # person's Mac (and leaks their username). Placeholders are fine.
+      - name: No personal home paths in tracked files
+        run: |
+          set -uo pipefail
+          hits="$(git grep -InE '/Users/[A-Za-z0-9._-]+' -- . ':!.github/workflows/ci.yml' \
+                  | grep -vE '/Users/(YOU|you|USER|username|me|<[^>]+>|\$[A-Za-z_{])' || true)"
+          if [ -n "$hits" ]; then
+            echo "$hits"
+            echo "::error::a personal home path is committed — use \$HOME or ~ instead"
+            exit 1
+          fi
+          echo "clean"
+
+      - name: VERSION is a semver
+        run: |
+          set -euo pipefail
+          v="$(tr -d ' \t\n\r' < VERSION)"
+          echo "VERSION = $v"
+          echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' \
+            || { echo "::error::VERSION must look like 1.2.3"; exit 1; }

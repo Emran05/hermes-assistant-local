@@ -500,9 +500,9 @@ Nothing on the Hub view; this is an operator control, not a widget — so no
 ### Static
 
 ```bash
-python3 -m py_compile /Users/emrannasseri/HermesAssistant/dashboard/aux_specdec.py
-node --check /Users/emrannasseri/HermesAssistant/dashboard/aux_specdec.js
-bash -n /Users/emrannasseri/HermesAssistant/mlx-server.sh
+python3 -m py_compile ~/HermesAssistant/dashboard/aux_specdec.py
+node --check ~/HermesAssistant/dashboard/aux_specdec.js
+bash -n ~/HermesAssistant/mlx-server.sh
 # exec-smoke (module self-sufficiency, mirrors the P1.5 harness):
 python3 - <<'EOF'
 import os, threading, json
@@ -513,7 +513,7 @@ g = dict(DATA="/tmp/sd-test", HOME=os.path.expanduser("~"),
          switch_model=lambda m: {"ok": True}, agent_paused=lambda: False,
          CHAT_JOBS={}, _cached=lambda k,t,f: f())
 os.makedirs("/tmp/sd-test", exist_ok=True)
-exec(open("/Users/emrannasseri/HermesAssistant/dashboard/aux_specdec.py").read(), g)
+exec(open("~/HermesAssistant/dashboard/aux_specdec.py").read(), g)
 p = g["specdec_payload"]()
 assert p["ok"] and p["pair"] == "mlx-community/Qwen3-0.6B-4bit"
 print("specdec module OK")

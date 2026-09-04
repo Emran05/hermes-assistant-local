@@ -146,7 +146,7 @@ existing `write_json()` temp+rename under `_state_lock`.
       "ops": [
         {"op": "save", "at": 1751830000, "pre_etag": "0f343b0931126a20",
          "post_etag": "9a1b2c3d4e5f6a7b",
-         "snapshot": "/Users/emrannasseri/.hermes/dashboard/snapshots/memory/USER.md.1751830000.md"}
+         "snapshot": "~/.hermes/dashboard/snapshots/memory/USER.md.1751830000.md"}
       ]
     }
   },
@@ -175,7 +175,7 @@ One JSON object per line, append-only, written after a successful mutation:
 {"ts": 1751830000.412, "surface": "dashboard", "domain": "memory",
  "op": "save", "file": "USER.md", "by": "user",
  "pre_etag": "0f343b0931126a20", "post_etag": "9a1b2c3d4e5f6a7b",
- "pre_snapshot": "/Users/emrannasseri/.hermes/dashboard/snapshots/memory/USER.md.1751830000.md",
+ "pre_snapshot": "~/.hermes/dashboard/snapshots/memory/USER.md.1751830000.md",
  "bytes": 25}
 ```
 
@@ -254,7 +254,7 @@ All under `/api/memory/*`, dispatched by `memory_route`. All error bodies are
 Response 200:
 
 ```json
-{"ok": true, "dir": "/Users/emrannasseri/.hermes/memories",
+{"ok": true, "dir": "~/.hermes/memories",
  "files": [
    {"name": "USER.md", "kind": "entries", "core": true,
     "size": 23, "mtime": 1751587740.0, "etag": "0f343b0931126a20",
@@ -652,7 +652,7 @@ dirty:false, etag:null, timer:null}`.
 
 ## Test plan
 
-All from repo root `/Users/emrannasseri/HermesAssistant`. Deploy = restart
+All from repo root `~/HermesAssistant`. Deploy = restart
 dashboard + ⌘R in the app.
 
 ```bash

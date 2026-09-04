@@ -655,9 +655,9 @@ Nothing animates continuously; no blur is animated (backdrop-filter budget).
 
 Static checks:
 ```bash
-python3 -m py_compile /Users/emrannasseri/HermesAssistant/dashboard/metrics_extra.py \
-                      /Users/emrannasseri/HermesAssistant/dashboard/server.py   # → silence
-node --check /Users/emrannasseri/HermesAssistant/dashboard/metrics.js           # → silence
+python3 -m py_compile ~/HermesAssistant/dashboard/metrics_extra.py \
+                      ~/HermesAssistant/dashboard/server.py   # → silence
+node --check ~/HermesAssistant/dashboard/metrics.js           # → silence
 python3 - <<'EOF'                       # exec-include smoke: module is self-sufficient
 import types, collections, threading, time, os, json, re, uuid
 g = dict(HOME=os.path.expanduser("~"),
@@ -667,7 +667,7 @@ g = dict(HOME=os.path.expanduser("~"),
          model_online=lambda: False, _mlx_footprint_gb=lambda: None,
          hub_data=lambda: {}, switch_model=lambda m: {"ok": False},
          agent_power=lambda a: {"ok": False}, uuid=uuid)
-exec(open("/Users/emrannasseri/HermesAssistant/dashboard/metrics_extra.py").read(), g)
+exec(open("~/HermesAssistant/dashboard/metrics_extra.py").read(), g)
 j = g["_new_job"]("s"); j["text"] = "hi"; j.update(reply="hi", ok=True, state="done", done=True)
 p = g["metrics_payload"]({})
 assert p["ok"] and p["turns"]["n"] >= 1 and p["turns"]["ttft_ms"]["p50"] is not None
@@ -730,7 +730,7 @@ global.matchMedia = () => ({matches:false});
 global.fetch = async () => ({ok:true,status:200,json:async()=>data});
 global.animate = () => {}; global.loadConsole = async () => {};
 global.esc = s => String(s); global.$ = () => el();
-require('/Users/emrannasseri/HermesAssistant/dashboard/metrics.js');
+require('~/HermesAssistant/dashboard/metrics.js');
 setTimeout(async () => { await window.loadConsole();
   console.log('metrics.js render OK'); }, 50);
 EOF

@@ -137,7 +137,7 @@ glob). Same **datetime gotcha** as `aux_shortcuts.py:40`: use only `time`, no `d
       "id": "dv-a1b2c3d4e5f6",
       "goal": "add a /api/foo endpoint that returns uptime",
       "target": "hermes",           // "hermes" | absolute granted dir
-      "target_repo": "/Users/emrannasseri/HermesAssistant",
+      "target_repo": "~/HermesAssistant",
       "worktree": "/tmp/hermes-dev/dv-a1b2c3d4e5f6",
       "branch": "devagent/dv-a1b2c3d4e5f6",
       "base_sha": "7b0a58e",

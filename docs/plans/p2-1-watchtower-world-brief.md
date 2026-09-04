@@ -213,7 +213,7 @@ every `BRIEFING_REFRESH_MIN` minutes, and `/api/briefing` (server.py:2198) needs
 - **Telegram:** `subprocess.run([HERMES,"send","--to","telegram","--quiet",text], timeout=20)`.
   Verified subcommand: `hermes send` pipes text to the configured platform, **no LLM, no agent
   loop**, reusing the gateway's home-channel creds (`~/.hermes/.env`), which are locked to user
-  8487169327. We pass no chat_id → cannot be redirected. We never read the bot token. Telegram's
+  <YOUR_TELEGRAM_USER_ID>. We pass no chat_id → cannot be redirected. We never read the bot token. Telegram's
   4096-char limit is enforced by trimming the rendered brief/notification.
 - **Hub lane:** the fire is appended to the log; `GET /api/watchtower/feed` + the aux JS render it.
 
@@ -330,7 +330,7 @@ server.py's dispatch chain** (routes registered via the aux loader); the sole in
   a rule cannot be authored to act or to redirect delivery. Forward path for acting is documented as
   Phase-3-only via the hub serve/approval seam.
 - **Telegram locked to the one user:** delivery uses `hermes send --to telegram` with **no chat_id**
-  → the gateway's home channel (user 8487169327). A rule cannot supply a chat_id. We never read or
+  → the gateway's home channel (user <YOUR_TELEGRAM_USER_ID>). A rule cannot supply a chat_id. We never read or
   handle the bot token (it stays in `~/.hermes/.env` 600; `hermes send` reads it, not us).
 - **Gmail read+draft only, never send:** `email_important` is a *read-only* evaluator, stubbed until
   P2.5; there is no code path that sends or drafts from Watchtower. SMTP is never wired.

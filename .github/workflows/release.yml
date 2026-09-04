@@ -1,0 +1,174 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, sign and publish
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Tag must match VERSION
+        id: ver
+        run: |
+          set -euo pipefail
+          ver="$(tr -d ' \t\n\r' < VERSION)"
+          tag="${GITHUB_REF_NAME}"
+          echo "VERSION=$ver  tag=$tag"
+          if [ "$tag" != "v$ver" ]; then
+            echo "::error::tag $tag does not match VERSION ($ver). Bump VERSION or retag."
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag"     >> "$GITHUB_OUTPUT"
+
+      - name: Which signing secrets are present
+        id: caps
+        env:
+          CERT: ${{ secrets.APPLE_CERT_P12 }}
+          CERT_PW: ${{ secrets.APPLE_CERT_PASSWORD }}
+          TEAM: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PW: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          sign=false; notarize=false
+          if [ -n "$CERT" ] && [ -n "$CERT_PW" ] && [ -n "$TEAM" ]; then sign=true; fi
+          if [ "$sign" = "true" ] && [ -n "$APPLE_ID" ] && [ -n "$APPLE_PW" ]; then notarize=true; fi
+          echo "sign=$sign"         >> "$GITHUB_OUTPUT"
+          echo "notarize=$notarize" >> "$GITHUB_OUTPUT"
+          echo "signing=$sign notarizing=$notarize"
+
+      - name: Build the app bundle
+        env:
+          HERMES_SKIP_INSTALL: "1"   # build into app/build only; never /Applications
+        run: |
+          set -euo pipefail
+          bash app/build-app.sh
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+            "app/build/Hermes Assistant.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' \
+            "app/build/Hermes Assistant.app/Contents/Info.plist"
+
+      - name: Sign (Developer ID)
+        if: steps.caps.outputs.sign == 'true'
+        env:
+          CERT: ${{ secrets.APPLE_CERT_P12 }}
+          CERT_PW: ${{ secrets.APPLE_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KPW="$(uuidgen)"
+          echo "$CERT" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KPW" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KPW" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PW" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KPW" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          IDENT="$(security find-identity -v -p codesigning "$KEYCHAIN" | awk '/[0-9A-F]{40}/ {print $2; exit}')"
+          [ -n "$IDENT" ] || { echo "::error::no codesigning identity in the imported certificate"; exit 1; }
+          codesign --force --deep --options runtime --timestamp \
+            -s "$IDENT" "app/build/Hermes Assistant.app"
+          codesign --verify --strict --verbose=2 "app/build/Hermes Assistant.app"
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      - name: Sign (ad-hoc)
+        if: steps.caps.outputs.sign != 'true'
+        run: |
+          set -euo pipefail
+          codesign --force --deep -s - "app/build/Hermes Assistant.app"
+          codesign --verify --verbose=2 "app/build/Hermes Assistant.app"
+          echo "::notice::ad-hoc signed — first launch needs right-click › Open (no Apple signing secrets configured)"
+
+      - name: Package
+        id: pkg
+        run: |
+          set -euo pipefail
+          ver="${{ steps.ver.outputs.version }}"
+          mkdir -p dist
+          ditto -c -k --keepParent "app/build/Hermes Assistant.app" \
+            "dist/HermesAssistant-$ver-macos-arm64.zip"
+          git archive --format=tar.gz --prefix="HermesAssistant-$ver/" \
+            -o "dist/HermesAssistant-$ver-source.tar.gz" "${{ steps.ver.outputs.tag }}"
+          echo "zip=dist/HermesAssistant-$ver-macos-arm64.zip" >> "$GITHUB_OUTPUT"
+          echo "src=dist/HermesAssistant-$ver-source.tar.gz"   >> "$GITHUB_OUTPUT"
+
+      - name: Notarize and staple
+        if: steps.caps.outputs.notarize == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PW: ${{ secrets.APPLE_APP_PASSWORD }}
+          TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          ver="${{ steps.ver.outputs.version }}"
+          xcrun notarytool submit "dist/HermesAssistant-$ver-macos-arm64.zip" \
+            --apple-id "$APPLE_ID" --password "$APPLE_PW" --team-id "$TEAM" --wait
+          xcrun stapler staple "app/build/Hermes Assistant.app"
+          rm -f "dist/HermesAssistant-$ver-macos-arm64.zip"
+          ditto -c -k --keepParent "app/build/Hermes Assistant.app" \
+            "dist/HermesAssistant-$ver-macos-arm64.zip"
+          spctl -a -vvv -t install "app/build/Hermes Assistant.app" || true
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          ver="${{ steps.ver.outputs.version }}"
+          cd dist
+          shasum -a 256 "HermesAssistant-$ver-macos-arm64.zip" \
+                        "HermesAssistant-$ver-source.tar.gz" > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Release notes from CHANGELOG.md
+        id: notes
+        run: |
+          set -euo pipefail
+          VER="${{ steps.ver.outputs.version }}" python3 - > dist/NOTES.md <<'PY'
+          import os, re
+          ver = os.environ["VER"]
+          try:
+              text = open("CHANGELOG.md", encoding="utf-8").read()
+          except OSError:
+              text = ""
+          out, grab = [], False
+          for line in text.splitlines():
+              if re.match(r"^##\s*\[?v?" + re.escape(ver) + r"\]?(\s|$|\])", line):
+                  grab = True
+                  continue
+              if grab and line.startswith("## "):
+                  break
+              if grab:
+                  out.append(line)
+          body = "\n".join(out).strip()
+          print(body)
+          PY
+          if grep -q '[^[:space:]]' dist/NOTES.md 2>/dev/null; then
+            echo "have_notes=true" >> "$GITHUB_OUTPUT"
+            echo "--- notes ---"; cat dist/NOTES.md
+          else
+            echo "have_notes=false" >> "$GITHUB_OUTPUT"
+            echo "no CHANGELOG section for this version — falling back to auto-generated notes"
+          fi
+
+      - name: Publish the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.ver.outputs.tag }}
+          body_path: dist/NOTES.md
+          generate_release_notes: ${{ steps.notes.outputs.have_notes != 'true' }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/HermesAssistant-${{ steps.ver.outputs.version }}-macos-arm64.zip
+            dist/HermesAssistant-${{ steps.ver.outputs.version }}-source.tar.gz
+            dist/SHA256SUMS
