@@ -21,9 +21,11 @@ API:
   GET  /api/actions         quick-action templates
   GET  /api/access          granted folders
   POST /api/access          {op: add|remove, path}
-  GET  /api/sessions        chat list (id, title, updated)
+  GET  /api/sessions        chat list (id, title, updated, pinned)
   GET  /api/history?session=ID
   POST /api/sessions/delete {session}
+  (aux_convos.py adds /api/sessions/search, /api/sessions/meta and
+   /api/sessions/export — conversation management)
   POST /api/chat            {message, session, attachments?}
   POST /api/upload          raw body + X-Filename header -> saved to inbox
 """
@@ -1762,10 +1764,14 @@ def list_sessions():
             continue
         out.append({
             "id": sid,
-            "title": chat.get("title") or chat["messages"][0]["text"][:48],
+            # a user rename (POST /api/sessions/meta) writes chat["title"], so
+            # the custom title already wins over the first-message excerpt
+            "title": chat.get("title") or chat["messages"][0].get("text", "")[:48],
             "updated": os.path.getmtime(chat_path(sid)),
+            "pinned": bool(chat.get("pinned")),
         })
-    out.sort(key=lambda c: -c["updated"])
+    # pinned first (they must survive the 30-row cap even when old), then newest
+    out.sort(key=lambda c: (not c["pinned"], -c["updated"]))
     return out[:30]
 
 
@@ -3127,6 +3133,21 @@ class RouteCtx:
         return v[0] if isinstance(v, list) and v else default
 
 
+class RawResponse:
+    """What an aux route returns when the answer is NOT JSON — a file
+    download, text/markdown, csv.  _dispatch_aux writes body + headers
+    verbatim instead of json-encoding.  (Added for /api/sessions/export in
+    aux_convos.py, which has to send Content-Disposition.)"""
+    __slots__ = ("body", "content_type", "headers", "status")
+
+    def __init__(self, body, content_type="text/plain; charset=utf-8",
+                 headers=None, status=200):
+        self.body = body.encode("utf-8") if isinstance(body, str) else body
+        self.content_type = content_type
+        self.headers = headers or {}
+        self.status = status
+
+
 # Rich per-widget providers built by the widget agent wave live in a sibling
 # file, exec'd into THIS namespace so they can use all the helpers above.
 # It ends with EXPANDERS.update({...}), overriding e.g. markets with the
@@ -3416,7 +3437,15 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._json({"ok": False, "error": type(e).__name__ + ": " + str(e)}, 500)
             return
-        if isinstance(res, tuple) and len(res) == 2:
+        if isinstance(res, RawResponse):     # non-JSON body (download, md, csv)
+            self.send_response(res.status)
+            self.send_header("Content-Type", res.content_type)
+            self.send_header("Content-Length", str(len(res.body)))
+            for k, v in res.headers.items():
+                self.send_header(k, v)
+            self.end_headers()
+            self.wfile.write(res.body)
+        elif isinstance(res, tuple) and len(res) == 2:
             self._json(res[0], res[1])
         else:
             self._json(res if res is not None else {})

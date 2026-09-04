@@ -3,6 +3,7 @@
 # Answers three questions the Settings › System card asks:
 #   1. what am I running?            GET  /api/version
 #   2. is there something newer?     GET  /api/update/check[?force=1]
+#   2b. what changed in what I run?  GET /api/update/notes?version=
 #   3. put it on this machine.       POST /api/update/apply   -> runs ../update.sh
 #                                    GET  /api/update/status
 #                                    POST /api/update/channel
@@ -711,6 +712,100 @@ def _upd_status(ctx=None):
 
 
 # --------------------------------------------------------------------------
+# CHANGELOG lookup — release notes for a version already installed.
+#
+# /api/update/check only carries the LATEST release's body, so the card's
+# "What's new" panel has nothing to show while you are up to date. This reads
+# the repo's own CHANGELOG.md instead: no network, no cache, no writes, and it
+# works on a tarball install and while GitHub is unreachable.
+#
+#   GET /api/update/notes[?version=1.0.1]   (default: the running version)
+#
+# The body is returned as plain Markdown text — the browser parses and ESCAPES
+# it (aux_update.js never injects server HTML), so nothing is escaped here.
+# --------------------------------------------------------------------------
+_UPD_CL_FILE = _upd_os.path.join(_UPD_ROOT, "CHANGELOG.md")
+_UPD_CL_MAX = 8192               # bytes of notes handed to the browser
+_UPD_CL_READ_MAX = 512 * 1024    # never read a silly-large CHANGELOG
+_UPD_CL_HEAD_RE = _upd_re.compile(r"^##\s+\[([^\]]+)\]\s*(?:[-\u2013]\s*(\S+))?\s*$")
+_UPD_CL_LINKREF_RE = _upd_re.compile(r"^\[[^\]]+\]:\s*\S")
+
+
+def _upd_changelog_section(version, path=None):
+    """Body of CHANGELOG.md's `## [version]` section, heading stripped.
+
+    Returns {found, version, date, notes, truncated}; never raises. The
+    version matches with or without a leading "v", and must look like a
+    version (so the query param can never turn into a regex or a path).
+    """
+    want = str(version or "").strip()
+    if want[:1] in ("v", "V"):
+        want = want[1:]
+    out = {"found": False, "version": want, "date": "", "notes": "",
+           "truncated": False}
+    if not want or not _UPD_VER_RE.match(want):
+        out["version"] = ""
+        return out
+    try:
+        with open(path or _UPD_CL_FILE, "r", encoding="utf-8",
+                  errors="replace") as f:
+            text = f.read(_UPD_CL_READ_MAX)
+    except OSError:
+        return out
+    body = []
+    taking = False
+    for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if ln.startswith("## "):
+            if taking:
+                break
+            m = _UPD_CL_HEAD_RE.match(ln)
+            head = str(m.group(1)).strip() if m else ""
+            if head[:1] in ("v", "V"):
+                head = head[1:]
+            if m and head == want:
+                taking = True
+                out["found"] = True
+                out["date"] = str(m.group(2) or "").strip()
+            continue
+        if taking:
+            if _UPD_CL_LINKREF_RE.match(ln):
+                break                      # the link-reference block at the end
+            body.append(ln)
+    if not out["found"]:
+        return out
+    while body and not body[0].strip():
+        body.pop(0)
+    while body and not body[-1].strip():
+        body.pop()
+    notes = "\n".join(body)
+    if len(notes) > _UPD_CL_MAX:
+        cut = notes[:_UPD_CL_MAX]
+        notes = (cut.rsplit("\n", 1)[0] if "\n" in cut else cut)
+        out["truncated"] = True
+    out["notes"] = notes
+    return out
+
+
+def _upd_notes_route(ctx=None):
+    try:
+        want = str(ctx.q1("version", "") or "").strip()
+    except Exception:
+        want = ""
+    if not want:
+        want = _upd_version()
+    sec = _upd_changelog_section(want)
+    ver = sec["version"]
+    return {"ok": bool(sec["found"]),
+            "version": ver,
+            "date": sec["date"],
+            "notes": sec["notes"],
+            "truncated": sec["truncated"],
+            "url": ("https://github.com/%s/releases/tag/v%s" % (_UPD_REPO, ver)
+                    if ver else ""),
+            "source": "CHANGELOG.md"}
+
+
+# --------------------------------------------------------------------------
 # routes
 # --------------------------------------------------------------------------
 def _upd_version_route(ctx=None):
@@ -738,6 +833,7 @@ def _upd_channel_route(ctx):
 
 register_get("/api/version", _upd_version_route)          # noqa: F821
 register_get("/api/update/check", _upd_check_route)       # noqa: F821
+register_get("/api/update/notes", _upd_notes_route)       # noqa: F821
 register_get("/api/update/status", _upd_status)           # noqa: F821
 register_post("/api/update/apply", _upd_apply)            # noqa: F821
 register_post("/api/update/channel", _upd_channel_route)  # noqa: F821

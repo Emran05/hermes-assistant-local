@@ -313,12 +313,80 @@
   .cs-sec{padding:4px 8px 8px;overflow-y:auto;min-height:0}
   .cs-sec.grow{flex:1}
   .cs-lab{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);font-weight:660;padding:8px 6px 4px}
-  .cs-item{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:9px;cursor:pointer;
+  /* 34px rows so the hover actions can carry a 32px hit area without the
+     buttons spilling over their neighbours (they use a negative block margin
+     so a 32px control still fits a compact list). */
+  .cs-item{position:relative;display:flex;align-items:center;gap:8px;padding:8px 9px;min-height:34px;
+    border-radius:9px;cursor:pointer;
     font-size:12.5px;color:var(--muted);transition:background .15s,color .15s}
   .cs-item:hover{background:var(--chip);color:var(--ink)}
   .cs-item.on{background:color-mix(in srgb,var(--iris) 15%,transparent);color:var(--ink);font-weight:600}
   .cs-item .ic{width:13px;height:13px;flex:none;color:var(--iris)}
   .cs-item .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* ---- conversation management: search / pin / rename / export ---- */
+  .cs-search{display:flex;align-items:center;gap:7px;margin:0 12px 6px;padding:6px 8px;flex:none;
+    border-radius:var(--radius-xs);background:var(--field);border:1px solid var(--field-edge);
+    transition-property:border-color,box-shadow;transition-duration:180ms;transition-timing-function:ease-out}
+  .cs-search:focus-within{border-color:var(--iris);box-shadow:0 0 0 3px color-mix(in srgb,var(--iris) 18%,transparent)}
+  .cs-search>.ic{width:13px;height:13px;flex:none;color:var(--faint)}
+  .cs-search input{flex:1;min-width:0;border:none;background:none;padding:0;font-size:12.5px}
+  .cs-search input:focus{outline:none;box-shadow:none}
+  .cs-x{width:20px;height:20px;margin:-4px -2px -4px 0;padding:0;flex:none;border:none;background:none;
+    border-radius:6px;display:inline-flex;align-items:center;justify-content:center;color:var(--faint)}
+  .cs-x[hidden]{display:none}
+  .cs-x:hover{color:var(--ink);background:var(--chip);transform:none}
+  .cs-x .ic{width:11px;height:11px;color:inherit}
+  /* Hover actions OVERLAY the right edge instead of taking layout width, so a
+     resting row spends all 252px on its title (they are the reason a row is
+     34px tall: 32px hit areas). */
+  .cs-acts{position:absolute;right:3px;top:50%;transform:translateY(-50%);display:flex;align-items:center;
+    padding-left:22px;border-radius:9px;opacity:0;pointer-events:none;
+    /* --ground reads as the panel in BOTH themes, so one plate works for both */
+    background:linear-gradient(90deg,transparent,
+      color-mix(in srgb,var(--ground) 86%,transparent) 26%,
+      color-mix(in srgb,var(--ground) 96%,transparent));
+    -webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);
+    transition:opacity 150ms ease-out}
+  .cs-item:hover .cs-acts,.cs-item:focus-within .cs-acts{opacity:1;pointer-events:auto}
+  .cs-item.renaming .cs-acts{display:none}   /* never overlap the rename field */
+  .cs-act{width:32px;height:32px;padding:0;border:none;background:none;border-radius:8px;
+    display:inline-flex;align-items:center;justify-content:center;color:var(--muted);
+    transition-property:color,background-color;transition-duration:150ms;transition-timing-function:ease-out}
+  .cs-act:hover{color:var(--iris);background:var(--chip);transform:none}
+  .cs-act.del:hover{color:var(--bad)}
+  .cs-act .ic{width:13px;height:13px;color:inherit}
+  /* a pinned row says so at rest; the hover overlay takes over on hover */
+  .cs-pinned{width:12px;height:12px;flex:none;display:none;color:var(--iris);
+    fill:currentColor;fill-opacity:.25;transition:opacity 150ms ease-out}
+  .cs-item.pinned .cs-pinned{display:block}
+  .cs-item:hover .cs-pinned{opacity:0}
+  .cs-rename{flex:1;min-width:0;font-size:12.5px;font-weight:600;padding:2px 6px;margin:-3px 0;
+    border-radius:7px;border:1px solid var(--iris);background:var(--field);color:var(--ink)}
+  .cs-rename:focus{outline:none;box-shadow:0 0 0 3px color-mix(in srgb,var(--iris) 18%,transparent)}
+  .cs-res{padding:8px 9px;border-radius:9px;cursor:pointer;transition:background .15s}
+  .cs-res:hover,.cs-res:focus-visible{background:var(--chip)}
+  .cs-res .rt{display:flex;align-items:baseline;gap:8px;font-size:12.5px;font-weight:600;color:var(--ink)}
+  .cs-res .rt .tt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .cs-res .rt .n{margin-left:auto;flex:none;font-size:10.5px;font-weight:500;color:var(--faint);
+    font-variant-numeric:tabular-nums}
+  .cs-res .rs{margin-top:3px;font-size:11.5px;line-height:1.45;color:var(--muted);text-wrap:pretty;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .cv-mark{background:color-mix(in srgb,var(--iris) 30%,transparent);color:var(--ink);
+    border-radius:3px;padding:0 1px}
+  .cs-empty{padding:16px 10px;text-align:center;font-size:12px;color:var(--faint);text-wrap:pretty}
+  /* split mode: the <select> IS the conversation list, so the field and its
+     results live in a popover hung under the chat header */
+  /* it floats over the transcript, so .glass alone is far too see-through —
+     paint a near-opaque plate from --ground (reads as the panel in both themes) */
+  .cvfind{position:absolute;left:2px;right:2px;top:calc(100% + 6px);z-index:30;
+    border-radius:var(--radius-sm);padding:6px;max-height:min(420px,58vh);overflow-y:auto;
+    background:color-mix(in srgb,var(--ground) 93%,transparent);
+    -webkit-backdrop-filter:blur(22px) saturate(160%);backdrop-filter:blur(22px) saturate(160%);
+    box-shadow:inset 0 1px 0 var(--specular),0 20px 44px -18px var(--cast),0 3px 10px -5px var(--cast)}
+  .deck[data-chat="full"] .cvfind,.deck[data-chat="full"] #chat-find{display:none}
+  .chat-head input#chat-q{flex:1;min-width:0;font-size:12.5px;padding:6px 11px}
+  .chat-head button.ghost{padding:6px 9px}
+  #chat-find.on{color:var(--iris);background:var(--chip)}
   .cs-foot{padding:9px 12px;border-top:1px solid var(--hairline);font-size:11px;color:var(--muted);
     display:flex;align-items:center;gap:7px;flex:none}
   .cs-ai{padding:2px 12px 8px;flex:none}
@@ -649,7 +717,7 @@
 
   /* ---------- chat ---------- */
   .chat{height:100%;display:flex;flex-direction:column;min-height:0}
-  .chat-head{display:flex;align-items:center;gap:7px;padding:10px 12px;border-bottom:1px solid var(--hairline);flex:none}
+  .chat-head{position:relative;z-index:3;display:flex;align-items:center;gap:7px;padding:10px 12px;border-bottom:1px solid var(--hairline);flex:none}
   .chat-head select{font-size:12.5px;flex:1;min-width:0;cursor:pointer}
   .msgs{flex:1;overflow-y:auto;padding:16px 15px 6px;display:flex;flex-direction:column;gap:13px}
   .bubble{max-width:88%;padding:10px 14px;border-radius:16px;word-wrap:break-word;font-size:13.5px;
@@ -664,6 +732,24 @@
   .bubble.bot{align-self:flex-start;background:var(--glass);border:1px solid var(--edge);
     -webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);border-bottom-left-radius:6px}
   .bubble.bot.err{border-color:var(--bad);color:var(--bad)}
+  /* the bubble a search result landed on — one quiet ring, then gone */
+  .bubble.cv-hit{animation:cvhit 1.6s ease-out 1}
+  @keyframes cvhit{
+    0%{box-shadow:0 0 0 3px color-mix(in srgb,var(--iris) 60%,transparent),0 2px 10px -6px var(--cast)}
+    72%{box-shadow:0 0 0 3px color-mix(in srgb,var(--iris) 38%,transparent),0 2px 10px -6px var(--cast)}
+    100%{box-shadow:0 0 0 0 transparent,0 2px 10px -6px var(--cast)}}
+  /* toast — one line, bottom centre, never blocks a click */
+  .toast{position:fixed;left:50%;bottom:26px;z-index:120;max-width:min(420px,86vw);
+    padding:9px 16px;border-radius:var(--radius-sm);font-size:12.5px;color:var(--ink);
+    background:var(--glass);border:1px solid var(--edge);
+    -webkit-backdrop-filter:blur(18px) saturate(1.6);backdrop-filter:blur(18px) saturate(1.6);
+    box-shadow:0 14px 34px -14px var(--cast);opacity:0;pointer-events:none;
+    transform:translateX(-50%) translateY(8px);
+    transition-property:opacity,transform;transition-duration:220ms;transition-timing-function:cubic-bezier(.22,1,.36,1)}
+  .toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+  @media (prefers-reduced-motion:reduce){
+    .bubble.cv-hit{animation:none;box-shadow:0 0 0 2px color-mix(in srgb,var(--iris) 45%,transparent)}
+    .toast{transition-duration:1ms}}
   .bubble .md p:first-child{margin-top:0}.bubble .md p:last-child{margin-bottom:0}
   .bubble .md h2{border-left:none;padding-left:0}
   .empty-chat{margin:auto;text-align:center;color:var(--muted);max-width:290px;font-size:13px}
@@ -902,6 +988,13 @@
       <button class="ghost" id="cs-new" title="New conversation" aria-label="New conversation" style="padding:4px">
         <svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
     </div>
+    <div class="cs-search">
+      <svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="20" y1="20" x2="16.65" y2="16.65"/></svg>
+      <input id="cs-q" type="text" placeholder="Search conversations" aria-label="Search conversations"
+             autocomplete="off" autocorrect="off" spellcheck="false">
+      <button class="cs-x" id="cs-qx" type="button" title="Clear search" aria-label="Clear search" hidden>
+        <svg class="ic" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
     <div class="cs-sec grow" id="cs-convos"></div>
     <div class="cs-lab" style="padding-left:14px">Tools</div>
     <div class="cs-sec" id="cs-tools" style="max-height:30%"></div>
@@ -984,14 +1077,21 @@
     <section class="card glass chat">
       <div class="chat-head">
         <select id="sessions" aria-label="Conversation"></select>
+        <input id="chat-q" type="text" placeholder="Search conversations" aria-label="Search conversations"
+               autocomplete="off" autocorrect="off" spellcheck="false" hidden>
+        <button class="ghost" id="chat-find" title="Search conversations" aria-label="Search conversations">
+          <svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="20" y1="20" x2="16.65" y2="16.65"/></svg></button>
         <button class="ghost" id="newchat" title="New conversation" aria-label="New conversation">
           <svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         <button class="ghost" id="delchat" title="Delete conversation" aria-label="Delete conversation">
           <svg class="ic" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+        <button class="ghost" id="exportchat" title="Export as Markdown" aria-label="Export conversation as Markdown">
+          <svg class="ic" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>
         <button class="ghost" id="chat-max" title="Expand chat" aria-label="Expand chat">
           <svg class="ic" viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg></button>
         <button class="ghost" id="chat-hide" title="Hide chat — widgets only" aria-label="Hide chat">
           <svg class="ic" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="15" y1="4" x2="15" y2="20"/><polyline points="10 9 13 12 10 15"/></svg></button>
+        <div class="cvfind glass" id="cvfind" hidden><div id="cvfind-list"></div></div>
       </div>
       <div class="msgs" id="msgs"></div>
       <div class="actions" id="actions"></div>
@@ -1009,6 +1109,7 @@
 </div>
 
 <div id="drop">Drop files to share them with your assistant</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 <button id="chat-restore" title="Show chat" aria-label="Show chat">
   <svg class="ic" viewBox="0 0 24 24"><path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.5 8.5 8.5 0 0 1-3.9-.9L3 21l1.9-5.6A8.5 8.5 0 1 1 21 11.5z"/></svg>
 </button>
@@ -1124,6 +1225,11 @@ function setChatMode(m){
     : '<svg class="ic" viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>';
   if(mx)mx.title=(m==='full')?'Restore split view':'Expand chat';
   localStorage.setItem('hermes_chat',m);
+  // a conversation search never follows you across modes — each mode owns its
+  // own field (sidebar in full, header popover in split)
+  if($('cvfind')&&!$('cvfind').hidden)cvCloseFind();
+  else if(typeof cvTerm==='string'&&cvTerm){cvTerm='';cvLast=[];cvSeq++;
+    if($('cs-q')){$('cs-q').value='';$('cs-qx').hidden=true;}}
   // the chip row is only laid out in split mode — re-fit on the way back in
   if(typeof fitActionChips==='function')setTimeout(fitActionChips,0);
   // Motion-driven transitions
@@ -1136,18 +1242,258 @@ function setChatMode(m){
     else{animate(document.querySelector('.chatcol'),{opacity:[0,1],x:[24,0]},{duration:0.35,easing:SPRING});}
   }
 }
+// ---------- conversation management (backlog #13) --------------------------
+// Search / pin / rename / export, all against the same chats/<sid>.json the
+// rest of the hub uses. One search core drives TWO surfaces because the chat
+// modes are mutually exclusive: in full mode the field sits above the sidebar
+// list and results replace it; in split mode the <select> IS the conversation
+// list, so the field takes its place in the header and results drop into a
+// popover under it.
+const CV_IC_CHAT='<svg class="ic" viewBox="0 0 24 24"><path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.5 8.5 8.5 0 0 1-3.9-.9L3 21l1.9-5.6A8.5 8.5 0 1 1 21 11.5z"/></svg>';
+const CV_IC_PINNED='<svg class="cs-pinned" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.4 3h5.2l-.7 6.4 2.9 3.2H7.2l2.9-3.2z"/><line x1="12" y1="12.6" x2="12" y2="21"/></svg>';
+const CV_IC_PIN='<svg class="ic" viewBox="0 0 24 24"><path d="M9.4 3h5.2l-.7 6.4 2.9 3.2H7.2l2.9-3.2z"/><line x1="12" y1="12.6" x2="12" y2="21"/></svg>';
+const CV_IC_PEN='<svg class="ic" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>';
+const CV_IC_TRASH='<svg class="ic" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+let cvTerm='';        // active query ('' = not searching)
+let cvLast=[];        // last result set — a re-render keeps results on screen
+let cvSeq=0;          // stale-response guard for the 200ms debounce
+let cvTimer=null;
+
+function toast(msg,ms){
+  const t=$('toast'); if(!t)return;
+  t.textContent=msg; t.classList.add('on');
+  clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove('on'),ms||2400);
+}
+function cvFullMode(){return ((document.querySelector('.deck')||{}).dataset||{}).chat==='full';}
+function cvHost(){return cvFullMode()?$('cs-convos'):$('cvfind-list');}
+// The server sends the snippet as PLAIN text plus (mark_start, mark_len):
+// escape the three slices here and wrap the middle one ourselves, so chat
+// content never reaches innerHTML unescaped.
+function cvHi(sn,st,len){
+  sn=String(sn==null?'':sn);
+  if(st==null||!len||st<0||len<0||st+len>sn.length)return esc(sn);
+  return esc(sn.slice(0,st))+'<span class="cv-mark">'+esc(sn.slice(st,st+len))+'</span>'+esc(sn.slice(st+len));
+}
+async function cvFetch(q){
+  const seq=++cvSeq;
+  let d;try{d=await(await fetch('/api/sessions/search?q='+encodeURIComponent(q))).json();}catch(e){d=[];}
+  if(seq!==cvSeq)return null;              // a newer keystroke already won
+  return Array.isArray(d)?d:[];
+}
+function cvResultRow(r){
+  const el=document.createElement('div');
+  el.className='cs-res';el.tabIndex=0;el.setAttribute('role','button');
+  el.innerHTML='<div class="rt"><span class="tt">'+esc(r.title||r.session)+'</span>'+
+    '<span class="n">'+(r.hits>1?r.hits+' hits':'1 hit')+'</span></div>'+
+    '<div class="rs">'+cvHi(r.snippet,r.mark_start,r.mark_len)+'</div>';
+  const open=()=>cvOpenResult(r.session);
+  el.onclick=open;
+  el.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();open();}};
+  return el;
+}
+function cvPaint(list){
+  const host=cvHost(); if(!host)return;
+  host.innerHTML='';
+  if(!list.length){const e=document.createElement('div');e.className='cs-empty';
+    e.textContent='No matches';host.appendChild(e);return;}
+  list.forEach(r=>host.appendChild(cvResultRow(r)));
+  revealStagger(host.querySelectorAll('.cs-res'),14);
+}
+async function cvRun(q){
+  cvTerm=q;
+  if(!q){cvClear();return;}
+  if(!cvFullMode())$('cvfind').hidden=false;
+  const list=await cvFetch(q);
+  if(list===null)return;                   // superseded by a later keystroke
+  cvLast=list; cvPaint(list);
+}
+function cvClear(){
+  clearTimeout(cvTimer); cvSeq++; cvTerm=''; cvLast=[];
+  const q=$('cs-q'); if(q){q.value='';$('cs-qx').hidden=true;}
+  const cq=$('chat-q'); if(cq)cq.value='';
+  if($('cvfind-list'))$('cvfind-list').innerHTML='';
+  if(cvFullMode())renderChatSide();
+}
+// open a hit: switch conversation, then scroll to + flash the first bubble
+// that actually contains the query
+async function cvOpenResult(sid){
+  const term=cvTerm;
+  session=sid;localStorage.setItem('hermes_session',sid);
+  if(!cvFullMode())cvCloseFind();
+  await loadHistory();
+  loadSessions();
+  if(cvFullMode())renderChatSide();
+  cvFlash(term);
+}
+function cvFlash(term){
+  if(!term)return;
+  const t=term.toLowerCase();
+  const hit=[...$('msgs').querySelectorAll('.bubble')]
+    .find(b=>(b.innerText||'').toLowerCase().indexOf(t)>=0);
+  if(!hit)return;
+  try{hit.scrollIntoView({block:'center',behavior:REDUCE?'auto':'smooth'});}
+  catch(e){hit.scrollIntoView();}
+  hit.classList.remove('cv-hit');void hit.offsetWidth;hit.classList.add('cv-hit');
+  setTimeout(()=>hit.classList.remove('cv-hit'),1900);
+}
+function cvBindSearch(input,onEmpty){
+  input.addEventListener('input',()=>{
+    clearTimeout(cvTimer);
+    const q=input.value.trim();
+    if(input.id==='cs-q'&&$('cs-qx'))$('cs-qx').hidden=!input.value;
+    if(!q){cvSeq++;cvTerm='';cvLast=[];onEmpty();return;}
+    cvTimer=setTimeout(()=>cvRun(q),200);
+  });
+  input.addEventListener('keydown',e=>{
+    if(e.key==='Escape'){e.preventDefault();e.stopPropagation();
+      if(input.id==='chat-q')cvCloseFind(); else {cvClear();input.blur();}
+      return;}
+    if(e.key==='Enter'){e.preventDefault();clearTimeout(cvTimer);
+      const first=cvHost().querySelector('.cs-res');
+      if(first)first.click(); else cvRun(input.value.trim());}
+  });
+}
+// --- split mode: the header field + popover -------------------------------
+function cvOpenFind(){
+  $('sessions').hidden=true;$('chat-q').hidden=false;
+  $('chat-find').classList.add('on');
+  $('cvfind').hidden=false;
+  $('cvfind-list').innerHTML='<div class="cs-empty">Type to search every conversation.</div>';
+  $('chat-q').focus();
+}
+function cvCloseFind(){
+  clearTimeout(cvTimer);cvSeq++;cvTerm='';cvLast=[];
+  $('sessions').hidden=false;$('chat-q').hidden=true;$('chat-q').value='';
+  $('chat-find').classList.remove('on');
+  $('cvfind').hidden=true;$('cvfind-list').innerHTML='';
+}
+// --- row actions: pin / rename / delete ------------------------------------
+async function cvMeta(sid,patch){
+  let d;
+  try{const r=await fetch('/api/sessions/meta',{method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(Object.assign({session:sid},patch))});
+      d=await r.json();}
+  catch(e){toast('Could not reach the dashboard.');return null;}
+  if(!d||!d.ok){
+    toast(d&&d.error==='unknown session'
+      ? 'Send a message first — this conversation has not been saved yet.'
+      : 'Could not save that change.');
+    return null;}
+  return d;
+}
+function cvActBtn(cls,label,svg,fn){
+  const b=document.createElement('button');
+  b.type='button';b.className='cs-act '+cls;b.title=label;b.setAttribute('aria-label',label);
+  b.innerHTML=svg;
+  b.onclick=e=>{e.stopPropagation();fn();};
+  return b;
+}
+function cvRenameRow(row,label,sid){
+  const old=label.textContent;
+  const inp=document.createElement('input');
+  inp.className='cs-rename';inp.value=old;inp.setAttribute('aria-label','Conversation name');
+  row.classList.add('renaming');
+  row.replaceChild(inp,label);
+  let done=false;
+  const finish=async(save)=>{
+    if(done)return; done=true;
+    const v=inp.value.trim();
+    row.replaceChild(label,inp);
+    row.classList.remove('renaming');
+    if(!save||v===old)return;
+    label.textContent=v||old;
+    const d=await cvMeta(sid,{title:v});
+    loadSessions(); renderChatSide();
+    if(!d)return;
+  };
+  inp.onkeydown=e=>{e.stopPropagation();
+    if(e.key==='Enter'){e.preventDefault();finish(true);}
+    else if(e.key==='Escape'){e.preventDefault();finish(false);}};
+  inp.onblur=()=>finish(true);          // blur saves, like every rename people know
+  inp.onclick=e=>e.stopPropagation();
+  inp.focus();inp.select();
+}
+async function cvDeleteRow(sid){
+  if(!confirm('Delete this conversation?'))return;
+  try{await fetch('/api/sessions/delete',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({session:sid})});}
+  catch(e){toast('Could not reach the dashboard.');return;}
+  if(sid===session){session=newId();localStorage.setItem('hermes_session',session);emptyState();}
+  loadSessions(); renderChatSide();
+}
+// --- export as Markdown ----------------------------------------------------
+function cvClipBridge(){
+  try{return !!(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.hermesClipWrite);}
+  catch(e){return false;}
+}
+async function cvExport(){
+  if(!session){toast('No conversation to export.');return;}
+  const url='/api/sessions/export?session='+encodeURIComponent(session);
+  let md='',fname='hermes-conversation.md';
+  try{
+    const r=await fetch(url);
+    if(!r.ok){toast(r.status===404?'Nothing saved in this conversation yet.':'Export failed.');return;}
+    md=await r.text();
+    const cd=r.headers.get('Content-Disposition')||'';
+    const m=cd.match(/filename="([^"]+)"/); if(m)fname=m[1];
+  }catch(e){toast('Could not reach the dashboard.');return;}
+  // The Swift shell (app/main.swift, frozen) registers no WKDownloadDelegate,
+  // so an <a download> / window.open of an attachment is silently dropped
+  // inside the app — copy there, download in a real browser. The endpoint is
+  // a plain GET either way, so the URL above works on its own.
+  if(cvClipBridge()){
+    try{window.webkit.messageHandlers.hermesClipWrite.postMessage({action:'write',text:md});
+        toast('Copied as Markdown');return;}catch(e){}
+  }
+  try{
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(new Blob([md],{type:'text/markdown'}));
+    a.download=fname;document.body.appendChild(a);a.click();
+    setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000);
+    toast('Exported as '+fname);return;
+  }catch(e){}
+  try{
+    if(navigator.clipboard&&navigator.clipboard.writeText){
+      await navigator.clipboard.writeText(md);toast('Copied as Markdown');return;}
+  }catch(e){}
+  toast('Could not export — open '+url+' to save it.',5000);
+}
+
 async function renderChatSide(){
   // conversations
   let d;try{d=await(await fetch('/api/sessions')).json();}catch(e){d={sessions:[]};}
   const cv=$('cs-convos');cv.innerHTML='';
-  const mk=(id,title,on)=>{const el=document.createElement('div');el.className='cs-item'+(on?' on':'');
-    el.innerHTML='<svg class="ic" viewBox="0 0 24 24"><path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.5 8.5 8.5 0 0 1-3.9-.9L3 21l1.9-5.6A8.5 8.5 0 1 1 21 11.5z"/></svg><span class="t">'+esc(title)+'</span>';
+  if(cvTerm){cvPaint(cvLast);}            // a search is active — keep its results
+  else{
+  const lab=t=>{const l=document.createElement('div');l.className='cs-lab';l.textContent=t;return l;};
+  const mk=(id,title,on,s)=>{
+    const el=document.createElement('div');
+    el.className='cs-item'+(on?' on':'')+(s&&s.pinned?' pinned':'');
+    el.innerHTML=CV_IC_CHAT;
+    const t=document.createElement('span');t.className='t';t.textContent=title;
+    el.appendChild(t);
+    if(s){                                 // the "(new conversation)" pseudo-row
+      if(s.pinned)t.insertAdjacentHTML('afterend',CV_IC_PINNED);
+      const acts=document.createElement('span');acts.className='cs-acts';
+      acts.appendChild(cvActBtn('cs-pin',s.pinned?'Unpin':'Pin',CV_IC_PIN,async()=>{
+        if(await cvMeta(id,{pinned:!s.pinned})){loadSessions();renderChatSide();}}));
+      acts.appendChild(cvActBtn('ren','Rename',CV_IC_PEN,()=>cvRenameRow(el,t,id)));
+      acts.appendChild(cvActBtn('del','Delete',CV_IC_TRASH,()=>cvDeleteRow(id)));
+      el.appendChild(acts);
+    }
     el.onclick=async()=>{session=id;localStorage.setItem('hermes_session',id);await loadHistory();renderChatSide();loadSessions();};
     return el;};
   let found=false;
-  (d.sessions||[]).forEach(s=>{const on=s.id===session;if(on)found=true;cv.appendChild(mk(s.id,s.title||s.id,on));});
-  if(!found&&session)cv.prepend(mk(session,'(new conversation)',true));
+  const all=(d.sessions||[]);
+  const pins=all.filter(s=>s.pinned), rest=all.filter(s=>!s.pinned);
+  if(pins.length)cv.appendChild(lab('Pinned'));
+  pins.forEach(s=>{const on=s.id===session;if(on)found=true;cv.appendChild(mk(s.id,s.title||s.id,on,s));});
+  if(pins.length&&rest.length)cv.appendChild(lab('Recent'));
+  rest.forEach(s=>{const on=s.id===session;if(on)found=true;cv.appendChild(mk(s.id,s.title||s.id,on,s));});
+  if(!found&&session)cv.prepend(mk(session,'(new conversation)',true,null));
   revealStagger(cv.querySelectorAll('.cs-item'),18);
+  }
   // tools
   const tl=$('cs-tools');tl.innerHTML='';
   (window.QUICK_ACTIONS||[]).forEach(a=>{const el=document.createElement('div');el.className='cs-item';
@@ -1184,6 +1530,17 @@ async function renderAIInfo(){
 }
 setInterval(()=>{if((document.querySelector('.deck')||{}).dataset&&document.querySelector('.deck').dataset.chat==='full')renderAIInfo();},5000);
 $('cs-new').onclick=()=>{$('newchat').click();setTimeout(renderChatSide,300);};
+// conversation management wiring (search field in both chat modes + export)
+cvBindSearch($('cs-q'),()=>{if(cvFullMode())renderChatSide();});
+cvBindSearch($('chat-q'),()=>{$('cvfind-list').innerHTML='<div class="cs-empty">Type to search every conversation.</div>';});
+$('cs-qx').onclick=()=>{cvClear();$('cs-q').focus();};
+$('chat-find').onclick=()=>{$('cvfind').hidden?cvOpenFind():cvCloseFind();};
+$('exportchat').onclick=cvExport;
+document.addEventListener('mousedown',e=>{           // click-away closes the popover
+  if(cvFullMode()||!$('cvfind')||$('cvfind').hidden)return;
+  if(e.target.closest('#cvfind')||e.target.closest('.chat-head'))return;
+  cvCloseFind();
+});
 $('chat-hide').onclick=()=>setChatMode('hidden');
 $('chat-max').onclick=()=>setChatMode((document.querySelector('.deck').dataset.chat==='full')?'normal':'full');
 $('chat-restore').onclick=()=>setChatMode('normal');

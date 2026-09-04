@@ -12,6 +12,13 @@
 // update is waiting: a positioned <i> appended to the existing tab, plus one
 // scoped style rule. No markup of anyone else's is modified.
 //
+// "What's new": the release body is markdown; parseNotes() splits it into
+// Keep-a-Changelog sections and inlineMD() escapes every character before
+// re-introducing <strong>/<code>. Server HTML is never injected. When there is
+// no update to offer the block shows the RUNNING version's section instead,
+// from /api/update/check's payload when it happens to be that release, else
+// from GET /api/update/notes?version= (CHANGELOG.md, read-only).
+//
 // Design laws (CLAUDE.md): zero emoji (bespoke two-tone SVG), 12-hour clock,
 // esc() on every interpolation, every global helper typeof-guarded so a
 // headless harness can eval this file.
@@ -62,7 +69,9 @@
     } catch (e) { return "never"; }
   }
 
-  // ISO-8601 from the GitHub API -> "9/10/2026"
+  // ISO-8601 from the GitHub API -> "9/10/2026". The card itself now uses the
+  // long form (fmtDayLong) everywhere; this stays on the exported surface for
+  // the console and the headless harness.
   function fmtDay(iso) {
     if (!iso) return "";
     try {
@@ -81,6 +90,169 @@
     var rest = lines.length - max;
     if (rest > 0) head += "\n" + E("… " + rest + " more line" + (rest === 1 ? "" : "s") + " in the release notes");
     return head;
+  }
+
+  // ---- "What's new": release-notes markdown -> escaped, sectioned HTML -----
+  //
+  // The server hands us the release BODY as plain markdown (GitHub's release
+  // notes, or CHANGELOG.md's `## [x.y.z]` section via /api/update/notes). It is
+  // NEVER injected as HTML: parseNotes() only ever produces plain strings, and
+  // inlineMD() escapes first and then re-introduces exactly two tags of its own
+  // (<strong> for **lead-ins**, <code> for `backticks`).
+
+  var MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug",
+             "Sep", "Oct", "Nov", "Dec"];
+
+  // "2026-09-04" / "2026-09-04T12:00:00Z" -> "Sep 4, 2026"; "2026-07" -> "Jul 2026".
+  // Date-only strings are read as LOCAL days on purpose: new Date("2026-09-04")
+  // is UTC midnight, which prints as the 3rd anywhere west of Greenwich.
+  function fmtDayLong(v) {
+    if (!v) return "";
+    try {
+      var str = String(v).trim(), d;
+      var ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(str);
+      var ym = /^(\d{4})-(\d{2})$/.exec(str);
+      if (ymd) d = new Date(+ymd[1], +ymd[2] - 1, +ymd[3]);
+      else if (ym) d = new Date(+ym[1], +ym[2] - 1, 1);
+      else d = new Date(str);
+      if (isNaN(d.getTime())) return "";
+      if (ym) return MON[d.getMonth()] + " " + d.getFullYear();
+      return MON[d.getMonth()] + " " + d.getDate() + ", " + d.getFullYear();
+    } catch (e) { return ""; }
+  }
+
+  // Keep-a-Changelog section names we know how to label and colour.
+  var SEC_LABEL = {
+    added: "Added", changed: "Changed", fixed: "Fixed", security: "Security",
+    removed: "Removed", deprecated: "Deprecated"
+  };
+
+  var NOTES_HEAD = 3;          // items shown before "Show all"
+  var NOTES_MAX_CHARS = 24000; // hard ceiling on notes we will parse at all
+
+  // markdown inline -> HTML. Escapes EVERYTHING first, then promotes the two
+  // constructs the changelog actually uses. Unbalanced ** or ` stay literal.
+  function inlineMD(str) {
+    var parts = String(str == null ? "" : str).split(/(`[^`\n]+`)/g);
+    var out = "";
+    for (var i = 0; i < parts.length; i++) {
+      var p = parts[i];
+      if (!p) continue;
+      if (i % 2 === 1) {
+        out += "<code>" + E(p.slice(1, -1)) + "</code>";
+      } else {
+        // E() emits none of * ` so the bold pass is safe on escaped text
+        out += E(p).replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+      }
+    }
+    return out;
+  }
+
+  // release body -> { version, date, intro, sections:[{key,label,items:[{text,para}]}] }
+  // Wrapped continuation lines are joined back into one item; blank lines end
+  // an item; anything before the first heading becomes the intro.
+  function parseNotes(md) {
+    var src = String(md == null ? "" : md).replace(/\r\n?/g, "\n");
+    if (src.length > NOTES_MAX_CHARS) src = src.slice(0, NOTES_MAX_CHARS);
+    var out = { version: "", date: "", intro: "", sections: [] };
+    var lines = src.split("\n");
+    var intro = [], cur = null, buf = null, para = false;
+
+    function open(label) {
+      var raw = String(label || "").trim();
+      var key = raw.toLowerCase().replace(/[^a-z]+/g, "");
+      if (!SEC_LABEL[key]) key = "other";
+      cur = { key: key, label: SEC_LABEL[key] || raw, items: [] };
+      out.sections.push(cur);
+    }
+    function flush() {
+      if (buf === null) return;
+      var t = buf.replace(/[ \t]+/g, " ").trim();
+      buf = null;
+      if (!t) return;
+      if (!cur && para) { intro.push(t); return; }
+      if (!cur) open("");
+      cur.items.push({ text: t, para: !!para });
+    }
+
+    for (var i = 0; i < lines.length; i++) {
+      var ln = lines[i];
+      var head = /^ {0,3}#{1,6} +(.*?) *#* *$/.exec(ln);
+      if (head) {
+        flush();
+        var lbl = head[1].trim();
+        // "## [1.0.1] - 2026-09-04" names the release, it is not a section
+        var vm = /^\[([^\]]+)\] *(?:[-–] *(\S+))?$/.exec(lbl);
+        if (vm) {
+          out.version = vm[1].trim();
+          if (vm[2]) out.date = vm[2];
+          cur = null;
+          continue;
+        }
+        open(lbl);
+        continue;
+      }
+      var bul = /^ {0,3}[-*+] +(.*)$/.exec(ln);
+      if (bul) { flush(); buf = bul[1]; para = false; continue; }
+      if (!ln.trim()) { flush(); continue; }
+      if (buf !== null) { buf += " " + ln.trim(); continue; }
+      buf = ln.trim(); para = true;
+    }
+    flush();
+    out.intro = intro.join(" ");
+    out.sections = out.sections.filter(function (x) { return x.items.length; });
+    return out;
+  }
+
+  // the block itself. opts: {notes|parsed, version, date, url, open}
+  // `version` is omitted by the caller when the surrounding box already says it.
+  function whatsNewHTML(opts) {
+    opts = opts || {};
+    var p = opts.parsed || parseNotes(opts.notes);
+    if (!p.sections.length && !p.intro) return "";
+    var open = opts.open || {};
+    var ver = opts.version || "";
+    var day = fmtDayLong(opts.date || p.date || "");
+
+    var h = '<div class="upd-new"><div class="upd-new-head">' +
+      '<span class="upd-new-t">What’s new</span>' +
+      (ver ? '<span class="upd-new-v upd-mono">' + E(ver) + "</span>" : "") +
+      (day ? '<span class="upd-new-d">' + E(day) + "</span>" : "") +
+      (opts.url
+        ? '<a class="upd-new-link" href="' + E(opts.url) +
+          '" target="_blank" rel="noreferrer noopener">Release page</a>'
+        : "") +
+      "</div>";
+    if (p.intro) h += '<p class="upd-new-intro">' + inlineMD(p.intro) + "</p>";
+
+    for (var i = 0; i < p.sections.length; i++) {
+      var sec = p.sections[i];
+      var hid = sec.items.length - NOTES_HEAD;
+      var isOpen = !!open[i];
+      h += '<div class="upd-sec upd-k-' + E(sec.key) + (isOpen ? " open" : "") +
+           '" data-sec="' + i + '">';
+      if (sec.label) {
+        h += '<div class="upd-sec-h"><i class="upd-dotk" aria-hidden="true"></i>' +
+             E(sec.label) + "</div>";
+      }
+      h += '<ul class="upd-items">';
+      for (var j = 0; j < sec.items.length; j++) {
+        var it = sec.items[j];
+        var cls = (it.para ? "upd-para" : "") + (j >= NOTES_HEAD ? " upd-hid" : "");
+        h += "<li" + (cls.trim() ? ' class="' + cls.trim() + '"' : "") + ">" +
+             inlineMD(it.text) + "</li>";
+      }
+      h += "</ul>";
+      if (hid > 0) {
+        var label = "Show all (" + hid + " more)";
+        h += '<button type="button" class="upd-more" data-more="' + i +
+             '" data-label="' + E(label) + '" aria-expanded="' +
+             (isOpen ? "true" : "false") + '">' +
+             E(isOpen ? "Show less" : label) + "</button>";
+      }
+      h += "</div>";
+    }
+    return h + "</div>";
   }
 
   // does this release replace the app bundle? (a macOS app asset, or notes that
@@ -135,14 +307,79 @@
       '#' + CARD_ID + ' .upd-assets{margin-top:7px;display:flex;flex-wrap:wrap;gap:5px}' +
       '#' + CARD_ID + ' .upd-asset{font-size:10.5px;padding:1px 8px;border-radius:20px;color:var(--muted);' +
         'background:var(--glass-2,rgba(255,255,255,.06))}' +
+      // ---- "What's new" -------------------------------------------------
+      '#' + CARD_ID + ' .upd-new{margin-top:10px;padding:9px 11px 10px;border-radius:var(--radius-xs,9px);' +
+        'border:1px solid var(--hairline,rgba(255,255,255,.12));background:var(--chip,rgba(255,255,255,.05))}' +
+      '#' + CARD_ID + ' .upd-new-head{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;' +
+        'padding-bottom:7px;margin-bottom:8px;border-bottom:1px solid var(--hairline,rgba(255,255,255,.12))}' +
+      '#' + CARD_ID + ' .upd-new-t{font-size:12px;font-weight:650;color:var(--ink);text-wrap:balance}' +
+      '#' + CARD_ID + ' .upd-new-v{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}' +
+      '#' + CARD_ID + ' .upd-new-d{font-size:11px;color:var(--faint);font-variant-numeric:tabular-nums}' +
+      '#' + CARD_ID + ' .upd-new-link{margin-left:auto;font-size:11px;color:var(--muted);text-decoration:none;' +
+        'border-bottom:1px solid transparent;padding-bottom:1px;' +
+        'transition-property:color,border-color;transition-duration:150ms;transition-timing-function:ease-out}' +
+      '#' + CARD_ID + ' .upd-new-link:hover{color:var(--iris,#6b8afd);border-bottom-color:currentColor}' +
+      '#' + CARD_ID + ' .upd-new-intro{margin:0 0 9px;font-size:11.5px;line-height:1.55;color:var(--muted);' +
+        'text-wrap:pretty}' +
+      '#' + CARD_ID + ' .upd-sec + .upd-sec{margin-top:9px}' +
+      '#' + CARD_ID + ' .upd-sec-h{display:flex;align-items:center;gap:6px;margin:0 0 4px;font-size:9.5px;' +
+        'font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}' +
+      '#' + CARD_ID + ' .upd-dotk{flex:0 0 auto;width:5px;height:5px;border-radius:50%;background:var(--faint)}' +
+      '#' + CARD_ID + ' .upd-k-added .upd-dotk{background:var(--ok,#2E9E68)}' +
+      '#' + CARD_ID + ' .upd-k-changed .upd-dotk{background:var(--iris,#6b8afd)}' +
+      '#' + CARD_ID + ' .upd-k-fixed .upd-dotk{background:var(--quick,#2E93C4)}' +
+      '#' + CARD_ID + ' .upd-k-security .upd-dotk{background:var(--warn,#B9821A)}' +
+      '#' + CARD_ID + ' .upd-k-removed .upd-dotk,#' + CARD_ID + ' .upd-k-deprecated .upd-dotk' +
+        '{background:var(--bad,#D24C3C)}' +
+      '#' + CARD_ID + ' .upd-items{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}' +
+      '#' + CARD_ID + ' .upd-items li{position:relative;padding-left:13px;font-size:11.5px;line-height:1.55;' +
+        'color:var(--ink);text-wrap:pretty}' +
+      '#' + CARD_ID + ' .upd-items li::before{content:"";position:absolute;left:3px;top:.66em;width:3px;' +
+        'height:3px;border-radius:50%;background:var(--faint)}' +
+      '#' + CARD_ID + ' .upd-items li.upd-para{padding-left:0;color:var(--muted)}' +
+      '#' + CARD_ID + ' .upd-items li.upd-para::before{content:none}' +
+      '#' + CARD_ID + ' .upd-items strong{font-weight:650;color:var(--ink)}' +
+      '#' + CARD_ID + ' .upd-new code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;' +
+        'padding:1px 4px;border-radius:5px;word-break:break-word;color:var(--ink);' +
+        'background:color-mix(in srgb,var(--ink) 9%,transparent)}' +
+      '#' + CARD_ID + ' .upd-sec:not(.open) li.upd-hid{display:none}' +
+      '#' + CARD_ID + ' button.upd-more{position:relative;margin:5px 0 0;padding:2px 0;border:0;' +
+        'background:none;color:var(--muted);font-size:11px;line-height:1.4;cursor:pointer;' +
+        'transition-property:color;transition-duration:150ms;transition-timing-function:ease-out}' +
+      // the label is 19px tall; the pseudo-element gives it a 41x41 hit area
+      '#' + CARD_ID + ' button.upd-more::after{content:"";position:absolute;inset:-11px -14px}' +
+      '#' + CARD_ID + ' button.upd-more:hover{color:var(--iris,#6b8afd);transform:none;border-color:transparent}' +
+      '@keyframes upd-in{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}' +
+      '#' + CARD_ID + ' .upd-sec.open.upd-just li.upd-hid{animation:upd-in 180ms ease-out both}' +
+      '@media (prefers-reduced-motion:reduce){#' + CARD_ID +
+        ' .upd-sec.open.upd-just li.upd-hid{animation:none}}' +
       '#tab-mind{position:relative}' +
       '#tab-mind .upd-dot{position:absolute;top:2px;right:6px;width:7px;height:7px;border-radius:50%;' +
         'background:var(--iris,#6b8afd);box-shadow:0 0 0 2px var(--bg-2,rgba(0,0,0,.35));display:block}' +
       '</style>';
   }
 
+  // Release notes for the version we are RUNNING. /api/update/check only
+  // carries the newest release's body, so that only helps while it happens to
+  // be the one installed; otherwise we use the CHANGELOG.md section fetched
+  // from /api/update/notes. Returns null when neither source has anything.
+  function verKey(v) { return String(v == null ? "" : v).trim().replace(/^v/i, ""); }
+
+  function currentNotes(state) {
+    state = state || {};
+    var ver = state.ver || {}, chk = state.check || {}, cn = state.notes || null;
+    var mine = verKey(ver.version);
+    if (!mine) return null;
+    if (cn && cn.notes && verKey(cn.version) === mine) return cn;
+    if (chk.notes && chk.source !== "main" && verKey(chk.latest) === mine) {
+      return { version: chk.latest || ver.version, notes: chk.notes,
+               date: chk.published_at || "", url: chk.url || "" };
+    }
+    return (cn && cn.notes) ? cn : null;
+  }
+
   // ---- the card body -------------------------------------------------------
-  // state = { ver, check, status, busy, msg, err }
+  // state = { ver, check, status, busy, msg, err, notes, notesOpen }
   function cardHTML(state) {
     state = state || {};
     var ver = state.ver || {};
@@ -183,15 +420,28 @@
     // the offer
     if (chk.update_available && chk.latest) {
       var appWarn = releaseTouchesApp(chk);
+      var parsed = parseNotes(chk.notes);
+      var haveNotes = !!(parsed.sections.length || parsed.intro);
+      // "What's new" carries the date and the release link once notes render,
+      // so the summary line below the headline stands down rather than saying
+      // the same thing twice (the main channel has no date, so it keeps it).
+      var showSub = !haveNotes || chk.source === "main";
       h += '<div class="upd-avail">' +
-        "<h3>" + E(chk.latest) + " is available</h3>" +
-        '<div class="upd-sub">' +
-        E(chk.source === "main"
-          ? "origin/main is ahead of this checkout"
-          : ("released " + (fmtDay(chk.published_at) || "recently"))) +
-        (chk.url ? ' · <a href="' + E(chk.url) + '" target="_blank" rel="noreferrer noopener">release page</a>' : "") +
-        "</div>";
-      if (chk.notes) h += '<pre class="upd-notes">' + notesPreview(chk.notes, 12) + "</pre>";
+        "<h3>" + E(chk.latest) + " is available</h3>";
+      if (showSub) {
+        h += '<div class="upd-sub">' +
+          E(chk.source === "main"
+            ? "origin/main is ahead of this checkout"
+            : ("released " + (fmtDayLong(chk.published_at) || "recently"))) +
+          (chk.url ? ' · <a href="' + E(chk.url) + '" target="_blank" rel="noreferrer noopener">Release page</a>' : "") +
+          "</div>";
+      }
+      if (haveNotes) {
+        h += whatsNewHTML({ parsed: parsed, date: chk.published_at,
+                            url: showSub ? "" : chk.url, open: state.notesOpen });
+      } else if (chk.notes) {
+        h += '<pre class="upd-notes">' + notesPreview(chk.notes, 12) + "</pre>";
+      }
       if ((chk.assets || []).length) {
         h += '<div class="upd-assets">' + chk.assets.slice(0, 6).map(function (a) {
           return '<span class="upd-asset">' + E(a.name) +
@@ -227,6 +477,12 @@
           ? "Up to date — " + chk.latest + " is the newest release."
           : "No newer release found.") +
         "</div>";
+      // nothing to offer: show what the version you ARE running brought.
+      var cn = currentNotes(state);
+      if (cn) {
+        h += whatsNewHTML({ notes: cn.notes, version: cn.version, date: cn.date,
+                            url: cn.url, open: state.notesOpen });
+      }
     }
 
     // live progress
@@ -257,7 +513,8 @@
   }
 
   // ---- live wiring ---------------------------------------------------------
-  var S = { ver: null, check: null, status: null, busy: "", msg: "", err: "" };
+  var S = { ver: null, check: null, status: null, busy: "", msg: "", err: "",
+            notes: null, notesOpen: {} };
   var timer = null, mounted = false;
 
   async function jget(url) {
@@ -314,6 +571,21 @@
         else if (act === "apply") doApply(b.getAttribute("data-target") || "latest");
       };
     });
+    // "Show all" expands one notes section in place — no repaint, so nothing
+    // else in the card flickers; S.notesOpen keeps it open across repaints.
+    var mores = el.querySelectorAll ? el.querySelectorAll("button.upd-more") : [];
+    Array.prototype.slice.call(mores).forEach(function (b) {
+      b.onclick = function () {
+        var sec = b.parentNode;
+        if (!sec || !sec.classList) return;
+        var open = !sec.classList.contains("open");
+        sec.classList.toggle("open", open);
+        sec.classList.toggle("upd-just", open);   // one-shot entrance, click only
+        b.setAttribute("aria-expanded", open ? "true" : "false");
+        b.textContent = open ? "Show less" : (b.getAttribute("data-label") || "Show all");
+        S.notesOpen[b.getAttribute("data-more")] = open;
+      };
+    });
   }
 
   function gearDot(on) {
@@ -337,14 +609,26 @@
     try { S.ver = await jget("/api/version"); } catch (e) {}
   }
 
+  // CHANGELOG.md section for the running version — only fetched when the
+  // update check did not already hand us that release's body.
+  async function loadCurrentNotes() {
+    var mine = verKey((S.ver || {}).version);
+    if (!mine || currentNotes(S)) return;
+    try {
+      var j = await jget("/api/update/notes?version=" + encodeURIComponent(mine));
+      if (j && j.ok && j.notes) S.notes = j;
+    } catch (e) {}
+  }
+
   async function doCheck(force) {
-    S.busy = "check"; S.err = ""; S.msg = ""; paint();
+    S.busy = "check"; S.err = ""; S.msg = ""; S.notesOpen = {}; paint();
     try {
       S.check = await jget("/api/update/check" + (force ? "?force=1" : ""));
     } catch (e) {
       S.err = "Could not reach the update service.";
     }
     S.busy = ""; paint();
+    if (mounted) { try { await loadCurrentNotes(); paint(); } catch (e) {} }
   }
 
   async function setChannel(ch) {
@@ -420,6 +704,7 @@
       mounted = true;
       await loadVersion();
       await doCheck(false);          // cached: costs nothing, never blocks
+      await loadCurrentNotes();      // local file read; no network
       try {
         var st = await jget("/api/update/status");
         S.status = st;
@@ -457,7 +742,9 @@
   // headless-harness surface (also handy from the console)
   W.hermesUpdate = {
     cardHTML: cardHTML, notesPreview: notesPreview, fmtWhen: fmtWhen,
-    fmtDay: fmtDay, releaseTouchesApp: releaseTouchesApp, bytes: bytes,
+    fmtDay: fmtDay, fmtDayLong: fmtDayLong, releaseTouchesApp: releaseTouchesApp,
+    bytes: bytes, parseNotes: parseNotes, inlineMD: inlineMD,
+    whatsNewHTML: whatsNewHTML, currentNotes: currentNotes,
     check: doCheck, state: S
   };
 })();

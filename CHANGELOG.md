@@ -6,6 +6,37 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-09-04
+
+Conversation management and a readable "What's new" — backlog items #13 and #14.
+
+### Added
+- **Search across conversations.** A search field above the conversation list (full
+  chat mode; a magnifier toggle in split mode) matches text in any past turn,
+  shows a highlighted snippet, and Enter/click opens the conversation and flashes the
+  matching bubble. `GET /api/sessions/search?q=` (message text only, hidden sessions
+  excluded, 50 results, plain-text snippets with match offsets — the client escapes and
+  highlights; the server never emits markup).
+- **Pin and rename conversations.** Hover a sidebar row for pin / rename / delete
+  (32 px targets); pinned rows sort first under a "Pinned" label; rename inline
+  (Enter saves, Esc cancels). `POST /api/sessions/meta {session, pinned?, title?}`,
+  titles capped at 80 characters with control characters stripped.
+- **Export as Markdown.** From the chat toolbar: a Markdown transcript with
+  `**You**` / `**Hermes**` turns, Claude answers as labelled quotes, tool and approval
+  rows omitted, and session tokens or `~/.hermes` paths redacted.
+  `GET /api/sessions/export?session=` serves it as an attachment; inside the app the
+  WebView cannot download, so the text is copied to the clipboard with a toast.
+- **What's new in the updater.** Settings › System & Data › Software update now renders
+  release notes as Added / Changed / Fixed / Security groups (bold lead-ins and inline
+  code preserved, everything else escaped, "Show all" past three items) and shows the
+  installed version's notes when you are up to date (`GET /api/update/notes?version=`).
+
+### Changed
+- `GET /api/sessions` rows carry `pinned`; pinned conversations survive the 30-row cap.
+- Aux modules can now return non-JSON responses (`RawResponse`) — used for the Markdown
+  export's `Content-Disposition`.
+
+
 ## [1.0.1] - 2026-09-04
 
 Small, measured follow-ups to 1.0.0 from the post-v1 backlog
