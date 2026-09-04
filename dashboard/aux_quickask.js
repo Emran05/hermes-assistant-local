@@ -20,9 +20,12 @@
 (function () {
   "use strict";
   var W = (typeof window !== "undefined") ? window : {};
-
-  if (W.__HERMES_QUICKASK__) { try { buildPopover(); } catch (e) { showFatal(e); } }
-  else { W.hermesQuickAskResume = resumeInMain; }
+  // NB: the entry point lives at the BOTTOM of this IIFE, not here. Function
+  // declarations hoist but `var` INITIALISERS do not — buildPopover()'s very
+  // first statement is `POP.strip = …`, and POP is `var POP = {…}` further
+  // down, so calling it from up here threw "Cannot set properties of undefined
+  // (setting 'strip')" on every popover open. The catch turned that into a
+  // silent "Quick Ask failed to load", which is why it was never noticed.
 
   // ==========================================================================
   // MAIN-WINDOW SHIM  — resume a handed-off job in index.html's real chat
@@ -58,11 +61,15 @@
     });
   }
   var M = W.Motion || null;
+  // Motion One takes ONE keyframe object of arrays + seconds; WAAPI takes the
+  // same object + ms. Passing a keyframe ARRAY made Motion One write style[0]
+  // ("Indexed property setter is not supported") — same bug as aux_clip had.
   function anim(el, kf, opt) {
     try {
       if (RM()) return;
-      if (M) return M.animate(el, kf, opt);
-      if (el && el.animate) return el.animate(kf, opt);
+      var o = opt || {}, ms = o.duration || 240;
+      if (M) return M.animate(el, kf, { duration: ms / 1000, easing: o.easing });
+      if (el && el.animate) return el.animate(kf, { duration: ms, easing: o.easing, fill: "both" });
     } catch (e) {}
   }
   function RM() { try { return !!(W.matchMedia && matchMedia("(prefers-reduced-motion:reduce)").matches); } catch (e) { return false; } }
@@ -104,58 +111,105 @@
   var IC_SEND = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>';
   var IC_WARN = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
 
+  // ---- theme ---------------------------------------------------------------
+  // This is its OWN document (main.swift loads an HTML shell via
+  // loadHTMLString with the dashboard origin as baseURL), so index.html's token
+  // block does not reach it. It used to hard-code a light palette plus a single
+  // @media(prefers-color-scheme:dark) override, which meant the app's theme
+  // toggle was invisible here: dark OS + light app painted a dark popover.
+  // Same 4-block pattern as index.html (CLAUDE.md "theme toggle trap": each
+  // explicit block re-declares the FULL palette) + qaApplyTheme() mirrors
+  // localStorage.hermes_theme, which is same-origin thanks to that baseURL.
+  var _LIGHT = "--ink:#10131D;--muted:#565E72;--faint:#868DA1;--ground:#E7EAF3;" +
+    "--iris:#5B63E6;--iris-2:#7A6BEF;--iris-ink:#fff;--quick:#2E93C4;" +
+    "--ok:#2E9E68;--warn:#B9821A;--bad:#D24C3C;" +
+    "--hairline:rgba(16,19,29,.10);--field:rgba(255,255,255,.55);--field-edge:rgba(16,19,29,.12);" +
+    "--chip:rgba(255,255,255,.5);--cast:rgba(24,28,48,.16);";
+  var _DARK = "--ink:#EDEFF7;--muted:#9AA2B6;--faint:#6A7186;--ground:#080A11;" +
+    "--iris:#98A2FF;--iris-2:#B3A7FF;--iris-ink:#0a0c14;--quick:#7CD6F5;" +
+    "--ok:#46D392;--warn:#F3BC55;--bad:#F27063;" +
+    "--hairline:rgba(200,210,255,.10);--field:rgba(150,160,200,.12);--field-edge:rgba(200,210,255,.16);" +
+    "--chip:rgba(158,168,210,.14);--cast:rgba(0,0,0,.55);";
+
+  function qaApplyTheme() {
+    try {
+      var t = W.localStorage.getItem("hermes_theme");
+      if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+      else document.documentElement.removeAttribute("data-theme");
+    } catch (e) {}
+  }
+
   var CSS = [
+    ":root{color-scheme:light dark;" + _LIGHT + "}",
+    "@media(prefers-color-scheme:dark){:root{" + _DARK + "}}",
+    ':root[data-theme="light"]{color-scheme:light;' + _LIGHT + "}",
+    ':root[data-theme="dark"]{color-scheme:dark;' + _DARK + "}",
     "*{box-sizing:border-box}html,body{margin:0;height:100%}",
-    "body{font:13px/1.5 -apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;color:#0F172A;background:transparent}",
-    "@media(prefers-color-scheme:dark){body{color:#E7ECF5}}",
+    "body{font:13px/1.5 -apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;color:var(--ink);background:transparent}",
+    // The native popover backdrop follows the OS, not the app. When the user
+    // has overridden the theme we must paint our own ground or light ink lands
+    // on a dark vibrancy view; when they agree, stay transparent and keep it.
+    '@media(prefers-color-scheme:dark){:root[data-theme="light"] body{background:var(--ground)}}',
+    '@media(prefers-color-scheme:light){:root[data-theme="dark"] body{background:var(--ground)}}',
     "#qa{display:flex;flex-direction:column;height:100vh;overflow:hidden}",
-    ".qa-hd{display:flex;align-items:center;gap:8px;padding:11px 13px;border-bottom:1px solid rgba(120,130,150,.16)}",
-    ".qa-hd .mk{color:#8B5CF6;display:flex}",
+    ".qa-hd{display:flex;align-items:center;gap:8px;padding:11px 13px;border-bottom:1px solid var(--hairline)}",
+    ".qa-hd .mk{color:var(--iris);display:flex}",
     ".qa-hd .t{font-weight:650;font-size:13.5px}",
     ".qa-hd .sp{margin-left:auto;display:flex;gap:6px}",
-    ".qa-hd button{border:0;background:transparent;color:inherit;cursor:pointer;font-size:11.5px;opacity:.72;padding:4px 7px;border-radius:8px;display:inline-flex;align-items:center;gap:4px}",
-    ".qa-hd button:hover{opacity:1;background:rgba(120,130,150,.16)}",
+    ".qa-hd button{border:0;background:transparent;color:var(--muted);cursor:pointer;font-size:11.5px;padding:4px 7px;",
+    "border-radius:8px;display:inline-flex;align-items:center;gap:4px;",
+    "transition-property:background-color,color;transition-duration:150ms;transition-timing-function:ease-out}",
+    ".qa-hd button:hover{color:var(--ink);background:var(--chip)}",
     "#qa-strip{flex:1;overflow:auto;padding:12px 13px;display:flex;flex-direction:column;gap:9px}",
     ".qa-b{max-width:88%;padding:8px 11px;border-radius:13px;white-space:pre-wrap;word-break:break-word;font-size:12.8px}",
-    ".qa-b.user{align-self:flex-end;background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border-bottom-right-radius:5px}",
-    ".qa-b.bot{align-self:flex-start;background:rgba(120,130,150,.13);border-bottom-left-radius:5px}",
+    ".qa-b.user{align-self:flex-end;background:linear-gradient(135deg,var(--iris),var(--iris-2));color:var(--iris-ink);border-bottom-right-radius:5px}",
+    ".qa-b.bot{align-self:flex-start;background:color-mix(in srgb,var(--ink) 8%,transparent);border-bottom-left-radius:5px}",
     ".qa-b.bot .md p{margin:0 0 6px}.qa-b.bot .md p:last-child{margin:0}",
-    ".qa-b.bot .md code{background:rgba(120,130,150,.22);padding:1px 4px;border-radius:4px;font-size:12px}",
-    ".qa-b.bot .md pre{background:rgba(120,130,150,.16);padding:8px;border-radius:8px;overflow:auto}",
+    ".qa-b.bot .md code{background:color-mix(in srgb,var(--ink) 13%,transparent);padding:1px 4px;border-radius:4px;font-size:12px}",
+    ".qa-b.bot .md pre{background:color-mix(in srgb,var(--ink) 10%,transparent);padding:8px;border-radius:8px;overflow:auto}",
     ".qa-b.bot .md ul,.qa-b.bot .md ol{margin:4px 0;padding-left:18px}",
-    ".qa-b.bot .md a{color:#8B5CF6}",
-    ".qa-b.err{background:rgba(220,38,38,.1);color:#DC2626}",
-    ".caret{opacity:.6}",
-    ".qa-note{align-self:center;font-size:11px;opacity:.55;text-align:center;padding:2px 6px}",
-    ".qa-appr{align-self:stretch;border:1px solid rgba(217,119,6,.45);background:rgba(217,119,6,.10);border-radius:12px;padding:10px 11px}",
-    ".qa-appr .h{display:flex;align-items:center;gap:6px;font-weight:650;font-size:12px;color:#B45309;margin-bottom:5px}",
-    "@media(prefers-color-scheme:dark){.qa-appr .h{color:#FBBF24}}",
-    ".qa-appr code{display:block;font-size:11.5px;background:rgba(120,130,150,.16);padding:6px 8px;border-radius:7px;margin:4px 0;white-space:pre-wrap;word-break:break-word}",
-    ".qa-appr button{width:100%;margin-top:6px;border:0;border-radius:9px;padding:8px;font-weight:650;font-size:12px;cursor:pointer;background:linear-gradient(135deg,#D97706,#B45309);color:#fff}",
-    ".qa-cmp{display:flex;gap:7px;align-items:flex-end;padding:10px 11px;border-top:1px solid rgba(120,130,150,.16)}",
-    ".qa-cmp textarea{flex:1;resize:none;border:1px solid rgba(120,130,150,.3);border-radius:11px;padding:8px 11px;max-height:110px;",
-    "font:12.8px/1.45 -apple-system,sans-serif;color:inherit;background:rgba(255,255,255,.5)}",
-    "@media(prefers-color-scheme:dark){.qa-cmp textarea{background:rgba(0,0,0,.24)}}",
+    ".qa-b.bot .md a{color:var(--quick)}",
+    ".qa-b.err{background:color-mix(in srgb,var(--bad) 12%,transparent);color:var(--bad)}",
+    ".caret{color:var(--faint)}",
+    ".qa-note{align-self:center;font-size:11px;color:var(--faint);text-align:center;padding:2px 6px}",
+    ".qa-appr{align-self:stretch;border:1px solid color-mix(in srgb,var(--warn) 45%,transparent);",
+    "background:color-mix(in srgb,var(--warn) 12%,transparent);border-radius:12px;padding:10px 11px}",
+    ".qa-appr .h{display:flex;align-items:center;gap:6px;font-weight:650;font-size:12px;color:var(--warn);margin-bottom:5px}",
+    ".qa-appr code{display:block;font-size:11.5px;background:color-mix(in srgb,var(--ink) 12%,transparent);padding:6px 8px;",
+    "border-radius:7px;margin:4px 0;white-space:pre-wrap;word-break:break-word}",
+    ".qa-appr button{width:100%;margin-top:6px;border:0;border-radius:9px;padding:8px;font-weight:650;font-size:12px;",
+    "cursor:pointer;background:var(--warn);color:var(--iris-ink)}",
+    ".qa-cmp{display:flex;gap:7px;align-items:flex-end;padding:10px 11px;border-top:1px solid var(--hairline)}",
+    ".qa-cmp textarea{flex:1;resize:none;border:1px solid var(--field-edge);border-radius:11px;padding:8px 11px;max-height:110px;",
+    "font:12.8px/1.45 -apple-system,sans-serif;color:var(--ink);background:var(--field)}",
+    ".qa-cmp textarea::placeholder{color:var(--faint)}",
     ".qa-cmp textarea:disabled{opacity:.5}",
     ".qa-cmp .go{flex:0 0 auto;width:34px;height:34px;border:0;border-radius:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;",
-    "background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff}",
+    "background:linear-gradient(135deg,var(--iris),var(--iris-2));color:var(--iris-ink)}",
     ".qa-cmp .go:disabled{opacity:.45;cursor:default}",
-    ".qa-foot{font-size:10.5px;opacity:.5;text-align:center;padding:0 0 7px}",
+    ".qa-foot{font-size:10.5px;color:var(--faint);text-align:center;padding:0 0 7px}",
     ".dots i{display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.35;margin:0 1px;animation:qb 1.2s infinite}",
     ".dots i:nth-child(2){animation-delay:.16s}.dots i:nth-child(3){animation-delay:.32s}",
-    "@keyframes qb{0%,100%{opacity:.25}45%{opacity:.85}}"
+    "@keyframes qb{0%,100%{opacity:.25}45%{opacity:.85}}",
+    "@media (prefers-reduced-motion:reduce){.dots i{animation:none}}"
   ].join("");
 
   var POP = { strip: null, input: null, send: null, foot: null, job: null, polling: false, ready: false };
 
   function showFatal(e) {
+    // the error used to be swallowed entirely — "failed to load" with no way to
+    // find out why, in a document with no devtools attached in the real app
+    try { console.error("[quickask] fatal:", (e && e.stack) || e); } catch (x) {}
     var d = document.getElementById("qa");
     if (d) d.textContent = "Quick Ask failed to load. Reopen to retry.";
   }
 
   function buildPopover() {
     var d = document;
+    qaApplyTheme();                       // before first paint — no light flash
     var st = d.createElement("style"); st.textContent = CSS; d.head.appendChild(st);
+    // the main window writes hermes_theme; same origin, so we hear the change
+    try { W.addEventListener("storage", function (ev) { if (!ev || ev.key === "hermes_theme") qaApplyTheme(); }); } catch (e) {}
     var root = d.getElementById("qa") || d.body;
     root.textContent = "";
     root.innerHTML =
@@ -184,7 +238,7 @@
     // Swift calls this after showing the popover to focus the input.
     W.__qaFocus = function () { try { POP.input.focus(); } catch (e) {} };
 
-    anim(root, [{ opacity: 0, transform: "translateY(6px)" }, { opacity: 1, transform: "none" }], { duration: 220, easing: "cubic-bezier(.22,1,.36,1)" });
+    anim(root, { opacity: [0, 1], transform: ["translateY(6px)", "none"] }, { duration: 220, easing: "cubic-bezier(.22,1,.36,1)" });
 
     checkHealth();
     loadHistory();
@@ -295,4 +349,10 @@
     var finish = function () { POP.polling = false; setReady(true); if (POP.input) POP.input.focus(); };
     loop();
   }
+
+  // ---- entry point (see the note at the top of this IIFE) ------------------
+  // Runs last so every `var` above is initialised: in the popover document we
+  // BUILD the UI; in the main window we only expose the hand-off shim.
+  if (W.__HERMES_QUICKASK__) { try { buildPopover(); } catch (e) { showFatal(e); } }
+  else { W.hermesQuickAskResume = resumeInMain; }
 })();

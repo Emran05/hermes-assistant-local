@@ -26,6 +26,8 @@
     --specular:rgba(255,255,255,.95); --cast:rgba(24,28,48,.16);
     --field:rgba(255,255,255,.55); --field-edge:rgba(16,19,29,.12);
     --chip:rgba(255,255,255,.5);
+    /* select caret, drawn per theme (a data: URI cannot use currentColor) */
+    --caret:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23565E72' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
     /* aurora blobs (light — pastel, low intensity) */
     --a1:rgba(122,107,239,.30); --a2:rgba(46,147,196,.24);
     --a3:rgba(91,99,230,.22); --a4:rgba(196,120,220,.18);
@@ -44,6 +46,7 @@
       --specular:rgba(225,232,255,.42); --cast:rgba(0,0,0,.55);
       --field:rgba(150,160,200,.12); --field-edge:rgba(200,210,255,.16);
       --chip:rgba(158,168,210,.14);
+      --caret:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239AA2B6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
       --a1:rgba(112,100,245,.44); --a2:rgba(52,158,208,.36);
       --a3:rgba(88,98,238,.34); --a4:rgba(160,96,220,.30);
       --vignette:rgba(0,0,0,.6);
@@ -63,6 +66,8 @@
     --specular:rgba(255,255,255,.95); --cast:rgba(24,28,48,.16);
     --field:rgba(255,255,255,.55); --field-edge:rgba(16,19,29,.12);
     --chip:rgba(255,255,255,.5);
+    /* select caret, drawn per theme (a data: URI cannot use currentColor) */
+    --caret:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23565E72' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
     --a1:rgba(122,107,239,.30); --a2:rgba(46,147,196,.24);
     --a3:rgba(91,99,230,.22); --a4:rgba(196,120,220,.18);
     --vignette:rgba(70,80,120,.12);
@@ -78,6 +83,7 @@
     --specular:rgba(225,232,255,.42); --cast:rgba(0,0,0,.55);
     --field:rgba(150,160,200,.12); --field-edge:rgba(200,210,255,.16);
     --chip:rgba(158,168,210,.14);
+      --caret:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239AA2B6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
     --a1:rgba(112,100,245,.44); --a2:rgba(52,158,208,.36);
     --a3:rgba(88,98,238,.34); --a4:rgba(160,96,220,.30);
     --vignette:rgba(0,0,0,.6); --user-bubble:rgba(120,130,255,.22); --user-ink:#dfe3ff;
@@ -140,6 +146,15 @@
   input::placeholder,textarea::placeholder{color:var(--faint)}
   input:focus,textarea:focus,select:focus{outline:none;border-color:var(--iris);
     box-shadow:0 0 0 3px color-mix(in srgb,var(--iris) 18%,transparent)}
+  /* A native <select> inside a glass panel reads as an OS control bolted on
+     (raised bezel + system caret). Strip the platform chrome and draw our own
+     caret from the --caret token so it matches the composer/inputs in both
+     themes; the base rule above already gives it --field / --field-edge /
+     --radius-xs and the shared focus ring. */
+  select{-webkit-appearance:none;appearance:none;padding-right:28px;
+    background-image:var(--caret);background-repeat:no-repeat;
+    background-position:right 8px center;background-size:13px 13px}
+  select::-ms-expand{display:none}
   /* scrollbars hidden everywhere, scrolling preserved */
   *{scrollbar-width:none;-ms-overflow-style:none}
   ::-webkit-scrollbar{width:0;height:0;display:none;background:transparent}
@@ -185,8 +200,15 @@
   /* model switcher menu */
   .modelwrap{position:relative}
   #model-pill{cursor:pointer}
-  .modelmenu{position:absolute;top:calc(100% + 8px);right:0;width:290px;z-index:40;padding:7px;
+  .modelmenu{position:absolute;top:calc(100% + 8px);right:0;width:316px;z-index:40;padding:7px;
     border-radius:14px;
+    /* The roster keeps growing (3 models + power/thinking/background/memory/
+       Claude-escalation rows), and an absolutely-positioned menu happily paints
+       past the window edge. Cap it to what is left below the pill and scroll
+       INSIDE instead: 52px = the menu's own top offset under the 56px header,
+       24px = breathing room at the bottom. overscroll-behavior stops the scroll
+       chaining into the deck once the list bottoms out. */
+    max-height:calc(100vh - 76px);overflow-y:auto;overscroll-behavior:contain;
     background:color-mix(in srgb,var(--ground) 92%,transparent);
     -webkit-backdrop-filter:blur(40px) saturate(140%);backdrop-filter:blur(40px) saturate(140%);
     border:1px solid var(--edge);
@@ -198,13 +220,32 @@
   .mmi .dot{width:8px;height:8px;border-radius:50%;background:var(--faint);flex:none}
   .mmi.on .dot{background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 20%,transparent)}
   .mmi .nm{font-size:12.5px;font-weight:600}
-  .mmi .rm2{font-size:10.5px;color:var(--faint)}
+  /* Clamp to 2 lines: a long `note` used to make one roster row taller than the
+     others. Clamping (not truncating) keeps the three rows the same height. */
+  .mmi .rm2{font-size:10.5px;color:var(--faint);display:-webkit-box;-webkit-line-clamp:2;
+    -webkit-box-orient:vertical;overflow:hidden}
+  /* aux_promotion.js appends its <style> at runtime, i.e. AFTER this block, so
+     its .pro-lic rule wins at equal specificity — these need the extra class to
+     override. The drill badge on the active row ("checked drilled 6/6") used to
+     squeeze the license into "Apach…" while the other rows showed "Apache-2.0";
+     flex:0 0 auto means it never shrinks, so it never truncates mid-word, and
+     flex-wrap is the safety valve if a future badge really is too wide. */
+  .modelmenu .pro-line{flex-wrap:wrap;row-gap:2px}
+  .modelmenu .pro-line .pro-lic{flex:0 0 auto;min-width:auto;overflow:visible;text-overflow:clip}
+  /* a per-model download failure the backend surfaces as m.download_error */
+  .mmi .mm-dlerr{font-size:10.5px;line-height:1.35;color:var(--bad);margin-top:3px;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
   .mmi .act{margin-left:auto;font-size:11px;color:var(--iris);font-weight:600;white-space:nowrap}
   .mmi.on .act{color:var(--ok)}
   .mmhead{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);font-weight:640;padding:8px 10px 4px}
   .mmpower{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:10px;cursor:pointer;
-    margin-top:5px;border-top:1px solid var(--hairline);transition:background .15s;color:var(--warn)}
-  .mmpower:hover{background:var(--chip)}
+    margin-top:5px;border-top:1px solid var(--hairline);color:var(--warn);
+    transition-property:background-color;transition-duration:150ms;transition-timing-function:ease-out}
+  /* Only rows you can actually act on light up. #mm-bg is a read-out (it sets
+     cursor:default), so a hover highlight there promised a click that does
+     nothing — :not([data-inert]) keeps the affordance honest. */
+  .mmpower:not([data-inert]):hover{background:var(--chip)}
+  .mmpower[data-inert]{cursor:default;color:var(--muted)}   /* a read-out, not a control */
   .mmmem{margin:6px 4px 2px;padding:8px 10px;border-radius:10px;background:var(--chip)}
   .mmmem.over{background:color-mix(in srgb,var(--bad) 16%,var(--chip))}
   .mmmem-top{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px}
@@ -215,7 +256,8 @@
   .mmmem-warn{font-size:10.5px;color:var(--bad);margin-top:6px;line-height:1.35}
   .mmmem-btns{display:flex;gap:6px;margin-top:7px}
   .mmmem-btn{flex:1;font-size:11px;padding:5px 6px;border-radius:8px;border:1px solid var(--hairline);
-    background:var(--glass-2);color:var(--ink);cursor:pointer;transition:all .15s}
+    background:var(--glass-2);color:var(--ink);cursor:pointer;
+    transition-property:background-color,border-color,color;transition-duration:150ms;transition-timing-function:ease-out}
   .mmmem-btn:hover{border-color:var(--iris)}.mmmem-btn.on{background:var(--iris);color:#fff;border-color:var(--iris)}
   .mmpower.resume{color:var(--ok)}
   .mmpower .ic{width:14px;height:14px;flex:none;fill:currentColor;stroke:currentColor}
@@ -223,6 +265,29 @@
   .mmpower .rm2{font-size:10.5px;color:var(--faint)}
   .themebtn{padding:7px;border-radius:10px}
   .themebtn .ic{width:16px;height:16px}
+
+  /* ---------- the one toggle switch ----------
+     There used to be two: aux_prefs' .pf-tog (on = --iris, knob hardcoded #fff)
+     and aux_watchtower's .wt-tog (on = green, 16px knob, 180ms). Both class
+     names still work — the canonical geometry/colour/motion lives HERE, and
+     both modules dropped their local copies so this rule is the only one left
+     (an aux <style> is appended at runtime and would otherwise win on order).
+     Geometry: 38x22 track, 18px knob inset 2px, travel 16px => symmetric.
+     Colour: on = --iris, knob = --iris-ink (white on light, near-black on dark)
+     so the knob keeps contrast on both the off track and the iris on track. */
+  .pf-tog,.wt-tog{position:relative;flex:0 0 auto;width:38px;height:22px;border-radius:99px;
+    cursor:pointer;background:var(--hairline);border:none;box-sizing:border-box;
+    transition-property:background-color;transition-duration:150ms;transition-timing-function:ease-out}
+  .pf-tog{margin-left:auto}
+  .pf-tog>i,.wt-tog .wt-knob{position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;
+    background:var(--iris-ink);box-shadow:0 1px 3px -1px var(--cast);
+    transition-property:transform;transition-duration:150ms;transition-timing-function:ease-out}
+  .pf-tog.on,.wt-tog.on{background:var(--iris)}
+  .pf-tog.on>i,.wt-tog.on .wt-knob{transform:translateX(16px)}
+  /* 38x22 is under the 40px hit-area floor — grow the target, not the pixels */
+  .pf-tog::after,.wt-tog::after{content:"";position:absolute;inset:-9px -2px}
+  @media (prefers-reduced-motion:reduce){
+    .pf-tog,.wt-tog,.pf-tog>i,.wt-tog .wt-knob{transition:none}}
 
   /* ---------- deck ---------- */
   .deck{flex:1;display:grid;grid-template-columns:1fr 440px;gap:12px;padding:12px 16px;
@@ -296,7 +361,8 @@
   .tile .sub{font-size:11.5px;color:var(--muted)}
   .meters{display:flex;flex-direction:column;gap:6px;margin-top:5px}
   .meters .row{display:flex;align-items:center;gap:9px;font-size:11px;color:var(--muted)}
-  .meters .row b{color:var(--ink);font-weight:640;width:38px;text-align:right}
+  .meters .row b{color:var(--ink);font-weight:640;width:38px;text-align:right;
+    font-variant-numeric:tabular-nums}   /* live %: no width jitter on 9%->10% */
   .meters .row span{width:30px}
   .meter{height:5px;border-radius:3px;background:var(--hairline);overflow:hidden;flex:1}
   .meter i{display:block;height:100%;border-radius:3px;transition:width .7s cubic-bezier(.2,.8,.2,1);
@@ -318,7 +384,8 @@
   .task{display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--hairline);font-size:13px}
   .task:last-child{border-bottom:none}
   .task-check{width:18px;height:18px;border:1.5px solid var(--field-edge);border-radius:7px;cursor:pointer;flex:none;
-    display:flex;align-items:center;justify-content:center;color:transparent;transition:all .2s;background:var(--field)}
+    display:flex;align-items:center;justify-content:center;color:transparent;background:var(--field);
+    transition-property:background-color,border-color,color;transition-duration:200ms;transition-timing-function:ease-out}
   .task-check:hover{border-color:var(--iris)}
   .task.done .task-check{background:linear-gradient(180deg,var(--ok),#26925e);border-color:transparent;color:#fff}
   .task-check svg{width:11px;height:11px;stroke:currentColor;stroke-width:3;fill:none}
@@ -378,7 +445,7 @@
   .gstat .k{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-top:5px;font-weight:600}
   .catbar{display:flex;flex-wrap:wrap;gap:6px;padding:11px 16px 3px}
   .catchip{font-size:11.5px;border:1px solid var(--hairline);border-radius:99px;padding:3px 11px;color:var(--muted);
-    background:var(--chip);cursor:pointer;transition:all .2s;user-select:none}
+    background:var(--chip);cursor:pointer;user-select:none;transition-property:background-color,border-color,color;transition-duration:200ms;transition-timing-function:ease-out}
   .catchip:hover{color:var(--iris);border-color:color-mix(in srgb,var(--iris) 45%,transparent)}
   .catchip.on{color:var(--iris-ink);background:linear-gradient(180deg,var(--iris-2),var(--iris));border-color:transparent}
   .catchip .n{opacity:.6;margin-left:4px;font-variant-numeric:tabular-nums}
@@ -607,9 +674,17 @@
   .empty-chat .glyph svg{width:22px;height:22px;stroke:#fff;fill:#fff;stroke-width:.6}
   .empty-chat .big{font-size:15.5px;color:var(--ink);font-weight:660;margin-bottom:5px;letter-spacing:-.01em}
   .actions{display:flex;gap:6px;flex-wrap:wrap;padding:9px 12px 0;flex:none}
-  .chip{font-size:11.5px;border:1px solid var(--hairline);border-radius:99px;padding:4px 11px;color:var(--muted);
-    background:var(--chip);cursor:pointer;transition:all .2s}
+  .chip{font-size:11.5px;border:1px solid var(--hairline);border-radius:99px;padding:4px 10px;color:var(--muted);
+    background:var(--chip);cursor:pointer;white-space:nowrap;
+    transition-property:background-color,border-color,color;transition-duration:180ms;transition-timing-function:ease-out}
   .chip:hover{border-color:color-mix(in srgb,var(--iris) 45%,transparent);color:var(--iris)}
+  /* The set is one visual family: NO icons on any chip (aux_clip's "Clipboard"
+     used to be the only one with a glyph, which read as an accident). */
+  .chip .ic,.chip svg{display:none}
+  /* fitActionChips() hides the overflow past two rows and appends .chip-more */
+  .chip[hidden]{display:none}
+  .chip.chip-more{color:var(--iris);border-color:color-mix(in srgb,var(--iris) 35%,transparent);
+    background:color-mix(in srgb,var(--iris) 10%,transparent);font-variant-numeric:tabular-nums}
   .attachbar{display:flex;gap:7px;flex-wrap:wrap;padding:8px 12px 0;flex:none}
   .attach{display:inline-flex;align-items:center;gap:6px;font-size:12px;
     background:color-mix(in srgb,var(--iris) 14%,transparent);color:var(--iris);border-radius:9px;padding:4px 10px}
@@ -670,7 +745,7 @@
 .cp-dot{width:7px;height:7px;border-radius:99px;flex:none;display:inline-block}
 .cp-tools{display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin-left:auto}
 .cp-toolchip{display:inline-flex;align-items:center;gap:5px;font-size:11px;padding:3px 8px;border-radius:99px;
-  border:1px solid var(--hairline);background:var(--chip);color:var(--muted);cursor:pointer;transition:all .2s}
+  border:1px solid var(--hairline);background:var(--chip);color:var(--muted);cursor:pointer;transition-property:background-color,border-color,color;transition-duration:200ms;transition-timing-function:ease-out}
 .cp-toolchip:hover{color:var(--iris);border-color:color-mix(in srgb,var(--iris) 45%,transparent)}
 .cp-toolchip .ic{width:11px;height:11px}
 .cp-tn{font-family:ui-monospace,"SF Mono",Menlo,monospace;max-width:110px;overflow:hidden;
@@ -692,7 +767,7 @@
 .cp-filterbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:9px 0 7px;
   border-bottom:1px solid var(--hairline)}
 .cp-f{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;border:1px solid var(--hairline);
-  border-radius:99px;padding:3.5px 10px;color:var(--muted);background:var(--chip);cursor:pointer;transition:all .2s}
+  border-radius:99px;padding:3.5px 10px;color:var(--muted);background:var(--chip);cursor:pointer;transition-property:background-color,border-color,color;transition-duration:200ms;transition-timing-function:ease-out}
 .cp-f:hover{color:var(--iris);border-color:color-mix(in srgb,var(--iris) 45%,transparent)}
 .cp-f.on{color:var(--iris);border-color:color-mix(in srgb,var(--iris) 55%,transparent);
   background:color-mix(in srgb,var(--iris) 12%,transparent)}
@@ -1049,6 +1124,8 @@ function setChatMode(m){
     : '<svg class="ic" viewBox="0 0 24 24"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>';
   if(mx)mx.title=(m==='full')?'Restore split view':'Expand chat';
   localStorage.setItem('hermes_chat',m);
+  // the chip row is only laid out in split mode — re-fit on the way back in
+  if(typeof fitActionChips==='function')setTimeout(fitActionChips,0);
   // Motion-driven transitions
   if(m!==prev){
     if(m==='full'){renderChatSide();
@@ -1717,7 +1794,58 @@ function setAgentState(txt){
   if(txt){agentBusy=true;$('p-model').className='pdot busy';$('p-model-t').textContent=txt;}
   else{agentBusy=false;loadModels();}
 }
+// ---- "Escalate to Claude" master switch ---------------------------------
+// Contract: GET/POST /api/claude/escalate -> {ok:true,enabled:bool};
+// /api/claude/autoroute also carries claude_escalation as a fallback source.
+// The route is being built in parallel, so `null` means "this backend has no
+// switch" and EVERY consumer then behaves exactly as before (row hidden, chip
+// unchanged, Escalate button shown) rather than guessing.
+let claudeEscalation=null, escFetched=false;
+function escBroadcast(){
+  // one event, all consumers (model menu · Settings > Claude Bridge · topbar
+  // chip · aux_agent's per-reply Escalate button) — see aux_* listeners.
+  try{window.dispatchEvent(new CustomEvent('hermes:claude-escalation',
+    {detail:{enabled:claudeEscalation!==false,available:claudeEscalation!==null}}));}catch(e){}
+}
+async function loadClaudeEscalation(){
+  escFetched=true;
+  let v=null;
+  try{
+    const r=await fetch('/api/claude/escalate',{cache:'no-store'});
+    if(r.ok){const d=await r.json();if(d&&typeof d.enabled==='boolean')v=d.enabled;}
+  }catch(e){}
+  if(v===null){                       // route absent — try the autoroute mirror
+    try{
+      const a=await(await fetch('/api/claude/autoroute',{cache:'no-store'})).json();
+      if(a&&typeof a.claude_escalation==='boolean')v=a.claude_escalation;
+    }catch(e){}
+  }
+  claudeEscalation=v;
+  escBroadcast();
+  return v;
+}
+async function setClaudeEscalation(on){
+  let d=null;
+  try{
+    const r=await fetch('/api/claude/escalate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({enabled:!!on})});
+    if(r.ok)d=await r.json();
+  }catch(e){}
+  if(!d||d.ok===false)return false;   // caller re-enables its control
+  claudeEscalation=(typeof d.enabled==='boolean')?d.enabled:!!on;
+  escBroadcast();
+  return true;
+}
+window.loadClaudeEscalation=loadClaudeEscalation;
+window.setClaudeEscalation=setClaudeEscalation;
+window.claudeEscalationState=()=>claudeEscalation;
+// If the flip came from Settings > Claude Bridge while this menu happens to be
+// open, its row would otherwise still read the old state until the 30s poll.
+addEventListener('hermes:claude-escalation',()=>{const m=$('model-menu');
+  if(m&&!m.hidden&&typeof loadModels==='function')loadModels();});
+
 async function loadModels(){
+  if(!escFetched)await loadClaudeEscalation();
   let d;try{d=await(await fetch('/api/models')).json();}catch(e){return;}
   const menu=$('model-menu');
   agentPaused=!!d.paused;
@@ -1735,7 +1863,10 @@ async function loadModels(){
     else if(m.downloaded)act='switch';
     else act='download'+(m.ram?' · '+m.ram+'GB':'');
     return '<div class="mmi'+(m.active&&!agentPaused&&!agentIdle?' on':'')+'" data-id="'+esc(m.id)+'" data-dl="'+(m.downloaded?1:0)+'" data-active="'+(m.active?1:0)+'" data-busy="'+(m.downloading?1:0)+'">'+
-      '<span class="dot"></span><div style="min-width:0"><div class="nm">'+esc(m.label)+'</div><div class="rm2">'+esc(m.note||'')+(m.ram?' · ~'+m.ram+'GB RAM':'')+'</div></div>'+
+      '<span class="dot"></span><div style="min-width:0"><div class="nm">'+esc(m.label)+'</div><div class="rm2">'+esc(m.note||'')+(m.ram?' · ~'+m.ram+'GB RAM':'')+'</div>'+
+      // download_error is a new, optional backend field (absent/null on older
+      // builds) — a failed pull otherwise looked identical to "never fetched".
+      (m.download_error?'<div class="mm-dlerr" title="'+esc(m.download_error)+'">'+esc(m.download_error)+'</div>':'')+'</div>'+
       '<span class="act">'+act+'</span></div>';}).join('');
   // power row: park the model to free its RAM / wake it back up
   const ram=(d.ram_gb!=null&&d.ram_gb>0.2)?(' · frees ~'+(Math.round(d.ram_gb*10)/10)+' GB RAM'):'';
@@ -1750,9 +1881,16 @@ async function loadModels(){
   if(th.supported){
     menu.innerHTML+='<div class="mmpower'+(th.enabled?' resume':'')+'" id="mm-think"><svg class="ic" viewBox="0 0 24 24" style="fill:none;stroke-width:2"><path d="M12 3a6 6 0 0 0-3.5 10.9V17h7v-3.1A6 6 0 0 0 12 3z"/><path d="M10 21h4"/></svg><div style="min-width:0"><div class="nm">Thinking: '+(th.enabled?'on':'off')+'</div><div class="rm2">'+esc(th.enabled?'reasons before answering (low effort) — slower turns · tap to turn off':'direct answers — fastest for tools · tap to turn on (slower)')+'</div></div></div>';
   }
+  // Claude escalation row — same grammar as Thinking: state in the title,
+  // consequence in the sub-line, whole row is the control. Omitted entirely
+  // when the backend has no switch (claudeEscalation===null).
+  if(claudeEscalation!==null){
+    const ce=claudeEscalation;
+    menu.innerHTML+='<div class="mmpower'+(ce?' resume':'')+'" id="mm-esc"><svg class="ic" viewBox="0 0 24 24" style="fill:none;stroke-width:2"><circle cx="5" cy="16" r="2.2"/><circle cx="19" cy="16" r="2.2"/><path d="M5 16C5 8.6 19 8.6 19 16"/></svg><div style="min-width:0"><div class="nm">Claude escalation: '+(ce?'on':'off')+'</div><div class="rm2">'+esc(ce?'hard questions also go to Claude · tap to turn off':'local model only — nothing leaves the Mac')+'</div></div></div>';
+  }
   // background lane row — the small always-on model that news/briefings use
   if(d.bg&&d.bg.model){
-    menu.innerHTML+='<div class="mmpower" id="mm-bg" style="cursor:default"><svg class="ic" viewBox="0 0 24 24" style="fill:none;stroke-width:2"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg><div style="min-width:0"><div class="nm">Background: '+esc(d.bg.label||d.bg.model)+' <span class="rm2" style="display:inline">· '+(d.bg.online?'online':'offline')+'</span></div><div class="rm2">'+esc('news, briefings & scraping run here — the main model stays yours')+'</div></div></div>';
+    menu.innerHTML+='<div class="mmpower" id="mm-bg" data-inert><svg class="ic" viewBox="0 0 24 24" style="fill:none;stroke-width:2"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg><div style="min-width:0"><div class="nm">Background: '+esc(d.bg.label||d.bg.model)+' <span class="rm2" style="display:inline">· '+(d.bg.online?'online':'offline')+'</span></div><div class="rm2">'+esc('news, briefings & scraping run here — the main model stays yours')+'</div></div></div>';
   }
   // memory ceiling row — RAM vs the hard limit; over-limit shows controls
   const mm=d.mem||{};
@@ -1776,6 +1914,13 @@ async function loadModels(){
   if(wk)wk.onclick=()=>wakeAgent();
   const tk=menu.querySelector('#mm-think');
   if(tk)tk.onclick=()=>toggleThinking(!th.enabled);
+  const esr=menu.querySelector('#mm-esc');
+  if(esr)esr.onclick=async()=>{
+    esr.style.pointerEvents='none';                       // no double-fire
+    const ok=await setClaudeEscalation(!claudeEscalation);
+    esr.style.pointerEvents='';
+    if(ok)loadModels();                                   // re-render the row
+  };
   const ovr=menu.querySelector('#mm-ovr');
   if(ovr)ovr.onclick=async()=>{const on=!ovr.classList.contains('on');
     await fetch('/api/model/mem_override',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({allow:on})});loadModels();};
@@ -1875,7 +2020,8 @@ function hideModelSwap(ok,name){
     if(ring)ring.style.borderTopColor='var(--warn)';
     setTimeout(()=>{animate(o,{opacity:[1,0]},{duration:0.35});setTimeout(()=>{o.hidden=true;},360);},2200);}
 }
-$('model-pill').onclick=e=>{e.stopPropagation();const m=$('model-menu');m.hidden=!m.hidden;if(!m.hidden)loadModels();};
+$('model-pill').onclick=e=>{e.stopPropagation();const m=$('model-menu');m.hidden=!m.hidden;
+  if(!m.hidden)loadClaudeEscalation().then(()=>loadModels());};
 document.addEventListener('click',e=>{if(!e.target.closest('.modelwrap'))$('model-menu').hidden=true;});
 loadModels();setInterval(loadModels,30000);
 
@@ -2187,6 +2333,59 @@ $('send').onclick=()=>sendMsg();
 $('input').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMsg();}});
 $('input').addEventListener('input',function(){this.style.height='auto';this.style.height=Math.min(this.scrollHeight,140)+'px';});
 
+// ---- quick-action chips: keep the cluster to two tidy rows ---------------
+// The set is dynamic (/api/actions, plus aux_clip appends a "Clipboard" chip
+// after its own boot), so measure offsetTop rather than hard-coding a count.
+// Anything that lands on row 3+ hides behind a "+N" chip that expands in place.
+// The "+N" chip itself occupies width, so re-check after inserting it and give
+// back one more chip's worth of room until it fits on row 2.
+let actionsExpanded=false;
+function fitActionChips(){
+  const box=$('actions'); if(!box) return;
+  const more=box.querySelector('.chip-more'); if(more)more.remove();
+  const chips=[].slice.call(box.children).filter(c=>c.classList&&c.classList.contains('chip'));
+  if(!chips.length)return;
+  chips.forEach(c=>{c.hidden=false;});
+  if(box.offsetWidth===0)return;              // not laid out (full-chat hides .actions)
+  const rows=()=>{const t=[];chips.forEach(c=>{if(!c.hidden&&t.indexOf(c.offsetTop)<0)t.push(c.offsetTop);});return t.sort((a,b)=>a-b);};
+  const mk=(txt,fn)=>{const b=document.createElement('button');b.className='chip chip-more';
+    b.type='button';b.textContent=txt;b.onclick=fn;box.appendChild(b);return b;};
+  if(actionsExpanded){
+    mk('Less',()=>{actionsExpanded=false;fitActionChips();});
+    return;
+  }
+  if(rows().length<=2)return;
+  // hide from the first row-3 chip onward, then make room for the "+N" pill
+  let cut=chips.length;
+  const third=rows()[2];
+  for(let i=0;i<chips.length;i++){if(chips[i].offsetTop>=third){cut=i;break;}}
+  for(let guard=0;guard<chips.length;guard++){
+    for(let i=0;i<chips.length;i++)chips[i].hidden=(i>=cut);
+    const b=mk('+'+(chips.length-cut),()=>{actionsExpanded=true;fitActionChips();});
+    const tops=rows();                        // rows() ignores hidden chips
+    if(b.offsetTop<=tops[Math.min(1,tops.length-1)])return;   // pill fits on row 1 or 2
+    b.remove();
+    if(cut<=1)break;                          // never collapse to nothing
+    cut--;
+  }
+}
+window.fitActionChips=fitActionChips;
+// Re-fit on WIDTH changes only. The composer lives in three different column
+// widths (Hub split · full chat · re-parented into the Agent stream), and a
+// window-resize listener alone misses the re-parent. Ignoring height changes
+// is what stops the observer from re-triggering on its own hide/show work.
+try{
+  let __chipW=0;
+  new ResizeObserver(es=>{
+    const w=Math.round(es[0].contentRect.width);
+    if(!w||w===__chipW)return;
+    __chipW=w; fitActionChips();
+  }).observe($('actions'));
+}catch(e){
+  addEventListener('resize',()=>{clearTimeout(window.__chipFit);
+    window.__chipFit=setTimeout(fitActionChips,150);});
+}
+
 (async()=>{
   const d=await (await fetch('/api/actions')).json();
   window.QUICK_ACTIONS=d.actions||[];
@@ -2195,6 +2394,7 @@ $('input').addEventListener('input',function(){this.style.height='auto';this.sty
     c.onclick=()=>sendMsg(a.prompt);
     $('actions').appendChild(c);
   }
+  fitActionChips();
   if((document.querySelector('.deck').dataset.chat||'')==='full')renderChatSide();
 })();
 // Default to a FRESH conversation whenever the tool opens (past chats stay
@@ -2226,5 +2426,6 @@ $('input').addEventListener('input',function(){this.style.height='auto';this.sty
 <script src="/aux_agent.js"></script>
 <script src="/aux_topbar.js"></script>
 <script src="/aux_newsdesk.js"></script>
+<script src="/aux_update.js"></script>
 </body>
 </html>

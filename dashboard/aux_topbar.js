@@ -15,21 +15,38 @@
   function css() {
     return '<style>' +
       '.topchips{display:inline-flex;align-items:center;gap:6px;margin:0 6px}' +
-      '.topchip{display:inline-flex;align-items:center;gap:5px;font-size:12px;line-height:1;' +
-        'padding:5px 9px;border-radius:999px;color:inherit;' +
-        'background:rgba(255,255,255,.05);border:1px solid var(--hair,rgba(255,255,255,.10));' +
-        '-webkit-backdrop-filter:blur(8px) saturate(1.2);backdrop-filter:blur(8px) saturate(1.2);white-space:nowrap}' +
+      // Mirror index.html's .pill exactly — these sit immediately left of the
+      // model pill and must read as the same control family. The old rule used
+      // var(--hair, …) (no such token; the real one is --hairline) so the
+      // fallback rgba(255,255,255,.10) border and the rgba(255,255,255,.05)
+      // background were BOTH dark-only: in light mode the chips had no visible
+      // surface at all.
+      '.topchip{display:inline-flex;align-items:center;gap:6px;font-size:12px;line-height:1;' +
+        'padding:5px 11px;border-radius:99px;color:var(--muted);' +
+        'background:var(--glass-2);border:1px solid var(--hairline);' +
+        '-webkit-backdrop-filter:blur(8px) saturate(1.2);backdrop-filter:blur(8px) saturate(1.2);white-space:nowrap;' +
+        'transition-property:background-color,border-color,color,opacity;transition-duration:150ms;' +
+        'transition-timing-function:ease-out}' +
       '.topchip svg{opacity:.7;flex:0 0 auto}' +
-      '.topchip b{font-weight:600;font-variant-numeric:tabular-nums}' +
+      '.topchip b{font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}' +
       '.topchip .mut{color:var(--muted);font-size:11px}' +
       '.topchip[hidden]{display:none}' +
+      // escalation OFF: the chip stays but goes quiet — it is reporting a
+      // state, not a live number worth reading.
+      '.topchip.is-off{opacity:.7}' +
+      '.topchip.is-off b{font-weight:500;color:var(--faint)}' +
       '@media (max-width:900px){.topchips .tc-city,.topchips .tc-lbl{display:none}}' +
       '@media (max-width:700px){.topchips{display:none}}' +
       '</style>';
   }
 
-  function pad(n) { return (n < 10 ? "0" : "") + n; }
-  function mmddyyyy(d) { return pad(d.getMonth() + 1) + "/" + pad(d.getDate()) + "/" + d.getFullYear(); }
+  // The header greeting says "Thursday, September 3" and the clock widget says
+  // "Thursday, Sep 3"; a third format ("09/03/2026") on the same screen just
+  // reads as noise. Match the clock card's family, one size shorter.
+  function shortDate(d) {
+    try { return d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" }); }
+    catch (e) { return d.toDateString(); }
+  }
 
   var host = null;
   function ensure() {
@@ -54,7 +71,7 @@
     var h = ensure(); if (!h) return;
     var d = new Date();
     var el = h.querySelector(".tc-date");
-    if (el) el.textContent = mmddyyyy(d);
+    if (el) el.textContent = shortDate(d);
     var chip = h.querySelector("#tc-date");
     if (chip) chip.title = d.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric", year: "numeric" });
   }
@@ -73,25 +90,57 @@
         wc.hidden = false;
       } else { wc.hidden = true; }
     }
-    var cc = h.querySelector("#tc-claude");
-    if (cc) {
-      if (c && c.available && (c.pct != null || c.msgs != null)) {
-        cc.querySelector(".tc-pct").textContent =
-          (c.pct != null) ? (c.pct + "%") : (c.msgs != null ? c.msgs + " msg" : "--");
-        var tip = [];
-        if (c.cost != null) tip.push("$" + (Math.round(c.cost * 100) / 100));
-        if (c.msgs != null) tip.push(c.msgs + " msgs");
-        if (c.reset_in != null) {
-          var hh = Math.floor(c.reset_in / 3600), mm = Math.round((c.reset_in % 3600) / 60);
-          tip.push("resets in " + (hh ? hh + "h " : "") + mm + "m");
-        }
-        cc.title = "Claude usage" + (tip.length ? " — " + tip.join(" · ") : "");
-        cc.hidden = false;
-      } else { cc.hidden = true; }
-    }
+    lastClaude = c || null;
+    renderClaude();
   }
 
-  function start() { renderDate(); poll(); setInterval(renderDate, 60000); setInterval(poll, 60000); }
+  // Last /api/topbar claude payload + the escalation master switch, so the
+  // chip can repaint on the event without waiting for the 60s poll.
+  var lastClaude = null, escOff = false;
+
+  function renderClaude() {
+    var h = ensure(); if (!h) return;
+    var cc = h.querySelector("#tc-claude"); if (!cc) return;
+    var c = lastClaude;
+    if (!(c && c.available && (c.pct != null || c.msgs != null))) { cc.hidden = true; return; }
+    if (escOff) {
+      // Escalation is off: the usage number is stale trivia — say the thing
+      // that actually changes what the assistant will do.
+      cc.classList.add("is-off");
+      cc.querySelector(".tc-pct").textContent = "· off";
+      cc.title = "Claude escalation is off";
+      cc.hidden = false;
+      return;
+    }
+    cc.classList.remove("is-off");
+    cc.querySelector(".tc-pct").textContent =
+      (c.pct != null) ? (c.pct + "%") : (c.msgs != null ? c.msgs + " msg" : "--");
+    var tip = [];
+    if (c.cost != null) tip.push("$" + (Math.round(c.cost * 100) / 100));
+    if (c.msgs != null) tip.push(c.msgs + " msgs");
+    if (c.reset_in != null) {
+      var hh = Math.floor(c.reset_in / 3600), mm = Math.round((c.reset_in % 3600) / 60);
+      tip.push("resets in " + (hh ? hh + "h " : "") + mm + "m");
+    }
+    cc.title = "Claude usage" + (tip.length ? " — " + tip.join(" · ") : "");
+    cc.hidden = false;
+  }
+
+  function start() {
+    renderDate(); poll();
+    // index.html owns the escalation state and broadcasts every change; if the
+    // backend has no switch the event never carries available:false-with-off,
+    // so the chip simply keeps its old behaviour.
+    try {
+      window.addEventListener("hermes:claude-escalation", function (ev) {
+        var det = (ev && ev.detail) || {};
+        escOff = (det.available !== false) && (det.enabled === false);
+        renderClaude();
+      });
+      if (typeof window.claudeEscalationState === "function") escOff = window.claudeEscalationState() === false;
+    } catch (e) {}
+    setInterval(renderDate, 60000); setInterval(poll, 60000);
+  }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
   else start();
 })();

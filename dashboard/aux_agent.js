@@ -272,7 +272,17 @@
       /* Screen rail = watch-only: hide the desktop panel's task-compose card */
       "#agent-rail #desk-ctl-card{display:none}",
       "#agent-rail #recorder-card{border:none;background:transparent;box-shadow:none}",
-      "#agent-rail #recorder-card>h2{font-size:12.5px;padding:0 2px 6px}",
+      // 11.5px + a tighter tracking keeps "FLIGHT RECORDER" + the count on one
+      // line with room to spare at 296px (12.5px/.09em ran flush to the edge).
+      "#agent-rail #recorder-card>h2{font-size:11.5px;letter-spacing:.06em;padding:0 2px 6px}",
+      // The rail is 296px of usable width — the SOURCE column ("agent"/"claude")
+      // is the least load-bearing cell, and dropping it (plus a tighter gap) is
+      // what buys the tool name enough room to never collide with the badge.
+      // The full-width Console view keeps it.
+      "#agent-rail #recorder-card .rec-src{display:none}",
+      "#agent-rail #recorder-card .rec-row{gap:8px;padding:7px 4px}",
+      "#agent-rail #recorder-card .rec-when{width:46px}",
+      "#agent-rail #recorder-card .rec-undo{padding:4px 8px}",
       "#agent-rail .desk-card{margin-bottom:8px}",
       /* red LIVE dot on the Screen tab while computer_use runs */
       '#agent-rail .railtabs b[data-rail="screen"].live .udot{display:block;background:var(--bad);'
@@ -313,6 +323,7 @@
 
       /* on-demand escalate button under a bot reply + the deep-answer card */
       ".esc-row{margin-top:6px}",
+      ".esc-row[hidden]{display:none}",   // master switch off — see escSyncButtons
       ".esc-btn{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;cursor:pointer;"
         + "padding:4px 10px;border-radius:99px;color:var(--claude);background:color-mix(in srgb,var(--claude) 12%,transparent);"
         + "border:1px solid color-mix(in srgb,var(--claude) 28%,transparent)}",
@@ -1138,6 +1149,31 @@
   // ==========================================================================
   // On-demand "Escalate to Claude" on a normal bot reply (display/answer-only)
   // ==========================================================================
+  // ---- "Escalate to Claude" master switch (index.html owns the state) ------
+  // When escalation is off the manual button must not be offered — pressing it
+  // would send the question to Claude anyway, which is exactly what the switch
+  // says will not happen. `null`/absent (older backend, no route) means "no
+  // switch exists", and we behave exactly as before.
+  var escEnabled = true;
+  function escSyncButtons() {
+    var msgs = $("msgs"); if (!msgs) return;
+    var rows = msgs.querySelectorAll(".esc-row");
+    for (var i = 0; i < rows.length; i++) rows[i].hidden = !escEnabled;
+  }
+  function escReadState() {
+    try {
+      if (typeof window.claudeEscalationState === "function") escEnabled = window.claudeEscalationState() !== false;
+    } catch (e) {}
+  }
+  try {
+    escReadState();
+    window.addEventListener("hermes:claude-escalation", function (ev) {
+      var det = (ev && ev.detail) || {};
+      escEnabled = !(det.available !== false && det.enabled === false);
+      escSyncButtons();                       // hides immediately / re-shows
+    });
+  } catch (e) {}
+
   function decorateEscalate() {
     var msgs = $("msgs"); if (!msgs) return;
     var bots = msgs.querySelectorAll(".bubble.bot");
@@ -1162,6 +1198,7 @@
     }
     var row = document.createElement("div");
     row.className = "esc-row";
+    row.hidden = !escEnabled;      // built either way so the event can un-hide
     var btn = document.createElement("button");
     btn.className = "esc-btn";
     btn.innerHTML = svg("bridge") + "Escalate to Claude";

@@ -126,12 +126,12 @@
       ".wt-meter .wt-mtrack{height:5px;border-radius:99px;background:var(--glass-2);overflow:hidden;border:1px solid var(--hairline)}",
       ".wt-meter .wt-mfill{height:100%;border-radius:99px;background:var(--ok)}",
       ".wt-meter .wt-mtxt{font-size:9.5px;color:var(--faint);margin-top:3px;text-align:center;letter-spacing:.02em}",
-      ".wt-tog{position:relative;flex:0 0 auto;width:38px;height:22px;border-radius:99px;cursor:pointer;",
-      "background:var(--glass-2);border:1px solid var(--hairline);transition:background .18s}",
-      ".wt-tog .wt-knob{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;",
-      "background:var(--ink);box-shadow:0 1px 3px -1px var(--cast);transition:transform .18s}",
-      ".wt-tog.on{background:color-mix(in srgb,var(--ok) 42%,transparent)}",
-      ".wt-tog.on .wt-knob{transform:translateX(16px)}",
+      // .wt-tog is now the SAME switch as aux_prefs' .pf-tog — the canonical
+      // rule (38x22, 18px knob, on = --iris, knob = --iris-ink, 150ms on
+      // background-color/transform only) lives in index.html. This module used
+      // to paint it green on a 16px knob at 180ms; re-declaring anything here
+      // would win on source order and re-fork the two implementations.
+
       ".wt-icobtn{flex:0 0 auto;width:26px;height:26px;border-radius:7px;border:1px solid var(--hairline);",
       "background:var(--glass-2);color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;",
       "justify-content:center;padding:0}",
@@ -168,7 +168,7 @@
       "background-size:200% 100%;animation:wtsh 1.3s linear infinite}",
       "@keyframes wtsh{0%{background-position:200% 0}100%{background-position:-200% 0}}",
       ".wt-glyph{display:block}",
-      "@media (prefers-reduced-motion:reduce){.wt-tog .wt-knob,.wt-tog{transition:none}.wt-skel{animation:none}}",
+      "@media (prefers-reduced-motion:reduce){.wt-skel{animation:none}}",   // toggle: see index.html
     ].join("\n");
     (d.head || d.body || d.documentElement).appendChild(s);
   }

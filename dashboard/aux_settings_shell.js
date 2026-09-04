@@ -208,6 +208,17 @@
       ".set-body{display:flex;flex-direction:column;gap:15px;min-width:0}",
       // relocated legacy cards: neutralize the 2-col grid spans, go full width
       ".set-body>.set-legacy{grid-column:auto!important;width:auto;max-width:none;margin:0}",
+      // native row kit — a .set-block counts as a card for markEmpty(), and
+      // .set-row-label is what buildSearchIndex() reads for the search index.
+      ".set-block{border:1px solid var(--hairline);border-radius:var(--radius-sm);",
+      "background:var(--glass-2);padding:2px 14px;order:-1}",
+      ".set-row{display:flex;align-items:center;gap:14px;padding:13px 0;min-width:0}",
+      ".set-row+.set-row{border-top:1px solid var(--hairline)}",
+      ".set-row-text{flex:1 1 auto;min-width:0}",
+      ".set-row-label{font-size:13px;font-weight:620;color:var(--ink)}",
+      ".set-row-sub{font-size:11.5px;color:var(--muted);line-height:1.45;margin-top:2px;text-wrap:pretty}",
+      ".set-row.is-busy{opacity:.55;pointer-events:none}",
+      ".set-row-err{font-size:11px;color:var(--bad);margin-top:3px}",
       // empty placeholder
       ".set-empty{display:flex;flex-direction:column;align-items:center;gap:10px;padding:46px 20px;text-align:center;",
       "border:1px dashed var(--hairline);border-radius:16px;color:var(--muted)}",
@@ -419,12 +430,16 @@
       var anchor = null;
       try { anchor = slot.querySelector ? slot.querySelector("[data-legacy-slot]") : null; } catch (e) { anchor = null; }
       try {
-        if (anchor && slot.insertBefore) slot.insertBefore(n, anchor);
+        // anchor lives inside .set-body, not directly under the <section>:
+        // insertBefore on the section threw NotFoundError (swallowed below),
+        // so no card ever relocated and every panel read "no cards yet".
+        if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(n, anchor);
         else slot.appendChild(n);
         if (n.classList) n.classList.add("set-legacy");
       } catch (e) {}
     });
 
+    try { escEnsureRow(); } catch (e) {}   // stays the first row in Claude Bridge
     markEmpty();
     try { buildSearchIndex(); } catch (e) {}
   }
@@ -662,6 +677,84 @@
     setTimeout(run, 16);
   }
 
+  // ==========================================================================
+  // Claude Bridge > "Escalate to Claude" — the master switch, first row in the
+  // panel.  index.html owns the state (GET/POST /api/claude/escalate) and
+  // broadcasts hermes:claude-escalation after every successful POST; we render
+  // that state and post flips back through the same helper, so the model menu,
+  // the topbar chip and aux_agent's per-reply button all stay in step.
+  // The route ships in parallel: when it is absent the row is not rendered at
+  // all rather than showing a control that cannot be honoured.
+  // ==========================================================================
+  function escState() {
+    var w = win();
+    try { return (typeof w.claudeEscalationState === "function") ? w.claudeEscalationState() : null; }
+    catch (e) { return null; }
+  }
+
+  function escPaint(on) {
+    var t = byId("set-esc-tog"); if (!t) return;
+    if (t.classList) t.classList.toggle("on", !!on);
+    try { t.setAttribute("aria-checked", on ? "true" : "false"); } catch (e) {}
+    var sub = byId("set-esc-sub");
+    if (sub) sub.textContent = on
+      ? "Hard questions also go to Claude for deeper reasoning; everything else stays on the local model."
+      : "Local model only — nothing leaves the Mac. Turn this on to let hard questions reach Claude.";
+  }
+
+  async function escFlip() {
+    var w = win(), row = byId("set-esc-row"), err = byId("set-esc-err");
+    if (!row || typeof w.setClaudeEscalation !== "function") return;
+    var next = escState() !== true;
+    if (row.classList) row.classList.add("is-busy");
+    if (err) err.textContent = "";
+    var ok = false;
+    try { ok = await w.setClaudeEscalation(next); } catch (e) { ok = false; }
+    if (row.classList) row.classList.remove("is-busy");
+    if (ok) escPaint(next);
+    else { escPaint(escState() === true); if (err) err.textContent = "Could not reach the bridge — nothing changed."; }
+  }
+
+  function escEnsureRow() {
+    var d = doc(); if (!d) return;
+    var panel = byId("sec-bridge"); if (!panel) return;
+    var body = panel.querySelector(".set-body"); if (!body) return;
+    var st = escState();
+    var block = byId("set-esc-block");
+    if (st === null) {                       // backend has no switch — no row
+      if (block && block.parentNode) { block.parentNode.removeChild(block); markEmpty(); }
+      return;
+    }
+    if (!block) {
+      block = d.createElement("div");
+      block.className = "set-block";
+      block.id = "set-esc-block";
+      block.innerHTML =
+        '<div class="set-row" id="set-esc-row">' +
+          '<div class="set-row-text"><div class="set-row-label">Escalate to Claude</div>' +
+          '<div class="set-row-sub" id="set-esc-sub"></div>' +
+          '<div class="set-row-err" id="set-esc-err"></div></div>' +
+          '<span class="wt-tog" id="set-esc-tog" role="switch" tabindex="0" aria-checked="false" ' +
+          'aria-label="Escalate to Claude"><span class="wt-knob"></span></span>' +
+        "</div>";
+      // FIRST thing in the panel — relocated legacy cards also insert before
+      // [data-legacy-slot], i.e. after us, and .set-block{order:-1} keeps us
+      // on top even if a later pass re-appends something above.
+      var anchor = body.querySelector("[data-legacy-slot]");
+      if (anchor) body.insertBefore(block, anchor); else body.appendChild(block);
+      var tog = byId("set-esc-tog");
+      if (tog) {
+        tog.addEventListener("click", escFlip);
+        tog.addEventListener("keydown", function (ev) {
+          if (ev.key === "Enter" || ev.key === " " || ev.key === "Spacebar") { ev.preventDefault(); escFlip(); }
+        });
+      }
+      try { buildSearchIndex(); } catch (e) {}
+    }
+    escPaint(st === true);
+    markEmpty();
+  }
+
   function install() {
     var w = win();
     // wrap the whole mindExtras chain — our relocate runs AFTER every module.
@@ -690,6 +783,15 @@
 
     // initial build + relocation (shell present from first paint) + hash entry
     try { if (host) { ensureShell(host); runRelocate(); } } catch (e) {}
+    // Claude-escalation row: render whatever state index.html already has, then
+    // stay live on the broadcast (which also fires after its own first fetch).
+    try {
+      escEnsureRow();
+      if (w.addEventListener) w.addEventListener("hermes:claude-escalation", function () {
+        try { escEnsureRow(); } catch (e) {}
+      });
+      if (typeof w.loadClaudeEscalation === "function") w.loadClaudeEscalation();
+    } catch (e) {}
     try { applyHash(); } catch (e) {}
     // set the initial indicator/active state
     try {

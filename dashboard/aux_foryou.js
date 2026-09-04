@@ -80,6 +80,19 @@
     }
   }
 
+  // ---- one-time CSS (headline link grammar, matched to .news-item a) --------
+  function fyCss() {
+    var d = (typeof document !== "undefined") ? document : null;
+    if (!d || d.getElementById("fycss")) return;
+    var st = d.createElement("style");
+    st.id = "fycss";
+    st.textContent =
+      ".fy-title{color:var(--ink);text-decoration:none;font-weight:500;line-height:1.35;" +
+      "transition-property:color;transition-duration:150ms;transition-timing-function:ease-out}" +
+      ".fy-title:hover{color:var(--wac,var(--iris));text-decoration:underline;text-underline-offset:2px}";
+    (d.head || d.documentElement).appendChild(st);
+  }
+
   function scoreBar(score, accent) {
     if (score == null) return "";
     var pct = Math.max(4, Math.min(100, Math.round(score * 100)));
@@ -88,8 +101,15 @@
   }
 
   function moveCard(mv, compact) {
+    fyCss();
     var h = '<div class="fy-move" style="padding:8px 0;border-bottom:1px solid var(--hairline)">';
-    h += '<div style="min-width:0"><a href="#" data-url="' + E(mv.url || "") + '" style="font-weight:600;font-size:' + (compact ? "12px" : "13px") + ';line-height:1.35">' + E(mv.title || "(untitled)") + "</a></div>";
+    // Plain ink, no underline — these are headlines in a card, exactly like
+    // Tech News / News Feed (.news-item a). They were falling through to the
+    // UA default link style (blue + underline), which made For You the only
+    // widget on the deck that looked like a web page. Still clickable; the
+    // underline comes back on hover so the affordance is not lost.
+    h += '<div style="min-width:0"><a class="fy-title" href="#" data-url="' + E(mv.url || "") +
+      '" style="font-size:' + (compact ? "12.5px" : "13px") + '">' + E(mv.title || "(untitled)") + "</a></div>";
     if (mv.why_you) {
       h += '<div class="w-sub" style="font-size:' + (compact ? "10.5px" : "11.5px") + ';line-height:1.45;margin-top:2px;color:var(--muted)">' + E(mv.why_you) + "</div>";
     }

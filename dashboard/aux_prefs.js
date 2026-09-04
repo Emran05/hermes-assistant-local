@@ -113,12 +113,13 @@
         ".pf-row .txt{min-width:0;flex:1}",
         ".pf-row .nm{font-size:12.5px;font-weight:600}",
         ".pf-row .rm2{font-size:10.5px;color:var(--faint)}",
-        ".pf-tog{margin-left:auto;flex:none;width:38px;height:22px;border-radius:99px;background:var(--hairline);" +
-          "position:relative;transition:background .2s}",
-        ".pf-tog i{position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;" +
-          "box-shadow:0 1px 3px rgba(0,0,0,.35);transition:transform .2s}",
-        ".pf-tog.on{background:var(--iris)}",
-        ".pf-tog.on i{transform:translateX(16px)}",
+        // .pf-tog geometry/colour/motion now lives in index.html next to
+        // .wt-tog — ONE switch, two legacy class names. Re-declaring it here
+        // would silently win (an aux <style> is appended after the inline one),
+        // which is exactly how the two implementations drifted apart: this one
+        // had a hardcoded #fff knob and 200ms, aux_watchtower's was green/180ms.
+        // Anything genuinely local to the prefs popover goes below.
+        ".pf-tog{margin-left:auto}",
         ".pf-power{display:flex;align-items:center;gap:10px;padding:9px 8px;border-radius:10px;cursor:pointer;" +
           "transition:background .15s;color:var(--warn)}",
         ".pf-power:hover{background:var(--chip)}",
@@ -240,7 +241,11 @@
       if (togEl) { try { togEl.classList.toggle("on", reduceOn()); } catch (e) {} }
       menu.hidden = false;
       if (HAS_ANIM && !LOWMO) {
-        try { animate(menu, { opacity: [0, 1], transform: ["translateY(-6px) scale(.98)", "none"] }, { duration: 0.2, easing: SPR }); } catch (e) {}
+        // NB: the end keyframe must be an explicit identity, not "none" —
+        // Motion One decomposes a scale()-carrying pair against "none" into a
+        // ZERO matrix, which rendered this whole menu at 0x0 (the gear looked
+        // dead). Translate-only pairs elsewhere in the app are unaffected.
+        try { animate(menu, { opacity: [0, 1], transform: ["translateY(-6px) scale(.98)", "translateY(0px) scale(1)"] }, { duration: 0.2, easing: SPR }); } catch (e) {}
       }
       poll();
       try { pollTimer = setInterval(poll, 4000); } catch (e) {}
@@ -252,7 +257,7 @@
       var hide = function () { try { menu.hidden = true; } catch (e) {} };
       if (HAS_ANIM && !LOWMO) {
         var a;
-        try { a = animate(menu, { opacity: [1, 0], transform: ["none", "translateY(-6px) scale(.98)"] }, { duration: 0.15, easing: SPR }); } catch (e) {}
+        try { a = animate(menu, { opacity: [1, 0], transform: ["translateY(0px) scale(1)", "translateY(-6px) scale(.98)"] }, { duration: 0.15, easing: SPR }); } catch (e) {}
         var fin = a && a.finished ? a.finished : (a && a.then ? a : null);
         if (fin && fin.then) fin.then(hide, hide); else setTimeout(hide, 160);
       } else hide();

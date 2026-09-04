@@ -70,12 +70,33 @@ function recKindIco(a){
   return recIco(a.kind || "other");
 }
 
+// Kinds that change NOTHING. Labelling a web_search or a browser_snapshot
+// "irreversible" is technically true and completely misleading — there is
+// nothing to undo because nothing happened. aux_recorder.py now classifies
+// these as reversible="n/a"; we also key off `kind` so rows already written to
+// recorder.db with the old "no" render correctly WITHOUT a service restart.
+var REC_READONLY = {read: 1, net: 1, agent: 1};
+// Same list as aux_recorder.py's browser_* TOOL_KIND entries. Keyed by tool as
+// well as kind so rows already in recorder.db (written when these classified
+// as "other") render correctly the moment the page reloads, without waiting
+// for the service restart that runs the db migration. Tools that DRIVE the
+// page (browser_click/_fill/_type/_press/_dialog/_close) are deliberately NOT
+// here — they change something and keep their honest "irreversible".
+var REC_READONLY_TOOLS = {
+  browser_snapshot: 1, browser_console: 1, browser_screenshot: 1,
+  browser_take_screenshot: 1, browser_get_images: 1,
+  browser_navigate: 1, browser_back: 1
+};
+
 function recRevChip(a){
   if (a.status === "undone")
     return '<span class="rchip undone">undone</span>';
+  if (a.reversible === "n/a" || REC_READONLY[a.kind] || REC_READONLY_TOOLS[a.tool])
+    return "";                                                     // no badge
   var r = a.reversible;
   if (r === "yes")     return '<span class="rchip ok">reversible</span>';
-  if (r === "partial") return '<span class="rchip warn">partial &mdash; files only</span>';
+  // the full phrase is ~130px of a 268px rail row — keep it in the tooltip
+  if (r === "partial") return '<span class="rchip warn" title="partial &mdash; files only">partial</span>';
   return '<span class="rchip bad">irreversible</span>';
 }
 
@@ -105,7 +126,10 @@ function renderRecorderRows(actions){
          '<span class="rec-ic">' + recKindIco(a) + '</span>' +
          '<div class="rec-main">' +
            '<div class="rec-top">' +
-             '<span class="rec-tool">' + recE(a.tool) + '</span>' +
+             // title: in the 296px Agent rail an undo-able row can ellipsise the
+             // name ("write_file" -> "write…"); hover gives it back without
+             // opening the detail pane.
+             '<span class="rec-tool" title="' + recE(a.tool) + '">' + recE(a.tool) + '</span>' +
              '<span class="rec-tgt' + (undone ? " struck" : "") + '">' + tgt + '</span>' +
            '</div>' +
          '</div>' +
@@ -125,18 +149,35 @@ function recInjectCss(){
   var s = document.createElement("style");
   s.id = "reccss";
   s.textContent = [
-    '#recorder-card .rec-head{display:flex;align-items:center;gap:8px;margin-bottom:2px}',
-    '#recorder-card .rec-count{font-size:11px;color:var(--muted);margin-left:2px}',
-    '#recorder-card .rec-filters{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 6px}',
-    '.rec-fchip{font-size:11px;padding:4px 10px;border-radius:999px;border:1px solid var(--hairline);' +
-      'background:var(--chip);color:var(--muted);cursor:pointer;user-select:none}',
+    // Header is ONE line in the 320px Agent rail: the title never wraps and the
+    // count sits right-aligned as quiet meta (it inherits the card h2's
+    // uppercase/letter-spacing otherwise, which is what made it look like a
+    // second title and wrap "FLIGHT RECORDER / 0 REVERSIBLE · 0 UNDONE").
+    '#recorder-card .rec-head{display:flex;align-items:center;gap:7px;margin-bottom:2px;' +
+      'flex-wrap:nowrap;white-space:nowrap;min-width:0}',
+    '#recorder-card .rec-head .ic{flex:none}',
+    '#recorder-card .rec-count{margin-left:auto;flex:none;font-size:10px;color:var(--faint);' +
+      'font-weight:500;text-transform:none;letter-spacing:.01em;white-space:nowrap;' +
+      'font-variant-numeric:tabular-nums}',
+    // Filters stay on ONE row — they scroll horizontally instead of wrapping
+    // into a second/third line (page scrollbars are globally hidden, so this
+    // reads as a quiet overflow rail rather than a scroller).
+    '#recorder-card .rec-filters{display:flex;flex-wrap:nowrap;gap:5px;margin:10px 0 6px;' +
+      'overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:none;padding-bottom:1px}',
+    '#recorder-card .rec-filters::-webkit-scrollbar{display:none}',
+    '.rec-fchip{font-size:10.5px;padding:3px 7px;border-radius:999px;border:1px solid var(--hairline);' +
+      'background:var(--chip);color:var(--muted);cursor:pointer;user-select:none;' +
+      'white-space:nowrap;flex:0 0 auto}',
     '.rec-fchip.on{background:var(--iris);border-color:var(--iris);color:var(--iris-ink);font-weight:600}',
     '.rec-banner{font-size:11.5px;line-height:1.5;color:var(--ink);background:color-mix(in srgb,var(--warn) 16%,transparent);' +
       'border:1px solid color-mix(in srgb,var(--warn) 45%,transparent);border-radius:10px;padding:9px 11px;margin:4px 0 6px;user-select:text}',
     '.rec-banner code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:11px;user-select:all}',
     '#rec-list{display:flex;flex-direction:column;gap:2px;margin-top:4px}',
+    // overflow:hidden is the backstop for the original bug: whatever the mix of
+    // badge/time/Undo, a long name now clips at the row edge instead of being
+    // painted on top of the cell next to it.
     '.rec-row{display:flex;align-items:center;gap:10px;padding:8px 6px;border-radius:9px;cursor:pointer;' +
-      'border-bottom:1px solid var(--hairline)}',
+      'border-bottom:1px solid var(--hairline);overflow:hidden}',
     '.rec-row:hover{background:var(--glass-2)}',
     '.rec-ic{width:26px;height:26px;flex:none;display:inline-flex;align-items:center;justify-content:center;color:var(--iris)}',
     '.rec-ic .ric{width:19px;height:19px}',
@@ -144,21 +185,35 @@ function recInjectCss(){
     '.rec-row[data-kind="computer"] .rec-ic{color:var(--bad)}',
     '.rec-row[data-kind="read"] .rec-ic,.rec-row[data-kind="net"] .rec-ic,' +
       '.rec-row[data-kind="agent"] .rec-ic{color:var(--faint)}',
-    '.rec-main{flex:1;min-width:0}',
+    // The tool name used to be an unshrinkable nowrap span inside a min-width:0
+    // parent with no overflow guard, so "browser_console" simply painted OVER
+    // the badge to its right. Now: the text column owns the free space and
+    // ellipsises, the badge/meta columns are flex:none.
+    '.rec-main{flex:1 1 auto;min-width:44px;overflow:hidden}',   // never collapses to nothing
     '.rec-top{display:flex;align-items:baseline;gap:8px;min-width:0}',
-    '.rec-tool{font-weight:660;font-size:12.5px;white-space:nowrap}',
+    // flex-shrink:0 + max-width:100% => the target path gives up its width
+    // first and the tool name only ellipsises when it alone overflows the row
+    // (with 0 1 auto both shrank proportionally and "web_search" became "we…").
+    '.rec-tool{font-weight:660;font-size:12.5px;white-space:nowrap;' +
+      'flex:0 0 auto;max-width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis}',
     '.rec-tgt{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:11.5px;color:var(--muted);' +
-      'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}',
+      'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 0;min-width:0}',
     '.rec-tgt.struck{text-decoration:line-through;opacity:.7}',
     '.rec-src{font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--faint);' +
-      'flex:none;width:52px;text-align:right}',
-    '.rchip{font-size:10px;font-weight:600;padding:3px 8px;border-radius:999px;white-space:nowrap;flex:none}',
+      'flex:0 1 auto;max-width:52px;min-width:0;text-align:right;overflow:hidden;' +
+      'text-overflow:ellipsis;white-space:nowrap}',
+    // Empty meta cells were still eating a fixed column AND a 10px gap each —
+    // in the 296px Agent rail that left ~16px for the name, which is the real
+    // reason the tool name painted over the badge. Collapse them instead.
+    '.rec-src:empty,.rec-act:empty{display:none}',
+    '.rchip{font-size:10px;font-weight:600;padding:3px 8px;border-radius:999px;white-space:nowrap;flex:0 0 auto}',
     '.rchip.ok{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}',
     '.rchip.warn{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}',
     '.rchip.bad{background:color-mix(in srgb,var(--bad) 16%,transparent);color:var(--bad)}',
     '.rchip.undone{background:color-mix(in srgb,var(--iris) 20%,transparent);color:var(--iris)}',
-    '.rec-when{font-size:10.5px;color:var(--faint);flex:none;width:58px;text-align:right;white-space:nowrap}',
-    '.rec-act{flex:none;width:66px;text-align:right}',
+    '.rec-when{font-size:10.5px;color:var(--faint);flex:0 0 auto;width:58px;text-align:right;' +
+      'white-space:nowrap;font-variant-numeric:tabular-nums}',
+    '.rec-act{flex:0 0 auto;width:auto;min-width:0;text-align:right}',
     '.rec-undo{font-size:11px;font-weight:600;padding:4px 10px;border-radius:8px;cursor:pointer;' +
       'border:1px solid color-mix(in srgb,var(--iris) 55%,transparent);background:transparent;color:var(--iris)}',
     '.rec-undo:hover{background:color-mix(in srgb,var(--iris) 14%,transparent)}',

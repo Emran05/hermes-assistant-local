@@ -31,12 +31,18 @@
     try { return !!(W.matchMedia && matchMedia("(prefers-reduced-motion:reduce)").matches); }
     catch (e) { return false; }
   }
+  // Motion One's global animate() wants ONE keyframe object of arrays and a
+  // duration in SECONDS; the WAAPI fallback wants the same object but ms.
+  // The call sites used to pass a two-element keyframe ARRAY, which Motion One
+  // tried to write as style[0] — a real console error on every sheet open
+  // ("Failed to set an indexed property [0] on 'CSSStyleDeclaration'").
   function anim(node, frames, opts) {
     if (!node) return;
     if (RM()) return;
+    var o = opts || {}, ms = o.duration || 240;
     try {
-      if (typeof animate === "function") { animate(node, frames, opts); return; }
-      if (node.animate) node.animate(frames, opts);
+      if (typeof animate === "function") { animate(node, frames, { duration: ms / 1000, easing: o.easing }); return; }
+      if (node.animate) node.animate(frames, { duration: ms, easing: o.easing, fill: "both" });
     } catch (e) {}
   }
   function LS() { try { return W.localStorage || null; } catch (e) { return null; } }
@@ -70,46 +76,72 @@
   var IC_COPY = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
   var IC_CHECK = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
 
+  // ---- theme --------------------------------------------------------------
+  // The sheet used to hard-code a light palette + ONE @media(prefers-color-
+  // scheme:dark) override, so the app's own theme toggle (which sets
+  // data-theme on <html> and stores localStorage.hermes_theme) had no effect:
+  // dark-OS + light-app painted a dark sheet over a light dashboard. Everything
+  // below is expressed in the app's tokens instead, and FALLBACK_TOKENS is
+  // appended only when this file runs in a document that has none of its own
+  // (the menu-bar popover shell), following index.html's 4-block pattern so an
+  // explicit theme wins over the OS in BOTH directions (CLAUDE.md gotcha).
+  var _LIGHT = "--ink:#10131D;--muted:#565E72;--faint:#868DA1;--ground:#E7EAF3;" +
+    "--iris:#5B63E6;--iris-2:#7A6BEF;--iris-ink:#fff;--ok:#2E9E68;--warn:#B9821A;--bad:#D24C3C;" +
+    "--glass-2:rgba(255,255,255,.40);--edge:rgba(255,255,255,.85);--hairline:rgba(16,19,29,.10);" +
+    "--cast:rgba(24,28,48,.16);--field:rgba(255,255,255,.55);--field-edge:rgba(16,19,29,.12);" +
+    "--chip:rgba(255,255,255,.5);";
+  var _DARK = "--ink:#EDEFF7;--muted:#9AA2B6;--faint:#6A7186;--ground:#080A11;" +
+    "--iris:#98A2FF;--iris-2:#B3A7FF;--iris-ink:#0a0c14;--ok:#46D392;--warn:#F3BC55;--bad:#F27063;" +
+    "--glass-2:rgba(158,168,210,.07);--edge:rgba(205,215,255,.20);--hairline:rgba(200,210,255,.10);" +
+    "--cast:rgba(0,0,0,.55);--field:rgba(150,160,200,.12);--field-edge:rgba(200,210,255,.16);" +
+    "--chip:rgba(158,168,210,.14);";
+  var FALLBACK_TOKENS =
+    ":root{color-scheme:light dark;" + _LIGHT + "}" +
+    "@media(prefers-color-scheme:dark){:root{" + _DARK + "}}" +
+    ':root[data-theme="light"]{color-scheme:light;' + _LIGHT + "}" +
+    ':root[data-theme="dark"]{color-scheme:dark;' + _DARK + "}";
+
   var CSS = [
-    "#clip-scrim{position:fixed;inset:0;z-index:9000;background:rgba(6,8,17,.42);",
+    "#clip-scrim{position:fixed;inset:0;z-index:9000;background:color-mix(in srgb,var(--ground) 55%,transparent);",
     "backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);display:flex;align-items:center;justify-content:center;padding:24px}",
     "#clip-sheet{width:min(560px,94vw);max-height:min(78vh,720px);display:flex;flex-direction:column;",
-    "border-radius:18px;overflow:hidden;color:#0F172A;",
-    "background:rgba(255,255,255,.82);backdrop-filter:blur(26px) saturate(1.5);-webkit-backdrop-filter:blur(26px) saturate(1.5);",
-    "border:1px solid rgba(255,255,255,.55);box-shadow:0 24px 70px rgba(2,6,23,.34);transform:translateZ(0)}",
-    "@media(prefers-color-scheme:dark){#clip-sheet{color:#E7ECF5;background:rgba(20,24,34,.86);border-color:rgba(255,255,255,.09)}}",
-    "#clip-sheet .ch{display:flex;align-items:center;gap:9px;padding:14px 16px;border-bottom:1px solid rgba(120,130,150,.16)}",
+    "border-radius:var(--radius,18px);overflow:hidden;color:var(--ink);",
+    "background:color-mix(in srgb,var(--ground) 92%,transparent);backdrop-filter:blur(26px) saturate(1.5);-webkit-backdrop-filter:blur(26px) saturate(1.5);",
+    "border:1px solid var(--edge);box-shadow:0 24px 70px -12px var(--cast);transform:translateZ(0)}",
+    "#clip-sheet .ch{display:flex;align-items:center;gap:9px;padding:14px 16px;border-bottom:1px solid var(--hairline)}",
     "#clip-sheet .ch .ttl{font-weight:650;font-size:14px;letter-spacing:.1px}",
-    "#clip-sheet .ch .src{margin-left:auto;font-size:11.5px;opacity:.62}",
-    "#clip-sheet .cx{border:0;background:transparent;color:inherit;cursor:pointer;opacity:.6;padding:4px;border-radius:8px;display:flex}",
-    "#clip-sheet .cx:hover{opacity:1;background:rgba(120,130,150,.16)}",
+    "#clip-sheet .ch .src{margin-left:auto;font-size:11.5px;color:var(--muted)}",
+    "#clip-sheet .cx{border:0;background:transparent;color:var(--muted);cursor:pointer;padding:4px;border-radius:8px;display:flex;",
+    "transition-property:background-color,color;transition-duration:150ms;transition-timing-function:ease-out}",
+    "#clip-sheet .cx:hover{color:var(--ink);background:var(--chip)}",
     "#clip-sheet .body{padding:12px 16px;overflow:auto}",
-    "#clip-sheet .paste{width:100%;box-sizing:border-box;min-height:70px;resize:vertical;border-radius:10px;padding:9px 11px;",
-    "font:13px/1.5 -apple-system,BlinkMacSystemFont,sans-serif;border:1px solid rgba(120,130,150,.3);background:rgba(255,255,255,.5);color:inherit}",
-    "@media(prefers-color-scheme:dark){#clip-sheet .paste{background:rgba(0,0,0,.22)}}",
+    "#clip-sheet .paste{width:100%;box-sizing:border-box;min-height:70px;resize:vertical;border-radius:var(--radius-xs,10px);padding:9px 11px;",
+    "font:13px/1.5 -apple-system,BlinkMacSystemFont,sans-serif;border:1px solid var(--field-edge);background:var(--field);color:var(--ink)}",
     "#clip-sheet .chips{display:flex;flex-wrap:wrap;gap:7px;margin:12px 0 4px}",
-    "#clip-sheet .chip{border:1px solid rgba(120,130,150,.28);background:rgba(255,255,255,.35);color:inherit;cursor:pointer;",
-    "font-size:12.5px;font-weight:550;padding:6px 12px;border-radius:999px;transition:transform .12s,background .12s}",
-    "#clip-sheet .chip:hover{background:rgba(120,130,150,.14)}",
-    "#clip-sheet .chip.on{background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border-color:transparent}",
+    "#clip-sheet .chip{border:1px solid var(--hairline);background:var(--chip);color:var(--muted);cursor:pointer;",
+    "font-size:12.5px;font-weight:550;padding:6px 12px;border-radius:999px;",
+    "transition-property:transform,background-color,border-color,color;transition-duration:120ms;transition-timing-function:ease-out}",
+    "#clip-sheet .chip:hover{color:var(--ink);border-color:color-mix(in srgb,var(--iris) 45%,transparent)}",
+    "#clip-sheet .chip.on{background:linear-gradient(135deg,var(--iris),var(--iris-2));color:var(--iris-ink);border-color:transparent}",
     "#clip-sheet .opts{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 2px}",
-    "#clip-sheet .opts label{display:flex;align-items:center;gap:6px;font-size:12px;opacity:.85}",
-    "#clip-sheet select,#clip-sheet .langin{border:1px solid rgba(120,130,150,.3);background:rgba(255,255,255,.5);color:inherit;",
+    "#clip-sheet .opts label{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}",
+    "#clip-sheet select,#clip-sheet .langin{border:1px solid var(--field-edge);background:var(--field);color:var(--ink);",
     "border-radius:8px;padding:4px 8px;font:12px -apple-system,sans-serif}",
-    "@media(prefers-color-scheme:dark){#clip-sheet select,#clip-sheet .langin{background:rgba(0,0,0,.25)}}",
     "#clip-sheet .res{margin-top:12px;min-height:44px;border-radius:12px;padding:12px 13px;font:13px/1.6 -apple-system,BlinkMacSystemFont,sans-serif;",
-    "white-space:pre-wrap;word-break:break-word;background:rgba(120,130,150,.10);border:1px solid rgba(120,130,150,.16)}",
-    "#clip-sheet .res.hint{opacity:.55;font-style:italic}",
-    "#clip-sheet .res.err{color:#DC2626;border-color:rgba(220,38,38,.4);background:rgba(220,38,38,.07)}",
-    "#clip-sheet .shim{height:12px;border-radius:6px;margin:7px 0;background:linear-gradient(90deg,rgba(120,130,150,.12),rgba(120,130,150,.28),rgba(120,130,150,.12));",
+    "white-space:pre-wrap;word-break:break-word;background:var(--glass-2);border:1px solid var(--hairline);color:var(--ink)}",
+    "#clip-sheet .res.hint{color:var(--muted);font-style:italic}",
+    "#clip-sheet .res.err{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 45%,transparent);background:color-mix(in srgb,var(--bad) 9%,transparent)}",
+    "#clip-sheet .shim{height:12px;border-radius:6px;margin:7px 0;background:linear-gradient(90deg,var(--glass-2),var(--hairline),var(--glass-2));",
     "background-size:200% 100%;animation:clipShim 1.1s linear infinite}",
     "@keyframes clipShim{0%{background-position:200% 0}100%{background-position:-200% 0}}",
-    "#clip-sheet .row{display:flex;gap:8px;align-items:center;padding:12px 16px;border-top:1px solid rgba(120,130,150,.16)}",
-    "#clip-sheet .row button{border:1px solid rgba(120,130,150,.28);background:rgba(255,255,255,.4);color:inherit;cursor:pointer;",
-    "font-size:12.5px;font-weight:600;padding:7px 13px;border-radius:9px;display:inline-flex;align-items:center;gap:6px}",
-    "#clip-sheet .row button:hover:not(:disabled){background:rgba(120,130,150,.16)}",
+    "#clip-sheet .row{display:flex;gap:8px;align-items:center;padding:12px 16px;border-top:1px solid var(--hairline)}",
+    "#clip-sheet .row button{border:1px solid var(--hairline);background:var(--glass-2);color:var(--ink);cursor:pointer;",
+    "font-size:12.5px;font-weight:600;padding:7px 13px;border-radius:9px;display:inline-flex;align-items:center;gap:6px;",
+    "transition-property:background-color,border-color,color;transition-duration:150ms;transition-timing-function:ease-out}",
+    "#clip-sheet .row button:hover:not(:disabled){background:var(--chip);border-color:color-mix(in srgb,var(--iris) 45%,transparent)}",
     "#clip-sheet .row button:disabled{opacity:.45;cursor:default}",
-    "#clip-sheet .row .go{background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff;border-color:transparent;margin-left:auto}",
+    "#clip-sheet .row .go{background:linear-gradient(135deg,var(--iris),var(--iris-2));color:var(--iris-ink);border-color:transparent;margin-left:auto}",
+    "@media (prefers-reduced-motion:reduce){#clip-sheet .shim{animation:none}}",
     "#clip-launch{display:inline-flex;align-items:center;gap:6px}"
   ].join("");
 
@@ -202,6 +234,22 @@
   function injectCSS() {
     var d = DOC(); if (!d) return;
     if (d.getElementById("clip-css")) return;
+    // In index.html the tokens already exist; in any other host document (the
+    // menu-bar popover shell) they do not, so seed them AND mirror the app's
+    // stored theme choice so the sheet matches the dashboard, not the OS.
+    var hasTokens = false;
+    try {
+      hasTokens = !!(d.defaultView && d.defaultView.getComputedStyle(d.documentElement)
+        .getPropertyValue("--ink").trim());
+    } catch (e) {}
+    if (!hasTokens) {
+      var tk = d.createElement("style"); tk.id = "clip-tokens"; tk.textContent = FALLBACK_TOKENS;
+      (d.head || d.documentElement).appendChild(tk);
+      try {
+        var t = d.defaultView.localStorage.getItem("hermes_theme");
+        if (t === "light" || t === "dark") d.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    }
     var st = d.createElement("style"); st.id = "clip-css"; st.textContent = CSS;
     (d.head || d.documentElement).appendChild(st);
   }
@@ -303,7 +351,9 @@
     els.rerun.onclick = runTransform;
     els.copy.onclick = doCopy;
     els.chat.onclick = escalate;
-    anim(sheet, [{ opacity: 0, transform: "translateY(10px) scale(.98)" }, { opacity: 1, transform: "none" }], { duration: 260, easing: "cubic-bezier(.22,1,.36,1)" });
+    // explicit identity, not "none" — see aux_prefs.js: Motion One turns a
+    // scale()-vs-"none" pair into a zero matrix and the sheet never appears
+    anim(sheet, { opacity: [0, 1], transform: ["translateY(10px) scale(.98)", "translateY(0px) scale(1)"] }, { duration: 260, easing: "cubic-bezier(.22,1,.36,1)" });
     return scrim;
   }
 
@@ -342,7 +392,7 @@
         var j = o.j || {};
         if (j.ok) {
           STATE.result = j.result || "";
-          if (els.res) { els.res.className = "res"; els.res.textContent = STATE.result; anim(els.res, [{ opacity: 0 }, { opacity: 1 }], { duration: 200 }); }
+          if (els.res) { els.res.className = "res"; els.res.textContent = STATE.result; anim(els.res, { opacity: [0, 1] }, { duration: 200 }); }
           if (els.copy) els.copy.disabled = false;
         } else {
           if (els.res) { els.res.className = "res err"; els.res.textContent = errText(j.error); }
@@ -418,9 +468,14 @@
     var b = d.createElement("button");
     b.id = "clip-launch"; b.className = "chip";
     b.title = "Clipboard actions (⌘⇧V)";
-    b.innerHTML = IC_CLIP + "Clipboard";
+    // Text only: this chip sits in the quick-action cluster where every other
+    // chip is a bare label, and being the ONE with a glyph read as a mistake
+    // rather than as emphasis. (index.html also hides .chip svg as a backstop.)
+    b.textContent = "Clipboard";
     b.onclick = openSheet;
     mount.appendChild(b);
+    // the cluster is capped at two rows — re-measure now that we added one
+    try { if (typeof W.fitActionChips === "function") W.fitActionChips(); } catch (e) {}
   }
 
   function init() {

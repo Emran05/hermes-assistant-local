@@ -55,6 +55,15 @@ TOOL_KIND = {
     "memory": "memory",
     "read_file": "read", "search_files": "read", "vision_analyze": "read",
     "web_search": "net", "web_extract": "net",
+    # Browser tools that only OBSERVE. Unclassified they fell through to
+    # "other" -> "no" -> an "irreversible" badge, which read as a warning about
+    # a screenshot. The ones that actually drive the page (browser_click /
+    # _fill / _type / _press / _dialog / _close) stay "other" on purpose: they
+    # DO change something out there and honestly cannot be undone.
+    "browser_snapshot": "read", "browser_console": "read",
+    "browser_screenshot": "read", "browser_take_screenshot": "read",
+    "browser_get_images": "read",
+    "browser_navigate": "net", "browser_back": "net",
     "delegate": "agent", "skill": "agent", "clarify": "agent",
     "todo": "other", "cronjob": "other",
 }   # unknown tool -> "other"
@@ -62,14 +71,27 @@ TOOL_KIND = {
 # Reversibility POLICY is fixed at classification time.  A found snapshot can
 # only DOWNGRADE the *effective* reversibility (write/shell without a snapshot
 # are "no"); it can never lift a kind above its policy ceiling.
+# "n/a" is NOT "no".  read / net / agent kinds change nothing on the Mac, so
+# there is no state to restore — labelling them "irreversible" in the UI was
+# technically true and actively misleading (a web_search reads as dangerous as
+# an rm -rf).  Only write / shell / computer / memory can honestly carry a
+# reversible-or-not verdict; everything else answers "the question does not
+# apply".  Every consumer treats "n/a" like "no" for undo purposes: it is not
+# in ('yes','partial'), so the reversible counter skips it and /api/undo still
+# refuses it via UNDO_WHITELIST.
 REVERSIBLE_POLICY = {
     "write":    "yes",       # only if a snapshot_ref is found, else -> "no"
     "shell":    "partial",   # file state restorable IF checkpointed; side
                              # effects (network, launchctl, sends) are NOT
     "memory":   "no",        # v1: memory versioning is P1.1's surface
     "computer": "no",        # clicks / keystrokes cannot be unwound
-    "read": "no", "net": "no", "agent": "no", "other": "no",
+    "read": "n/a", "net": "n/a", "agent": "n/a",   # read-only: nothing to undo
+    "other": "no",
 }
+READONLY_KINDS = ("read", "net", "agent")   # ... and so the migration below
+# tools whose classification changed in this pass, for the same migration
+_RECLASSIFIED = tuple(k for k in TOOL_KIND if k.startswith("browser_"))
+_REV_MIGRATION = 2                          # bump when this table changes again
 UNDO_WHITELIST = {"write", "shell"}   # /api/undo refuses everything else
 ARGS_CAP, SUMMARY_CAP, HASH_CAP_BYTES = 8192, 500, 32 * 1024 * 1024
 
@@ -138,6 +160,22 @@ def _rec_init():
         try:
             con.execute("PRAGMA journal_mode=WAL")
             con.executescript(_SCHEMA)
+            # Versioned backfill: rows written before read/net/agent became
+            # "n/a" (and before the browser_* tools were classified at all)
+            # still say kind='other' / reversible='no', which the UI renders as
+            # an "irreversible" badge on a screenshot.  Bump _REV_MIGRATION
+            # whenever TOOL_KIND / REVERSIBLE_POLICY change again.
+            row = con.execute("SELECT v FROM meta WHERE k='rev_policy_migration'").fetchone()
+            done = int(row["v"]) if row and str(row["v"]).isdigit() else 0
+            if done < _REV_MIGRATION:
+                for _t in _RECLASSIFIED:            # re-home the browser tools
+                    con.execute("UPDATE actions SET kind=? WHERE tool=? AND kind='other'",
+                                (TOOL_KIND[_t], _t))
+                con.execute(
+                    "UPDATE actions SET reversible='n/a' WHERE reversible='no' "
+                    "AND status!='undone' AND kind IN (?,?,?)", READONLY_KINDS)
+                con.execute("INSERT INTO meta(k,v) VALUES('rev_policy_migration',?) "
+                            "ON CONFLICT(k) DO UPDATE SET v=excluded.v", (str(_REV_MIGRATION),))
             con.commit()
         finally:
             con.close()
