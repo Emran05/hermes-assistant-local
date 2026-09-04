@@ -1,0 +1,56 @@
+# Post-v1.0.0 backlog (autonomous improvement loop, started 2026-09-04)
+
+Ranked candidates for small, verified patch releases. Each row: impact / effort / risk
+and how it is verified. "Known" items came out of the v1.0.0 review passes; "Research"
+items are being filled in from the MLX-efficiency and product-landscape sweeps (see the
+Sources section) and re-ranked when they land.
+
+Rules that bound every item: model servers stay on-demand (load only for a measurement,
+unload after); no app rebuild (Full Disk Access); push to both remotes; tag only when
+VERSION + CHANGELOG are updated; release must go green on the public repo.
+
+## Ranked backlog
+
+| # | Item | Area | Impact | Effort | Risk | Verify |
+|---|------|------|--------|--------|------|--------|
+| 1 | **Prewarm after wake**: when `agent_wake()` sees `/v1/models` answer, fire one background warm-up turn ("Reply with exactly: awake") so the ~18k-token system prompt lands in the APC before the user's first real turn; first-turn TTFT after wake should drop from ~25 s to ~1 s | efficiency | H | S | L (one extra generation per wake; must never run while paused; skip if a real job is already queued) | measure first-turn TTFT after wake before/after with a scratch script that hits `/api/chat` once and times `/api/chat/poll` to first token; log in CHANGELOG |
+| 2 | **`.gitattributes export-ignore`** for `.claude/`, `skills-snapshot/`, `docs/state-snapshot.json`, `graphify-out/` so the source tarball ships only what a user needs (the 1.0.0 tarball contains `.claude/settings.json`) | release | M | S | L | `git archive HEAD \| tar tz \| grep -c '^HermesAssistant.*\.claude/'` == 0 |
+| 3 | **MTP draft block size**: measure 2 / 3 / 4 on the primary (README of the drafter suggests 4; repo notes measured 3 best on an earlier build) for prose and code prompts | efficiency | M | S | L | one deliberate load; decode tok/s + acceptance from the mlx-vlm server log; keep the winner in `_SEED_MODELS` |
+| 4 | **Free-memory action reports the truth**: `/api/model/mem_free` returns `_mlx_restart()`'s real outcome and the UI polls health instead of a blind 4 s timer | robustness | M | S | L | curl the route while the model is down (must not claim success), unit harness with a stubbed launchctl |
+| 5 | **Config export/restore secret scan on every path**: `snapshot_get` and `_cfg_backup` go through `_cfg_scan` (redact, not refuse, on the GET) | security | M | S | L | harness: a quicklink with a token-shaped URL is redacted in `GET /api/config/snapshot` and in the pre-restore backup |
+| 6 | **Restore "applied" only after health confirms** the model swap (`aux_config.py` L538-548) | robustness | L | S | L | harness with stubbed `switch_model` + `model_online` |
+| 7 | **`set_model_thinking()` honours `_mlx_restart()`'s return** (a failed restart currently reports `restarted: true`) | robustness | L | S | L | harness |
+| 8 | **Clipboard sheet: Esc closes it** (only scrim click / ⌘⇧V today) | UI | L | S | L | popover harness keypress |
+| 9 | **Agent Desktop captures recorded as `n/a`** instead of `reversible:"no"` (`aux_desktop.py` ~L235) | UI/semantics | L | S | L | `/api/recorder` rows for kind=read show no badge |
+| 10 | **Drill the Uncensored roster entry** during the baseline load (6-case tool drill) so the menu shows a promotion score | quality | M | S | L (needs the model loaded) | `/api/models` → `drilled:true` for the orcarouter id |
+| 11 | **README hero refresh**: the July `docs/assets/hero.jpg` predates the Hub · Agent · Settings restructure; regenerate from the Playwright captures (dark, 1440×900) | docs | M | S | L | visual check; file size < 400 KB |
+| 12 | **Evaluate Hermes Agent 0.18 → 0.21 upgrade** (upstream 2026-08-31: bot mode, cron memory, keychain secrets, MCP center). Sandbox first: `hermes serve` JSON-RPC surface, `hermes -z`, config keys, gateway. Not a patch-release item — spike + report only | platform | H | L | H | scratch venv install of 0.21, run the drill + a serve session against :8080; write findings to docs/plans |
+| 22 | **Page-cache warm before exec** in `mlx-server.sh`: `cat` the active model's safetensors shards (+ drafter) to /dev/null right before launching, so mmap's first touch after an idle-suspend never waits on disk (Ollama #16051 documents 18-65 s unexplained cold-prefill gaps on MLX; page eviction is a hypothesis, not confirmed) | efficiency | M | S | L (pure reads; ~3-4 s of SSD at worst) | wake-to-`/v1/models` time across 3 idle-suspend/wake cycles before/after, from the dashboard log |
+| 23 | **mlx-vlm 0.6.14 → 0.6.17** (stable, 2026-08-26: "Fix sectioned MRoPE split under mlx 0.32.2" — our exact mlx) in a THROWAWAY venv first; check whether the launcher's RNG-restore shim and `os._exit(0)` teardown are still needed; drill 6/6; then swap `install-mlx-vlm-venv.sh` pins | efficiency/platform | M | M | M (never touch the live venv until the copy passes) | `b3-ttft-bench.py` before/after; drill; server log free of the RNG crash signature |
+| 24 | **APC disk cache** (mlx-vlm 0.7.0rc0 #2059, "for Qwen3.8-Flash-Next"): find out whether the disk-persisted exact-prefix cache applies to dense `qwen3_5`; if yes, the 18k-token system-prompt prefill would survive the idle-suspend bootout — the single biggest wake-latency lever | efficiency | H | M | H (release candidate; may be model-locked) | first-turn TTFT after an idle-suspend wake before/after |
+| 25 | **Does native MTP disable continuous batching?** Read the installed `mlx_vlm/server` batching gate (mlx-lm's draft-model path sets `is_batchable=False`; mlx-vlm's MTP head may not). If batching survives, hub + Telegram + bg concurrency is free; if not, document it | efficiency | M | S | L | two concurrent chat requests while MTP is active: both stream or one queues |
+| 26 | **Short-prompt chunked prefill** (0.7.0rc0 #2119): only after #23/#24 — re-bench a <512-token prompt (Quick Ask, bg lane) where `--prefill-step-size` was previously inert | efficiency | L | S | L | short-prompt variant of `b3-ttft-bench.py` |
+| ✗ | Parked/not worth it (MLX sweep): `iogpu.wired_limit_mb` (needs sudo + a LaunchDaemon — owner decision), KV-cache quantization (unsupported on this vision arch — load fails), PolarQuant/TurboQuant (unmerged), external draft models (superseded by native MTP), thinking-off default and prefill-step-size (already done/tested), mlx-optiq mixed precision (no Qwen3.8-27B build published) | | | | | |
+| 13 | **Conversation management in the chat sidebar**: search across past turns (substring over the chat JSON store), pin + inline rename, "Export as Markdown" from the chat `⋯` menu. LM Studio, Msty, BoltAI all ship this; Hermes lists conversations only | feature (1.0.2 candidate) | H | S | L (read-mostly; export must strip tool/approval metadata) | Playwright: type a query, pinned row stays on top after reload, exported .md opens with the turns in order; both themes |
+| 14 | **In-app "What's new"**: `aux_update.js` renders release notes as styled Added / Changed / Fixed / Security cards parsed from the CHANGELOG sections instead of raw text | feature | M | S | L | screenshot of Settings › System after a check |
+| 15 | **Download estimate before confirm**: model menu shows "~17 GB download · needs ~20 GB free" from the roster `ram`/size metadata + `statvfs` free space, and refuses when disk is short | feature | M | S | L | curl `/api/models` carries `download_gb`/`disk_free_gb`; UI copy in both themes |
+| 16 | **"Data & Network" disclosure panel** in Settings listing every outbound call (GitHub Releases check, weather/news/markets feeds, Telegram, Claude Bridge) with the toggles that already exist next to each | feature/trust | M | S | L | panel screenshot; list generated from a single table in one aux module so it cannot drift |
+| 17 | **Per-model details in the menu**: context length, thinking support, backend, drafter, RAM — data already in `models_payload()` | feature | L | S | L | screenshot |
+| 18 | **Local voice input (STT)**: mic button in Quick Ask + chat → on-demand `parakeet-mlx`/whisper.cpp subprocess (same on-demand/idle pattern as the model lanes), fills the field, never auto-sends. On the roadmap already | feature | H | M | M (TCC mic prompt; keep the STT process on-demand) | manual + a recorded WAV through the endpoint; battery: process exits after transcription |
+| 19 | **Local voice output (TTS)**: "Read aloud" on any answer via on-demand kokoro-mlx (~82M params) | feature | M | M | L | manual; process exits after playback |
+| 20 | **Clipboard history in Quick Ask** (last 20 items, in-memory only, never persisted) | feature | M | M | M (privacy: passwords in the pasteboard; polling cost) | harness with a stubbed bridge; audit that nothing is written under ~/.hermes |
+| 21 | **Attach a short document to a turn** (PDF/txt/md → extracted excerpt prepended; no vector store) | feature | M | M | M (scope creep toward RAG — stop at inline excerpts) | harness with a fixture PDF |
+| ✗ | Rejected from the landscape sweep: multi-cloud provider grid, full vector RAG, persona marketplaces, cloud-synced clipboard, telemetry-by-default; custom global hotkey (needs `app/main.swift`, frozen); screenshot-to-answer (needs a vision-capable primary + app work) | | | | | |
+
+## Release plan
+
+- **1.0.1** — #2, #4, #7, #8, #9 (all S, no model load) + #1 if its measurement is clean.
+- **1.0.2** — #13 conversation management (search, pin/rename, export) with screenshots in both themes; #14/#15 if time allows.
+- **1.0.3** — the best measured efficiency item: #1 prewarm-after-wake and/or #22 page-cache warm (both cheap, both measured on the same baseline session), #3 MTP block sweep; #23/#24 only if the throwaway-venv test is clean.
+
+## Sources
+
+- v1.0.0 review passes (silent-failure, security, UI audits; agent reports in the session journal).
+- Upstream Hermes Agent releases: v0.21.0 (2026-08-31), v0.20.6 (08-27), v0.20.2 (08-16), v0.20.0 (08-03); installed here: 0.18.0.
+- Local-assistant landscape sweep (2026-09-04): LM Studio, Open WebUI, Jan, Msty, Cherry Studio, AnythingLLM, Raycast, Ollama app, Enchanted, BoltAI, Pieces — confidence medium-low where only aggregator blogs were available; Jan's voice mode and Cherry Studio's quick-ask are NOT shipped despite blog claims.
+- MLX serving-efficiency sweep (2026-09-04): mlx-vlm releases 0.6.16/0.6.17/0.7.0rc0 (Blaizzy/mlx-vlm), mlx-lm PR #990 (native MTP for Qwen3.5/3.6 dense: 88.3% acceptance / 1.57x on 27B 4-bit — corroborates our 88% / block 3), ollama#16051 (cold prefill gap on MLX), modelpiper on `iogpu.wired_limit_mb`, mlx-optiq blog, Simon Willison on Qwen3.8 overthinking. Release-note wording is medium-confidence (summarized from GitHub pages) — re-grep the installed package after any upgrade.
