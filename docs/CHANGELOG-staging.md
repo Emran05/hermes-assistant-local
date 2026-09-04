@@ -507,3 +507,44 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   `GET/POST /api/agent/prewarm` + `/api/models.prewarm` round-tripped against a
   real `ThreadingHTTPServer`. PENDING: the "after" TTFT measurement (the
   coordinator owns the before/after on the real model).
+- `<ram-aware-defaults>` (2026-09-04) 1.0.3 — **the memory defaults were the author's
+  Mac.** Hermes ships as downloadable software, but `MLX_SOFT_GB`/`MLX_HARD_GB` (50/56),
+  `APC_EXACT_CACHE_ENTRIES` (6) and `--prompt-cache-bytes` (8 GB) were all hardcoded for
+  a 64 GB M5 Max. On a 16 GB Air a "soft 50" admission ceiling can never engage — the
+  machine swaps to death while the guard reports everything fine — and 8 GB of prompt
+  cache reserves half the RAM before the weights load. All four now derive from
+  `hw.memsize`, and **nothing changes on a ≥64 GB Mac**. server.py: `_machine_ram_gb()`
+  (one cached sysctl read, GiB, falls back to 64) + the PURE `_mem_ceilings(ram_gb, env)`
+  — ≥64 GB → (50, 56) flat, because the ceiling bounds the KV-cache balloon, whose useful
+  size is set by the workload (~2 GB per ~20k-token sequence) and not by installed RAM;
+  below that soft = round(0.72×RAM), hard = round(0.82×RAM), hard ≥ soft+2, floor (8, 10)
+  → 16→(12,14) 24→(17,20) 32→(23,26) 36→(26,30) 48→(35,39). Env still wins, verbatim
+  (a soft-only override drags hard to soft+2; an unparseable value is now ignored instead
+  of raising ValueError at import and taking the dashboard down). `mlx-server.sh` /
+  `mlx-server-bg.sh` read the same sysctl and tier the caches (primary 6 entries/8 GB
+  ≥64, 4/5 GB ≥48, 3/3.5 GB ≥36, else 2/2 GB; the bg lane keeps its own lower table
+  anchored on today's 4/3 GB since it shares the Mac with the ~19 GB primary), with a
+  `case` guard so a missing or non-numeric sysctl can't break arithmetic under `set -e`.
+  Model menu: `models_payload().mem.machine_gb` + a per-row `fit: "ok"|"tight"|"no"`
+  (`_model_fit`: no if `ram` > 0.85 × machine, tight if > 0.60 ×) render as a quiet
+  "needs ~19 GB · this Mac has 64 GB" under every model — `--warn` when tight, `--bad`
+  plus an inert row when it cannot fit, refused in `onModelClick` and not merely in CSS,
+  because a multi-GB download for a model that can never load is the worst outcome of a
+  stray click. The row stays visible: the user should see what exists and why it is out
+  of reach. Also `install-mlx-vlm-venv.sh`: it pinned mlx-vlm but let **mlx float**, so a
+  re-run would have silently built 0.6.14 against mlx 0.32.2 (different teardown path) —
+  mlx/mlx-metal/transformers/huggingface_hub are now pinned to the live venv's exact
+  versions, with a header explaining why 0.6.16/0.6.17 are NOT used and the rename-aside
+  rollback plan for whenever an upgrade is approved. Docs: CLAUDE.md gains the ceiling
+  rule and the measured mlx-vlm/MTP findings; `docs/plans/post-v1-baseline.md` gains a
+  "Concurrency and mlx-vlm 0.6.17" section; backlog #23 parked-with-reason, #25 answered,
+  new #27 (temperature appears ignored on the MTP batch path). VERIFIED offline, no model
+  server started and the dashboard NOT restarted: 62/62 in a scratch harness that
+  exec-loads server.py under a throwaway `$HOME` with sysctl stubbed (the 8 sizes above,
+  invariants over 4-192 GB, every env-override shape, all four sysctl-failure fallbacks,
+  the fit thresholds including both exact boundaries, and `models_payload()` on a faked
+  16 GB Mac); 12/12 Playwright checks against the live dashboard with `/api/models`
+  stubbed (all three fit states, colours distinct per state, the "no" row inert — a click
+  fires no request and no confirm — and the "tight" row still fully usable) in both
+  themes; `bash -n` on all three scripts; and a dry run of both derivations on this Mac
+  confirming 50/56 and 6 entries / 8 GB, i.e. byte-identical to 1.0.2.

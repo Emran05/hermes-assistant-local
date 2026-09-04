@@ -107,6 +107,32 @@ if [ "$HF_OFFLINE" = 1 ]; then
   echo "[mlx-server] HF_HUB_OFFLINE=1 + MLX_VLM_LOCAL_ONLY=1 (roster hf_offline) — local cache only"
 fi
 
+# --- RAM-aware prompt-cache sizing (1.0.3) -----------------------------------
+# The prefix cache is the single biggest tunable memory consumer after the
+# weights: ~64KB/token of KV means one ~18k-token Hermes agent prefix is ~1.2GB,
+# and the entry count is a straight multiplier on that. Until 1.0.3 the defaults
+# (6 entries / 8GB) were hardcoded for the 64GB Mac this was built on — on a
+# 16GB Air the same numbers reserve half the machine for cache alone.
+#
+# So: read physical RAM once and pick a tier. GB here is GiB (bytes >> 30),
+# which is exactly the capacity Apple prints on the box for every real config.
+# The >=64 row reproduces the pre-1.0.3 constants byte-for-byte; nothing about
+# THIS machine changes. Env still wins (APC_EXACT_CACHE_ENTRIES=… before the
+# service starts), so a measurement run can override any of it.
+#
+# The `case` is the fallback guard: sysctl missing, or printing something that
+# is not a plain integer, must not make the arithmetic below fail under `set -e`
+# — it falls back to 64GB, the configuration every number in docs/plans was
+# measured on.
+RAM_BYTES="$(/usr/sbin/sysctl -n hw.memsize 2>/dev/null || true)"
+case "$RAM_BYTES" in ''|*[!0-9]*) RAM_BYTES=68719476736 ;; esac
+RAM_GB=$(( RAM_BYTES / 1073741824 ))
+if   [ "$RAM_GB" -ge 64 ]; then APC_ENTRIES_DEFAULT=6; PROMPT_CACHE_BYTES=8000000000
+elif [ "$RAM_GB" -ge 48 ]; then APC_ENTRIES_DEFAULT=4; PROMPT_CACHE_BYTES=5000000000
+elif [ "$RAM_GB" -ge 36 ]; then APC_ENTRIES_DEFAULT=3; PROMPT_CACHE_BYTES=3500000000
+else                            APC_ENTRIES_DEFAULT=2; PROMPT_CACHE_BYTES=2000000000
+fi
+
 if [ "$BACKEND" = "mlx_vlm" ]; then
   echo "Starting MLX-VLM server: $MODEL on :$PORT draft=$DRAFT_MODEL ($DRAFT_KIND, block $DRAFT_BLOCK) thinking=$VLM_THINK effort=$VLM_EFFORT"
   VLM_ARGS=(--model "$MODEL" --host 127.0.0.1 --port "$PORT" --max-tokens 4096 --trust-remote-code)
@@ -116,11 +142,13 @@ if [ "$BACKEND" = "mlx_vlm" ]; then
   [ "$VLM_THINK" = "1" ] && VLM_ARGS+=(--enable-thinking --thinking-budget 8192)
   # APC = exact prefix cache. Hybrid SSM/attention models run in "exact" mode
   # (whole-prefix snapshots, not K/V blocks); APC_EXACT_CACHE_ENTRIES bounds
-  # how many distinct prefixes stay resident (default 2 → thrashes with hub
-  # chats + Telegram + briefing all inserting). ~64KB/token of KV for this model
-  # → an 18k-token agent prefix ≈ 1.2GB, so 6 entries ≈ the 8GB we give mlx-lm.
+  # how many distinct prefixes stay resident (upstream default 2 → thrashes with
+  # hub chats + Telegram + briefing all inserting). ~64KB/token of KV for this
+  # model → an 18k-token agent prefix ≈ 1.2GB, so 6 entries ≈ the 8GB we give
+  # mlx-lm — which is why the two tiers above move together.
   export APC_ENABLED=1
-  export APC_EXACT_CACHE_ENTRIES="${APC_EXACT_CACHE_ENTRIES:-6}"
+  export APC_EXACT_CACHE_ENTRIES="${APC_EXACT_CACHE_ENTRIES:-$APC_ENTRIES_DEFAULT}"
+  echo "[mlx-server] ${RAM_GB}GB Mac → APC_EXACT_CACHE_ENTRIES=$APC_EXACT_CACHE_ENTRIES"
   [ -n "$VLM_EFFORT" ] && export MLX_VLM_DEFAULT_REASONING_EFFORT="$VLM_EFFORT"
   exec "$VLM_PY" "$(dirname "$0")/mlx-vlm-launch.py" "${VLM_ARGS[@]}"
 fi
@@ -134,18 +162,21 @@ exec python3 -m mlx_lm server \
   --host 127.0.0.1 \
   --port "$PORT" \
   --max-tokens 4096 \
-  --prompt-cache-size 6 \
-  --prompt-cache-bytes 8000000000 \
+  --prompt-cache-size "$APC_ENTRIES_DEFAULT" \
+  --prompt-cache-bytes "$PROMPT_CACHE_BYTES" \
   --chat-template-args "$TEMPLATE_ARGS" \
   --trust-remote-code
 # --prompt-cache-* CAPS the in-memory KV/prompt cache so it can't grow
 # unbounded and thrash RAM (root cause of the 49GB blowup; the dashboard's
-# memory_guard is now just a backstop). Measured (P3.B3): each ~20k-token agent
-# sequence costs ~2GB of KV, so 6GB held only ~3 sequences while >=4 producers
-# (hub chats, menubar, briefing -z regens, watchtower/intel) insert them — LRU
-# churn kept re-paying the ~8s cold prefill. 8GB holds 4; steady footprint ~26GB
-# stays under the 32GB memory_guard restart line. Drop back to 6GB if switching
-# to GLM-4.5-Air (106B leaves no headroom). "Resume later" is Hermes's own
-# message-history restore (state.db) — KV-cache-to-disk isn't worth it here.
+# memory_guard is now just a backstop). Measured (P3.B3) on the 64GB machine,
+# i.e. the 8GB/6-entry tier above: each ~20k-token agent sequence costs ~2GB of
+# KV, so 6GB held only ~3 sequences while >=4 producers (hub chats, menubar,
+# briefing -z regens, watchtower/intel) insert them — LRU churn kept re-paying
+# the ~8s cold prefill. 8GB holds 4; steady footprint ~26GB stays under the
+# memory_guard restart line. Smaller Macs take the lower tiers and simply hold
+# fewer sequences — LRU churn is the correct trade when the alternative is swap.
+# Drop a tier by hand if switching to GLM-4.5-Air (106B leaves no headroom).
+# "Resume later" is Hermes's own message-history restore (state.db) —
+# KV-cache-to-disk isn't worth it here.
 # The server exposes http://127.0.0.1:8080/v1 (OpenAI-compatible), which is
 # exactly what config.yaml -> model.base_url points at.

@@ -6,6 +6,35 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-09-04
+
+Memory defaults that fit the Mac they run on, a reproducible model-server venv, and the
+measured facts behind them (`docs/plans/post-v1-baseline.md`).
+
+### Changed
+- **RAM-aware defaults.** The memory-guard ceilings (`MLX_SOFT_GB` / `MLX_HARD_GB`), the
+  prefix-cache entry count (`APC_EXACT_CACHE_ENTRIES`) and the mlx-lm prompt-cache size
+  are now derived from physical RAM unless set explicitly; on a 64 GB+ machine they equal
+  the previous constants (50 / 56 GB, 6 entries, 8 GB), smaller machines get proportionally
+  smaller values so the guard actually engages before macOS starts swapping.
+- **Per-model fit hint** in the model menu: "needs ~19 GB · this Mac has 64 GB", amber when
+  tight, red (and neither switchable nor downloadable) when the model cannot fit.
+- **Reproducible venv.** `install-mlx-vlm-venv.sh` now pins mlx, mlx-metal, transformers and
+  huggingface_hub to the versions in production, not just mlx-vlm. A fresh install today
+  was silently resolving newer mlx/transformers than the author's machine.
+
+### Measured (no code change)
+- mlx-vlm 0.6.16 / 0.6.17 corrupt output when two requests overlap with the MTP drafter
+  loaded (2 of 6 and 1 of 3 clean probes vs 6 of 6 on 0.6.14); single-stream they are a
+  wash (prose −8%). The venv stays on 0.6.14 until this is fixed upstream.
+- MTP speculative decoding falls through to continuous batching (it is not disabled), but
+  under two concurrent streams it yields 21.2 tok/s per stream (42.5 aggregate) versus
+  59.8 aggregate without a drafter. It is a single-stream win — which is how the primary
+  lane is used; background work stays on the 9B lane.
+- Shims: the launcher's RNG-restore patch only matters for non-MTP drafters; the
+  `os._exit(0)` teardown guard is still required on mlx 0.32.1 (fixed in 0.32.2).
+
+
 ## [1.0.2] - 2026-09-04
 
 Conversation management and a readable "What's new" — backlog items #13 and #14.

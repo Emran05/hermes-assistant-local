@@ -1223,12 +1223,125 @@ def _mlx_footprint_gb():
 #   2. HARD WATCHDOG (memory_guard_loop): polls every 30s; above MLX_HARD_GB it
 #      restarts the model server (reliable bootout→bootstrap, not kickstart -k)
 #      as a last resort — this is the cache-clear.
-# 64GB machine: soft 50 leaves 14GB for everything else; hard 56 is the floor
-# before the OS thrashes.  Tunable via env.
+# Until 1.0.3 both numbers were hardcoded at 50/56 — right for the 64GB machine
+# Hermes was built on, actively harmful on a 16GB Air, where a "soft 50" ceiling
+# means admission control NEVER engages and the first big prefill swaps the Mac
+# to death. Since Hermes ships as downloadable software the defaults now derive
+# from physical RAM (_mem_ceilings below); env still wins.
 # --------------------------------------------------------------------------
-MLX_SOFT_GB = float(os.environ.get("MLX_SOFT_GB", "50"))    # admission ceiling
-MLX_HARD_GB = float(os.environ.get("MLX_HARD_GB", "56"))    # last-resort restart
+
+_RAM_GB_CACHE = [None]      # one-slot memo: hw.memsize cannot change at runtime
+
+
+def _machine_ram_gb():
+    """Physical RAM in GB, cached for the life of the process.
+
+    GB here means GiB — the number Apple prints on the box. `hw.memsize` on a
+    "64 GB" Mac is exactly 64 * 2**30, so bytes >> 30 reproduces the marketing
+    capacity for every real config (16/24/32/36/48/64/96/128) with no rounding
+    slop. (The system-status panel divides by 1e9 instead, deliberately: it
+    reports *usage* against vm_stat's decimal totals. Don't mix the two.)
+
+    Falls back to 64 when sysctl is missing or unparseable — a familiar default
+    (the machine every measurement in docs/plans was taken on) beats raising at
+    import time inside a launchd service.
+    """
+    if _RAM_GB_CACHE[0] is None:
+        gb = 64.0
+        try:
+            out = subprocess.run(["/usr/sbin/sysctl", "-n", "hw.memsize"],
+                                 capture_output=True, text=True, timeout=3).stdout
+            b = int(out.strip())
+            if b > 0:
+                gb = b / (1024 ** 3)
+        except Exception:
+            pass
+        _RAM_GB_CACHE[0] = gb
+    return _RAM_GB_CACHE[0]
+
+
+def _mem_ceilings(ram_gb, env=None):
+    """(soft_gb, hard_gb) for a machine with `ram_gb` of physical RAM.
+
+    PURE — no I/O, no globals — so the rule is unit-testable without a Mac of
+    each size. The rule:
+
+      * **RAM >= 64 GB -> (50, 56)**, byte-identical to the pre-1.0.3 constants.
+        Flat, not a percentage, and that is deliberate: the ceiling bounds the
+        KV/prompt-cache BALLOON, whose useful size is set by the workload (~2GB
+        of KV per ~20k-token agent sequence x a handful of concurrent
+        producers), not by how much RAM the machine happens to have. Letting a
+        128GB Mac balloon to 100GB buys nothing and just delays the restart that
+        clears the thrash. Operators who want more raise MLX_SOFT_GB by hand.
+      * **Below 64 GB -> soft = round(0.72 x RAM), hard = round(0.82 x RAM)** —
+        the same shape as 50/56 on a 64GB box scaled down (0.78/0.88 there;
+        slightly tighter below because a small Mac has proportionally less slack
+        for the OS, the app and Safari).
+      * **hard >= soft + 2** so the watchdog can never fire at or below the
+        admission ceiling (only bites under ~20GB, where 0.10 x RAM < 2).
+      * **Floor (8, 10)**: below ~11GB no local model of ours fits anyway; a
+        floor keeps the pair sane rather than pretending 4/5 is a working config.
+
+    env overrides (MLX_SOFT_GB / MLX_HARD_GB) are taken VERBATIM — an explicit
+    setting is the operator's call, including a deliberately silly one. The one
+    courtesy: setting only MLX_SOFT_GB drags the derived hard up with it, so a
+    soft-only override can't invert the pair. Unparseable values are ignored
+    (they used to raise ValueError at import and take the dashboard down).
+    """
+    env = os.environ if env is None else env
+
+    def _num(key):
+        try:
+            return float(env[key])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    if ram_gb >= 64:
+        soft, hard = 50.0, 56.0
+    else:
+        soft = max(8.0, float(round(0.72 * ram_gb)))
+        hard = max(10.0, float(round(0.82 * ram_gb)))
+        hard = max(hard, soft + 2)
+    soft_env, hard_env = _num("MLX_SOFT_GB"), _num("MLX_HARD_GB")
+    if soft_env is not None:
+        soft = soft_env
+    if hard_env is not None:
+        hard = hard_env
+    elif soft_env is not None and hard < soft + 2:
+        hard = soft + 2
+    return soft, hard
+
+
+MACHINE_RAM_GB = _machine_ram_gb()
+# admission ceiling / last-resort restart. 68.7e9-byte M5 Max -> 64 GiB -> 50/56.
+MLX_SOFT_GB, MLX_HARD_GB = _mem_ceilings(MACHINE_RAM_GB)
 MEM_OVERRIDE_FILE = os.path.join(DATA, "mem-override")
+
+
+def _model_fit(model_ram_gb, machine_gb=None):
+    """How comfortably a roster model's resident size fits this Mac.
+
+    "ok" | "tight" | "no", or None when the roster entry carries no `ram` (the
+    synthetic active-model row does not) so the UI can simply omit the line
+    rather than guess. Thresholds are of TOTAL RAM, not of the memory ceiling:
+    the question the model menu answers is "will downloading this 17GB thing be
+    a mistake on MY Mac", which is a hardware question.
+
+      no    : ram > 0.85 x machine — it would not co-exist with the OS at all.
+      tight : ram > 0.60 x machine — it loads, but expect swap under real use.
+      ok    : everything else.
+    """
+    if not model_ram_gb or model_ram_gb <= 0:
+        return None
+    m = _machine_ram_gb() if machine_gb is None else machine_gb
+    if not m or m <= 0:
+        return None
+    if model_ram_gb > 0.85 * m:
+        return "no"
+    if model_ram_gb > 0.60 * m:
+        return "tight"
+    return "ok"
+
 
 # --- Idle suspend ----------------------------------------------------------
 # The model server is the memory hog (~26GB resident, weights + prompt/KV cache).
@@ -2906,10 +3019,17 @@ def models_payload():
         reg = [{"id": active, "label": active.split("/")[-1], "ram": None,
                 "note": "active"}] + reg
     out = []
+    machine_gb = _machine_ram_gb()
     for m in reg:
         out.append({**m, "active": m["id"] == active,
                     "downloaded": _model_downloaded(m["id"]) and _draft_ready(m),
                     "downloading": _model_dl.get(m["id"]) == "downloading",
+                    # 1.0.3: "will this run on MY Mac" — the roster's `ram` is
+                    # the author's measured footprint, meaningless to a reader
+                    # until it is put next to their own hardware. None when the
+                    # entry has no `ram` (the injected active row); the menu
+                    # then shows no fit line at all rather than a guess.
+                    "fit": _model_fit(m.get("ram"), machine_gb),
                     # None unless the last attempt failed — pairs with
                     # _model_dl[id] == "error" so the UI never shows a bare
                     # failure state with nothing to explain it
@@ -2929,7 +3049,12 @@ def models_payload():
             # last_result}. aux_promotion rebinds models_payload() but only ADDS
             # keys to whatever the base returns, so this passes through.
             "prewarm": prewarm_payload(),
+            # machine_gb: physical RAM (GiB). The menu pairs it with each row's
+            # `ram` ("needs ~19 GB · this Mac has 64 GB") and it is also what
+            # explains a soft_gb that is no longer the familiar 50 — on a 16GB
+            # Air the ceiling derives to 12/14 (see _mem_ceilings).
             "mem": {"soft_gb": MLX_SOFT_GB, "hard_gb": MLX_HARD_GB,
+                    "machine_gb": round(machine_gb),
                     "over": bool(ram and ram >= MLX_SOFT_GB),
                     "override": os.path.exists(MEM_OVERRIDE_FILE)}}
 

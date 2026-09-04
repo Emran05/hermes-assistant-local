@@ -235,6 +235,21 @@
   /* a per-model download failure the backend surfaces as m.download_error */
   .mmi .mm-dlerr{font-size:10.5px;line-height:1.35;color:var(--bad);margin-top:3px;
     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  /* "needs ~19 GB · this Mac has 64 GB" (models_payload().fit + mem.machine_gb).
+     Quiet by default — it is context, not an alarm — and only takes a colour
+     when the answer is actually "careful" (--warn) or "no" (--bad). Both tokens
+     are already theme-scoped, so this needs no dark-mode rule of its own. */
+  .mmi .mmfit{font-size:10.5px;line-height:1.35;color:var(--faint);margin-top:2px}
+  .mmi .mmfit.warn{color:var(--warn)}
+  .mmi .mmfit.bad{color:var(--bad)}
+  /* A model that cannot fit stays VISIBLE (the user should see what exists and
+     why it is out of reach) but is inert: no pointer, no hover lift, and the
+     action word drops out of the clickable-iris colour. onModelClick refuses it
+     too — CSS alone is not a guard. */
+  .mmi[data-fit="no"]:not(.on){cursor:default}
+  .mmi[data-fit="no"]:not(.on):hover{background:transparent}
+  .mmi[data-fit="no"]:not(.on) .act{color:var(--faint);font-weight:500}
+  .mmi[data-fit="no"]:not(.on) .nm{opacity:.75}
   .mmi .act{margin-left:auto;font-size:11px;color:var(--iris);font-weight:600;white-space:nowrap}
   .mmi.on .act{color:var(--ok)}
   .mmhead{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);font-weight:640;padding:8px 10px 4px}
@@ -2213,18 +2228,32 @@ async function loadModels(){
     else if(agentIdle){$('p-model').className='pdot';$('p-model-t').textContent='sleeping';}
     else if(active){$('p-model-t').textContent=active.label;}
   }
+  // Physical RAM of THIS Mac (mem.machine_gb, new in 1.0.3). Absent on an older
+  // backend → every fit line is skipped rather than compared against a guess.
+  const machineGb=(d.mem&&d.mem.machine_gb)||0;
   menu.innerHTML='<div class="mmhead">Agent model · lighter = less RAM</div>'+d.models.map(m=>{
+    // fit: "ok" | "tight" | "no" — the roster's `ram` judged against machineGb
+    // by the backend (server.py _model_fit). Undefined on older backends.
+    const fit=m.fit;
     let act;
     if(m.active)act=agentPaused?'paused':(agentIdle?'sleeping':'active');
     else if(m.downloading)act='downloading…';
+    else if(fit==='no')act="won't fit";      // inert: see the data-fit CSS + onModelClick
     else if(m.downloaded)act='switch';
     else act='download'+(m.ram?' · '+m.ram+'GB':'');
-    return '<div class="mmi'+(m.active&&!agentPaused&&!agentIdle?' on':'')+'" data-id="'+esc(m.id)+'" data-dl="'+(m.downloaded?1:0)+'" data-active="'+(m.active?1:0)+'" data-busy="'+(m.downloading?1:0)+'">'+
+    return '<div class="mmi'+(m.active&&!agentPaused&&!agentIdle?' on':'')+'" data-id="'+esc(m.id)+'" data-dl="'+(m.downloaded?1:0)+'" data-active="'+(m.active?1:0)+'" data-busy="'+(m.downloading?1:0)+'"'+(fit?' data-fit="'+esc(fit)+'"':'')+'>'+
       '<span class="dot"></span><div style="min-width:0"><div class="nm">'+esc(m.label)+'</div><div class="rm2">'+esc(m.note||'')+(m.ram?' · ~'+m.ram+'GB RAM':'')+'</div>'+
+      // The honest answer to "can I run this?" — the roster's RAM figure is the
+      // author's measured footprint and means nothing until it sits next to the
+      // reader's own hardware. Needs both halves, so it is omitted whenever
+      // either the model's `ram` or the backend's machine_gb is missing.
+      (fit&&m.ram&&machineGb?'<div class="mmfit'+(fit==='no'?' bad':(fit==='tight'?' warn':''))+'">'+
+        esc('needs ~'+m.ram+' GB · this Mac has '+machineGb+' GB'+
+            (fit==='no'?' · too big to run here':(fit==='tight'?' · tight, expect swapping':'')))+'</div>':'')+
       // download_error is a new, optional backend field (absent/null on older
       // builds) — a failed pull otherwise looked identical to "never fetched".
       (m.download_error?'<div class="mm-dlerr" title="'+esc(m.download_error)+'">'+esc(m.download_error)+'</div>':'')+'</div>'+
-      '<span class="act">'+act+'</span></div>';}).join('');
+      '<span class="act">'+esc(act)+'</span></div>';}).join('');
   // power row: park the model to free its RAM / wake it back up
   const ram=(d.ram_gb!=null&&d.ram_gb>0.2)?(' · frees ~'+(Math.round(d.ram_gb*10)/10)+' GB RAM'):'';
   menu.innerHTML+=agentIdle
@@ -2348,6 +2377,12 @@ async function wakeAgent(){
 async function onModelClick(el){
   const id=el.dataset.id;
   if(el.dataset.active==='1'||el.dataset.busy==='1')return;
+  // fit="no" (backend: model ram > 0.85 x this Mac's RAM). The row stays in the
+  // menu so the user can see what exists and why it is out of reach, but both
+  // actions are refused HERE, not only in CSS — a multi-GB download whose model
+  // can never load is the worst possible outcome of a stray click. The active
+  // model is exempt above: if it is already running, it evidently fits.
+  if(el.dataset.fit==='no')return;
   if(el.dataset.dl==='1'){
     // switch
     const nm=el.querySelector('.nm').textContent;
