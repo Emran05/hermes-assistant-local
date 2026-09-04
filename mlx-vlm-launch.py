@@ -44,6 +44,59 @@ def _patch_rng_restore():
           "patched to no-op (sampled speculative decoding works)", flush=True)
 
 
+def _patch_local_snapshot_resolution():
+    """MLX_VLM_LOCAL_ONLY=1 (set by mlx-server.sh for roster entries with
+    `hf_offline`): resolve a repo id straight to its cached snapshot
+    (refs/main → snapshots/<sha>) and never call the Hub. Why: orcarouter's
+    Qwen3.8-27B-Uncensored repo is a deliberately PARTIAL mirror here (we skip
+    the 2/6/8-bit subfolders, 62GB), and huggingface_hub ≥1.x refuses such a
+    snapshot even under HF_HUB_OFFLINE=1 (IncompleteSnapshotError from
+    mlx_vlm.utils.get_model_path → snapshot_download) — online it would fetch
+    the 62GB instead. utils.load(), load_drafter() and the server all look
+    get_model_path up at call time, so patching the utils attribute covers
+    them; real local paths pass through unchanged."""
+    flag = os.environ.get("MLX_VLM_LOCAL_ONLY", "").strip().lower()
+    if flag not in ("1", "true", "yes"):
+        return
+    try:
+        from pathlib import Path
+        from mlx_vlm import utils as _u
+    except Exception:
+        return
+    orig = _u.get_model_path
+
+    def _cached_snapshot(repo_id):
+        base = os.environ.get("HF_HUB_CACHE") or os.path.join(
+            os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface"), "hub")
+        d = os.path.join(base, "models--" + repo_id.replace("/", "--"))
+        snaps = os.path.join(d, "snapshots")
+        try:
+            sha = open(os.path.join(d, "refs", "main")).read().strip()
+            if sha and os.path.isdir(os.path.join(snaps, sha)):
+                return os.path.join(snaps, sha)
+        except OSError:
+            pass
+        try:                                   # no ref → newest snapshot dir
+            cands = [os.path.join(snaps, x) for x in os.listdir(snaps)]
+            cands = [c for c in cands if os.path.isdir(c)]
+            return max(cands, key=os.path.getmtime) if cands else None
+        except OSError:
+            return None
+
+    def get_model_path(path_or_hf_repo, *a, **kw):
+        s = str(path_or_hf_repo)
+        if os.path.exists(s):
+            return Path(s)
+        snap = _cached_snapshot(s)
+        if snap and os.path.isfile(os.path.join(snap, "config.json")):
+            return Path(snap)
+        return orig(path_or_hf_repo, *a, **kw)
+
+    _u.get_model_path = get_model_path
+    print("[mlx-vlm-launch] MLX_VLM_LOCAL_ONLY=1 — repo ids resolve to the cached "
+          "snapshot; no Hub calls", flush=True)
+
+
 def _patch_default_reasoning_effort():
     """mlx_vlm.server has no server-level default for the Qwen3.8 chat
     template's `reasoning_effort` (its template default is xhigh — ~22k think
@@ -83,6 +136,7 @@ def _hard_exit():
 
 if __name__ == "__main__":
     _patch_rng_restore()
+    _patch_local_snapshot_resolution()
     _patch_default_reasoning_effort()
     atexit.register(_hard_exit)
     sys.argv[0] = "mlx_vlm.server"

@@ -328,3 +328,18 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   brief ≥18:00 / evening ≥22:00 can actually send (9/9 cases); chat wakes a model
   that is down without the asleep marker + idle loop self-heals the marker
   (`_mlx_proc_alive`); schedule time inputs echo the clamped value.
+- `<uncensored-qwen38>` (2026-09-03) Roster +1, opt-in: `orcarouter/Qwen3.8-27B-Uncensored-MLX`
+  (abliterated Qwen3.8-27B, MLX 4-bit g64, same layout as the primary, its own `mtp/`
+  drafter) as a `_SEED_MODELS` entry → merged into models.json; never the default. New
+  optional roster fields: `ignore_patterns`/`allow_patterns` (download scope — the repo
+  is 95GB of 2/4/6/8-bit variants; we pull root + mtp/ ≈ 17GB), `draft_subfolder`
+  (in-repo drafter, resolved to the local snapshot path for `--draft-model`),
+  `hf_offline` (mlx-server.sh exports HF_HUB_OFFLINE=1 + MLX_VLM_LOCAL_ONLY=1; the
+  launcher's `_patch_local_snapshot_resolution()` resolves the repo id to the cached
+  snapshot — hf ≥1.x raises IncompleteSnapshotError for a partial mirror even offline,
+  caught by the lazy-load verification before any switch). Fix: `download_model()` now runs through `_hf_python()`
+  — the dashboard's Homebrew python has no huggingface_hub, so every menu download had
+  been failing silently. Fix 2: `_model_downloaded()` = all shards in
+  `model.safetensors.index.json` present (`_weights_complete()`), not "any .safetensors"
+  — the old check reported the new model downloaded at 0/3 shards (mtp/ landed first)
+  and the menu offered "switch" mid-download.

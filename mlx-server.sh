@@ -73,7 +73,7 @@ TEMPLATE_ARGS="$(cat "$TEMPLATE_ARGS_FILE" 2>/dev/null || echo "{}")"
 BACKEND_FILE="$HOME/.hermes/dashboard/server-backend"
 VLM_PY="$HOME/.hermes/mlx-vlm-venv/bin/python"
 BACKEND="mlx_lm"; DRAFT_MODEL=""; DRAFT_KIND="mtp"; DRAFT_BLOCK="3"
-VLM_THINK="0"; VLM_EFFORT=""
+VLM_THINK="0"; VLM_EFFORT=""; HF_OFFLINE="0"
 if [ -f "$BACKEND_FILE" ] && [ -x "$VLM_PY" ]; then
   eval "$(python3 - "$BACKEND_FILE" <<'PYEOF'
 import json, shlex, sys
@@ -87,8 +87,24 @@ print("DRAFT_KIND=" + shlex.quote(str(c.get("draft_kind") or "mtp")))
 print("DRAFT_BLOCK=" + shlex.quote(str(c.get("draft_block_size") or 3)))
 print("VLM_THINK=" + ("1" if c.get("enable_thinking") else "0"))
 print("VLM_EFFORT=" + shlex.quote(str(c.get("reasoning_effort") or "")))
+print("HF_OFFLINE=" + ("1" if c.get("hf_offline") else "0"))
 PYEOF
 )"
+fi
+
+# Roster `hf_offline` (via server-backend): the model is fully cached but its
+# repo carries variants we deliberately did NOT download (orcarouter's
+# Qwen3.8-27B-Uncensored: 2/6/8-bit subfolders, 62GB). Offline mode makes
+# mlx_vlm / mlx-lm resolve the local snapshot instead of snapshot_download()ing
+# the rest at every start. The dashboard owns downloads, not this script.
+# MLX_VLM_LOCAL_ONLY makes mlx-vlm-launch.py resolve repo ids to the cached
+# snapshot itself: huggingface_hub >=1.x raises IncompleteSnapshotError for a
+# partial mirror even offline, so HF_HUB_OFFLINE alone is not enough (verified
+# 2026-09-03). The mlx-lm fallback (venv missing) has no such shim — this model
+# needs the venv.
+if [ "$HF_OFFLINE" = 1 ]; then
+  export HF_HUB_OFFLINE=1 MLX_VLM_LOCAL_ONLY=1
+  echo "[mlx-server] HF_HUB_OFFLINE=1 + MLX_VLM_LOCAL_ONLY=1 (roster hf_offline) — local cache only"
 fi
 
 if [ "$BACKEND" = "mlx_vlm" ]; then

@@ -2231,7 +2231,9 @@ def agent_power(action):
     return {"ok": False, "error": "unknown action"}
 
 _SEED_MODELS = [
-    # Roster policy (2026-08-18, user call): TWO models only.
+    # Roster policy (2026-08-18, user call): TWO models only — plus, since
+    # 2026-09-03 (user call), ONE opt-in alternative brain: the abliterated
+    # Qwen3.8-27B below. Never the default; the user picks it in the model menu.
     #  * Qwen3.8-27B — the assistant's brain (primary lane :8080, mlx_vlm backend
     #    + native MTP speculative decoding ≈2x, APC prefix cache).
     #  * Qwen3.5-9B — the BACKGROUND lane (:8081, com.hermes.mlx-bg): all
@@ -2261,6 +2263,31 @@ _SEED_MODELS = [
      "backend": "mlx_vlm",
      "draft_model": "mlx-community/Qwen3.8-27B-MTP-bf16",
      "draft_kind": "mtp", "draft_block_size": 3},
+    # Qwen3.8-27B Uncensored (2026-09-03, user call — "the jailbroken Qwen3.8"):
+    # orcarouter's abliterated build (refusal direction orthogonalized out of the
+    # residual stream) of the SAME Qwen3.8-27B — MLX 4-bit affine g64, identical
+    # layout / quant / Qwen2Tokenizer / chat template to the primary, so the
+    # mlx_vlm backend, template_args and the Thinking toggle carry over as-is.
+    # No guardrails: it answers what the stock model refuses — opt-in from the
+    # model menu, never the default. Repo quirks encoded by roster fields:
+    #  * ONE repo holds 2/4/6/8-bit SUBFOLDERS (95GB) plus a root mirror of the
+    #    4-bit build → `ignore_patterns` keeps download_model() to root + mtp/
+    #    (~17GB). `hf_offline` makes mlx-server.sh export HF_HUB_OFFLINE=1 for
+    #    it — otherwise mlx_vlm's get_model_path() would snapshot_download the
+    #    skipped 62GB of subfolders at every server start.
+    #  * its native MTP drafter lives INSIDE the repo (`mtp/`, model_type
+    #    qwen3_5_mtp — same shape as Qwen3.8-27B-MTP-bf16) → `draft_subfolder`;
+    #    _draft_model_path() resolves it to the local snapshot path that
+    #    mlx-server.sh passes as --draft-model. Block 3 = the size measured best
+    #    for this architecture on the M5 Max (see the primary entry).
+    {"id": "orcarouter/Qwen3.8-27B-Uncensored-MLX", "label": "Qwen3.8-27B Uncensored",
+     "ram": 19, "note": "no refusals · abliterated 27B · MTP ~2x · Aug-2026",
+     "thinking": True,
+     "template_args": {"enable_thinking": False},
+     "backend": "mlx_vlm",
+     "draft_subfolder": "mtp", "draft_kind": "mtp", "draft_block_size": 3,
+     "ignore_patterns": ["2-bit/*", "4-bit/*", "6-bit/*", "8-bit/*"],
+     "hf_offline": True},
     {"id": "mlx-community/Qwen3.5-9B-4bit", "label": "Qwen3.5-9B",
      "ram": 7, "note": "background lane · news, scraping, briefings · fast",
      "role": "background", "thinking": True,
@@ -2339,10 +2366,18 @@ def _write_template_args(mid):
     if backend == "mlx_vlm" and not os.path.exists(MLX_VLM_VENV_PY):
         backend = "mlx_lm"          # venv missing → mlx-lm still loads Qwen3.8
     cfg = {"backend": backend}
+    if m.get("hf_offline"):
+        cfg["hf_offline"] = True        # mlx-server.sh exports HF_HUB_OFFLINE=1
     if backend == "mlx_vlm":
         for k in ("draft_model", "draft_kind", "draft_block_size"):
             if m.get(k) is not None:
                 cfg[k] = m[k]
+        if m.get("draft_subfolder"):    # drafter shipped inside the repo
+            dp = _draft_model_path(m)
+            if dp:
+                cfg["draft_model"] = dp         # absolute local snapshot path
+            else:
+                cfg.pop("draft_model", None)    # not local yet → plain AR
         ta = ta if isinstance(ta, dict) else {}
         cfg["enable_thinking"] = bool(ta.get("enable_thinking", True))
         if ta.get("reasoning_effort"):
@@ -2400,15 +2435,62 @@ def _hf_cache_dir(mid):
                         "models--" + mid.replace("/", "--"))
 
 
-def _model_downloaded(mid):
-    d = _hf_cache_dir(mid)
+def _weights_complete(d):
+    """Are the weights in model dir `d` (a snapshot root or a drafter subfolder)
+    all present? HF materializes each snapshot symlink only when its blob
+    finishes, so with a shard index every file in weight_map must exist; a
+    single-file model just needs its .safetensors."""
+    idx = os.path.join(d, "model.safetensors.index.json")
     try:
-        for _root, _dirs, files in os.walk(d):
-            if any(f.endswith(".safetensors") for f in files):
-                return True
+        if os.path.isfile(idx):
+            with open(idx) as f:
+                files = set((json.load(f).get("weight_map") or {}).values())
+            return bool(files) and all(os.path.isfile(os.path.join(d, fn)) for fn in files)
+        return any(f.endswith(".safetensors") for f in os.listdir(d))
+    except (OSError, ValueError):
+        return False
+
+
+def _model_downloaded(mid):
+    """Fully local? NOT 'any .safetensors under the cache dir' — that flipped
+    True as soon as the first shard (or an in-repo drafter like orcarouter's
+    0.85GB mtp/) landed, letting a switch start against missing shards."""
+    snap = _hf_snapshot_dir(mid)
+    return bool(snap) and _weights_complete(snap)
+
+
+def _hf_snapshot_dir(mid):
+    """Newest local snapshot dir of an HF repo in the hub cache, or None."""
+    snaps = os.path.join(_hf_cache_dir(mid), "snapshots")
+    try:
+        cands = [os.path.join(snaps, d) for d in os.listdir(snaps)]
     except OSError:
-        pass
-    return False
+        return None
+    cands = [d for d in cands if os.path.isdir(d)]
+    return max(cands, key=os.path.getmtime) if cands else None
+
+
+def _draft_model_path(m):
+    """What mlx-server.sh should pass as --draft-model for a roster entry: the
+    draft_model repo id, or — when the drafter ships INSIDE a repo
+    (`draft_subfolder`, e.g. orcarouter's `mtp/`) — the absolute path of that
+    subfolder in the local snapshot (mlx_vlm's get_model_path takes local
+    paths verbatim). None = no drafter / not downloaded yet."""
+    sub = (m.get("draft_subfolder") or "").strip("/")
+    if sub:
+        snap = _hf_snapshot_dir(m.get("draft_model") or m.get("id") or "")
+        p = os.path.join(snap, sub) if snap else None
+        return p if p and os.path.isdir(p) else None
+    return m.get("draft_model") or None
+
+
+def _draft_ready(m):
+    """True when the entry has no drafter, or its drafter weights are local."""
+    if m.get("draft_subfolder"):
+        p = _draft_model_path(m)
+        return bool(p) and _weights_complete(p)
+    dm = m.get("draft_model")
+    return (not dm) or _model_downloaded(dm)
 
 
 def _config_model_default():
@@ -2451,8 +2533,7 @@ def models_payload():
     out = []
     for m in reg:
         out.append({**m, "active": m["id"] == active,
-                    "downloaded": _model_downloaded(m["id"]) and
-                    (not m.get("draft_model") or _model_downloaded(m["draft_model"])),
+                    "downloaded": _model_downloaded(m["id"]) and _draft_ready(m),
                     "downloading": _model_dl.get(m["id"]) == "downloading"})
     _down = agent_paused() or agent_idle_suspended()   # process not resident
     ram = None if _down else _cached("mlx_ram", 60, _mlx_footprint_gb)
@@ -2503,6 +2584,33 @@ def switch_model(mid):
     return {"ok": True, "active": mid, "loading": True}
 
 
+_HF_PY = None
+
+
+def _hf_python():
+    """Interpreter for huggingface_hub downloads. The dashboard runs on Homebrew
+    python (no hf hub → menu downloads failed silently); the mlx-vlm venv always
+    has it, the framework python (mlx-lm's home) usually does. Probed once."""
+    global _HF_PY
+    if _HF_PY:
+        return _HF_PY
+    cands = [MLX_VLM_VENV_PY,
+             "/Library/Frameworks/Python.framework/Versions/Current/bin/python3",
+             shutil.which("python3"), sys.executable]
+    for py in cands:
+        if not py or not os.path.exists(py):
+            continue
+        try:
+            if subprocess.run([py, "-c", "import huggingface_hub"],
+                              capture_output=True, timeout=30).returncode == 0:
+                _HF_PY = py
+                return py
+        except Exception:
+            continue
+    _HF_PY = sys.executable
+    return _HF_PY
+
+
 def download_model(mid):
     if _model_dl.get(mid) == "downloading":
         return {"ok": True, "status": "downloading"}
@@ -2510,19 +2618,33 @@ def download_model(mid):
     def run():
         _model_dl[mid] = "downloading"
         try:
-            ids = [mid]
-            dm = (_model_entry(mid) or {}).get("draft_model")
-            if dm:
-                ids.append(dm)          # speculative drafter rides along
-            for _id in ids:
-                subprocess.run(
-                    [sys.executable, "-c",
-                     "from huggingface_hub import snapshot_download;"
-                     f"snapshot_download('{_id}')"],
+            ent = _model_entry(mid) or {}
+            # (repo, snapshot_download kwargs) jobs. Roster hints:
+            #  allow_patterns / ignore_patterns — scope for multi-variant repos
+            #  (orcarouter: 2/4/6/8-bit subfolders + a root mirror → root + mtp/)
+            #  draft_model (+ draft_subfolder) — a separate-repo drafter rides
+            #  along; a same-repo subfolder drafter comes with the main download.
+            jobs = [(mid, {k: ent[k] for k in ("allow_patterns", "ignore_patterns")
+                           if isinstance(ent.get(k), list) and ent[k]})]
+            dm, sub = ent.get("draft_model"), ent.get("draft_subfolder")
+            if dm and dm != mid:
+                jobs.append((dm, {"allow_patterns": [sub.strip("/") + "/*"]} if sub else {}))
+            py = _hf_python()
+            for _id, kw in jobs:
+                r = subprocess.run(
+                    [py, "-c",
+                     "import json, sys; from huggingface_hub import snapshot_download;"
+                     "snapshot_download(**json.loads(sys.argv[1]))",
+                     json.dumps({"repo_id": _id, **kw})],
                     capture_output=True, text=True, timeout=7200, env=_hermes_env())
-            ok = all(_model_downloaded(_id) for _id in ids)
+                if r.returncode != 0:
+                    print(f"[models] download {_id} failed (rc={r.returncode}): "
+                          f"{(r.stderr or '')[-600:]}", file=sys.stderr, flush=True)
+            ok = _model_downloaded(mid) and _draft_ready(ent)
             _model_dl[mid] = "done" if ok else "error"
-        except Exception:
+        except Exception as e:
+            print(f"[models] download {mid} crashed: {type(e).__name__}: {e}",
+                  file=sys.stderr, flush=True)
             _model_dl[mid] = "error"
     threading.Thread(target=run, daemon=True).start()
     return {"ok": True, "status": "downloading"}

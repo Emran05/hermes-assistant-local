@@ -87,7 +87,29 @@ and explicit agent tool calls (web search etc.) touch the internet.
   removed from models.json AND the HF cache (Qwen3-30B-A3B, Hermes-3-8B deleted;
   re-download from the menu if ever needed). The only official Qwen3.8 sizes are 27B
   and a 2.4T MoE — there is no small 3.8; 3.5-9B is the nearest sibling (same
-  architecture/template).
+  architecture/template). **+ one opt-in alternative brain (2026-09-03, user call):
+  `orcarouter/Qwen3.8-27B-Uncensored-MLX`** — the abliterated ("jailbroken", no
+  refusals) build of the same 27B, MLX 4-bit g64, identical layout/tokenizer/template
+  to the primary (mlx_vlm backend, Thinking toggle, template_args all carry over).
+  Never the default — pick it in the model menu. Optional roster fields it introduced
+  (seeds backfill them into models.json): `ignore_patterns`/`allow_patterns` (passed
+  to `snapshot_download` by `download_model()` — the repo holds 2/4/6/8-bit
+  subfolders, 95GB, plus a root mirror of 4-bit; we pull root + `mtp/` ≈ 17GB),
+  `draft_subfolder` (drafter INSIDE the repo — `_draft_model_path()` resolves `mtp/`
+  to the local snapshot path written into `server-backend`; `_draft_ready()` gates
+  `downloaded`), `hf_offline` (→ `server-backend.hf_offline` → mlx-server.sh exports
+  `HF_HUB_OFFLINE=1` + `MLX_VLM_LOCAL_ONLY=1`; the latter makes `mlx-vlm-launch.py`'s
+  `_patch_local_snapshot_resolution()` map a repo id to `refs/main` → `snapshots/<sha>`
+  itself, because huggingface_hub ≥1.x throws `IncompleteSnapshotError` for a partial
+  mirror even offline, and online `get_model_path()` would fetch the skipped 62GB of
+  subfolders at every start). Same change: `download_model()` runs through
+  `_hf_python()` (venv → framework → PATH python) — the dashboard's Homebrew python
+  has no huggingface_hub, so menu downloads had been failing silently. And
+  `_model_downloaded()` now means COMPLETE: `_weights_complete()` checks every file in
+  `model.safetensors.index.json` exists in the snapshot (HF links a shard only when its
+  blob finishes) — the old "any .safetensors under the cache dir" flipped `downloaded`
+  true the moment the first shard (or the 0.85GB `mtp/` drafter) landed, so the menu
+  offered "switch" mid-download.
 - **Claude auto-route (`aux_autoroute.py`, 2026-08-18)** — the local model NEVER used
   the think-with-claude skill (bridge log: 4 calls total, all 07-06), so routing is
   now decided in code per chat turn: `ar_score()` over the USER message (+3 explicit
