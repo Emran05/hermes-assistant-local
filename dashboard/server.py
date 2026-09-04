@@ -1311,6 +1311,52 @@ def _mlx_restart():
         return False
 
 
+# --- manual "free memory now" (/api/model/mem_free) ------------------------
+# The restart takes ~30-60s, so the POST can't wait for it — but it used to
+# fire-and-forget a thread and answer {"ok":true,"restarting":true} even when
+# the bootout/bootstrap failed, and the UI then blind-waited 4s and claimed
+# success. The thread now records its outcome here and the client polls
+# /api/model/mem_free/status until running goes false.
+_mem_free_state = {"running": False, "ok": None, "error": "", "finished_at": 0.0}
+_mem_free_lock = threading.Lock()
+
+
+def _mem_free_run():
+    """Thread body: restart the model server and PUBLISH the boolean result."""
+    ok, err = False, ""
+    try:
+        ok = bool(_mlx_restart())
+        if not ok:
+            err = "restart failed — see dashboard log"
+    except Exception as e:                       # _mlx_restart already catches,
+        err = f"restart failed: {e}"             # belt & braces for the thread
+    if ok:                                       # footprint changed — drop caches
+        _widget_cache.pop("mlx_ram", None)
+        _widget_cache.pop("mlx_ram_fast", None)
+    with _mem_free_lock:
+        _mem_free_state.update(running=False, ok=ok, error=err,
+                               finished_at=time.time())
+
+
+def _mem_free_start():
+    """POST handler. One restart at a time: overlapping bootouts race the
+    launchd start, and the button is very mashable while nothing looks to be
+    happening. Returns {"ok":True,"started":True} only when a thread began."""
+    with _mem_free_lock:
+        if _mem_free_state["running"]:
+            return {"ok": False, "error": "already restarting"}
+        _mem_free_state.update(running=True, ok=None, error="", finished_at=0.0)
+    threading.Thread(target=_mem_free_run, daemon=True).start()
+    return {"ok": True, "started": True}
+
+
+def _mem_free_status():
+    """GET handler: {running, ok, error, finished_at} for the LAST/current run
+    (ok is None until one has finished; finished_at 0 while in flight)."""
+    with _mem_free_lock:
+        return dict(_mem_free_state)
+
+
 def mlx_admission():
     """(ok, gb, limit). ok=False → at/over the soft memory ceiling: refuse NEW
     model work so the KV cache can't overrun the machine. A present
@@ -1376,11 +1422,77 @@ def note_user_activity():
     _last_user_activity = time.time()
 
 
+# --------------------------------------------------------------------------
+# Prewarm after wake (post-v1 backlog #1)
+# --------------------------------------------------------------------------
+# agent_wake() returns the moment /v1/models answers, but the model server is
+# only *loaded* then — nothing is prefilled. The first real turn after every
+# idle-suspend therefore pays the cold prefill of the ~18k-token Hermes system
+# prompt (~25s at the measured ~700-1000 prompt tok/s; docs/plans/
+# post-v1-baseline.md). Every LATER turn is ~0.2s because mlx-vlm's APC exact
+# prefix cache holds that prefix.
+#
+# So: right after the wake poll first sees the server, run ONE throwaway turn
+# through the SAME serve WebSocket path real dashboard/Telegram turns use. The
+# byte-identical system prompt is the entire point — a `hermes -z` no-op is a
+# different invocation and would not necessarily land on the same trie entry.
+#
+# The synthetic turn must be invisible to everything that measures "is a human
+# using this": it is NOT registered in CHAT_JOBS, it never calls
+# note_user_activity(), it never writes a chats/*.json (so list_sessions() /
+# /api/history can't show it), and its serve session carries its own
+# sessions.source + title so _newest_external_turn_ts() cannot mistake it for a
+# Telegram/hub turn and keep the model awake forever.
+PREWARM_SESSION = "__prewarm__"      # chat-store key that must never be listed
+PREWARM_TITLE = "__prewarm__"        # serve session title (filtered in SQL)
+PREWARM_SOURCE = "prewarm"           # sessions.source in state.db
+PREWARM_PROMPT = "Reply with exactly: ok"
+PREWARM_TIMEOUT = float(os.environ.get("HERMES_PREWARM_TIMEOUT", "120"))
+PREWARM_DEFAULT = True               # settings.json prewarm.enabled default
+
+# last_ms / last_at / last_result surface in models_payload() and
+# GET /api/agent/prewarm. Plain module dict: written by the prewarm thread,
+# read by HTTP threads; single assignments of immutable values, no lock needed.
+_prewarm_state = {"last_ms": None, "last_at": None, "last_result": None}
+_prewarm_inflight = threading.Lock()   # never held while calling the chat path
+
+
+def prewarm_enabled():
+    """settings.json `prewarm.enabled`, default True. Read fresh per call (the
+    file is a few hundred bytes) so the toggle needs no restart, and fails OPEN
+    on a read problem — a corrupt settings file must not silently disable it."""
+    try:
+        cfg = (get_settings() or {}).get("prewarm")
+        if isinstance(cfg, dict) and "enabled" in cfg:
+            return bool(cfg.get("enabled"))
+    except Exception:
+        pass
+    return PREWARM_DEFAULT
+
+
+def set_prewarm_enabled(on):
+    on = bool(on)
+    with _state_lock:
+        s = get_settings() or {}
+        cfg = s.get("prewarm")
+        s["prewarm"] = {**(cfg if isinstance(cfg, dict) else {}), "enabled": on}
+        write_json(SETTINGS_FILE, s)
+    return on
+
+
+def prewarm_payload():
+    return {"enabled": prewarm_enabled(), **_prewarm_state}
+
+
 def _newest_external_turn_ts():
     """Newest message ts from Telegram/hub sessions — activity this process can't
     see directly (they go agent→serve→:8080, not through the dashboard). Read-only,
     best-effort, 0.0 on any problem. Excludes 'cli' (the briefing's own -z turns)
-    so background work never resets the clock."""
+    so background work never resets the clock — and excludes the prewarm session
+    (source PREWARM_SOURCE, and by title too in case a future serve build ignores
+    the source we pass and files it under 'hub'), which is OUR OWN synthetic turn:
+    counting it would reset the idle clock on every wake and the model would never
+    sleep again."""
     if not os.path.exists(STATE_DB):
         return 0.0
     try:
@@ -1389,7 +1501,9 @@ def _newest_external_turn_ts():
         con = sqlite3.connect(uri, uri=True, timeout=1.5)
         row = con.execute(
             "SELECT MAX(m.timestamp) FROM messages m JOIN sessions s "
-            "ON m.session_id = s.id WHERE s.source IN ('telegram','hub')"
+            "ON m.session_id = s.id WHERE s.source IN ('telegram','hub') "
+            "AND s.source <> ? AND (s.title IS NULL OR s.title <> ?)",
+            (PREWARM_SOURCE, PREWARM_TITLE)
         ).fetchone()
         con.close()
         return float(row[0]) if row and row[0] else 0.0
@@ -1400,6 +1514,111 @@ def _newest_external_turn_ts():
 def _chat_jobs_active():
     with _jobs_lock:
         return any(not v.get("done") for v in CHAT_JOBS.values())
+
+
+def _prewarm_skip_reason():
+    """Why NOT to prewarm right now, or None to go ahead. Every reason is a
+    case where the extra generation would either be wasted or actively harmful:
+    a paused agent must stay down; a real turn already in flight will warm the
+    prefix itself (and racing it just competes for the model); the briefing is
+    the same story on the background lane; and over the soft memory ceiling
+    mlx_admission() is refusing new model work for the whole process, which
+    includes ours."""
+    if not prewarm_enabled():
+        return "disabled"
+    if hermes_rpc is None:
+        return "no-serve-client"
+    if agent_paused():
+        return "paused"
+    if _chat_jobs_active():
+        return "chat-job-active"
+    if globals().get("_briefing_generating"):
+        return "briefing"
+    try:
+        ok, gb, limit = mlx_admission()
+        if not ok:
+            return "memory-ceiling"
+    except Exception:
+        pass
+    return None
+
+
+def _prewarm_after_wake(reason="wake"):
+    """ONE trivial turn through the serve WebSocket so the ~18k-token system
+    prompt is resident in the APC exact-prefix cache before the user's real
+    first turn. Runs on a detached daemon thread (see agent_wake); never raises
+    into its caller, never touches the idle clock, never appears in the UI.
+
+    Holds no lock the chat path needs: a real /api/chat that arrives mid-prewarm
+    goes straight through (serve handles concurrent sessions), and the worst
+    case is that it queues behind ~2 generated tokens."""
+    if not _prewarm_inflight.acquire(blocking=False):
+        return "already-running"      # a second wake raced us; one is enough
+    try:
+        skip = _prewarm_skip_reason()
+        if skip:
+            _prewarm_state.update(last_result="skipped:" + skip,
+                                  last_at=time.time(), last_ms=None)
+            print(f"[prewarm] skipped ({skip})", file=sys.stderr, flush=True)
+            return "skipped:" + skip
+
+        # A throwaway job/meta pair. Deliberately NOT registered in CHAT_JOBS:
+        # _chat_jobs_active() gates idle-suspend and the prewarm guard above,
+        # and a synthetic turn must not look like work in flight.
+        job = {"id": "prewarm", "state": "running", "text": "", "status": "",
+               "approval": None, "reply": "", "ok": False, "done": False,
+               "ts": time.time()}
+        meta = {"title": PREWARM_TITLE, "serve_sid": "", "serve_key": ""}
+        t0 = time.time()
+
+        def _turn():
+            try:
+                # save_meta is a no-op: persisting serve_sid/serve_key would
+                # mean a chats/*.json for a conversation the user never had.
+                # A fresh serve session per wake is fine — the cache entry we
+                # want is the SYSTEM PROMPT prefix, which is identical either way.
+                hermes_rpc.run_turn(job, meta, PREWARM_PROMPT, lambda: None,
+                                    source=PREWARM_SOURCE)
+            except Exception as e:
+                job["_err"] = f"{type(e).__name__}: {e}"
+                job["done"] = True
+
+        th = threading.Thread(target=_turn, name="prewarm-turn", daemon=True)
+        th.start()
+        th.join(PREWARM_TIMEOUT)
+        ms = int((time.time() - t0) * 1000)
+        if th.is_alive():
+            result = "timeout"
+        elif job.get("_err"):
+            result = "error:" + job["_err"]
+        elif job.get("ok"):
+            result = "ok"
+        else:
+            result = "failed:" + (job.get("reply") or "no reply")[:120]
+        _prewarm_state.update(last_ms=ms, last_at=time.time(),
+                              last_result=result)
+        print(f"[prewarm] {reason}: {result} in {ms}ms "
+              f"(system prompt now in the prefix cache)",
+              file=sys.stderr, flush=True)
+        return result
+    except Exception as e:      # a prewarm failure must never affect the wake
+        _prewarm_state.update(last_result=f"error:{type(e).__name__}: {e}",
+                              last_at=time.time(), last_ms=None)
+        print(f"[prewarm] failed: {type(e).__name__}: {e}",
+              file=sys.stderr, flush=True)
+        return "error"
+    finally:
+        _prewarm_inflight.release()
+
+
+def _prewarm_kick(reason="wake"):
+    """Fire-and-forget the prewarm turn. Called only from agent_wake(), right
+    after the model first answers /v1/models."""
+    try:
+        threading.Thread(target=_prewarm_after_wake, args=(reason,),
+                         name="prewarm", daemon=True).start()
+    except Exception as e:
+        print(f"[prewarm] could not start: {e}", file=sys.stderr, flush=True)
 
 
 def agent_wake(wait=True, timeout=90):
@@ -1423,13 +1642,20 @@ def agent_wake(wait=True, timeout=90):
         _widget_cache.pop(_k, None)
     note_user_activity()
     if not wait:
+        # The server is up but not answering yet; there is nothing to prefill
+        # and nobody waiting on this call. The prewarm fires only where we can
+        # prove the model is online (below).
         return True
     deadline = time.time() + timeout
     while time.time() < deadline:
         if model_online():
+            _prewarm_kick("wake")   # detached; the caller's turn is not delayed
             return True
         time.sleep(1.5)
-    return model_online()
+    up = model_online()             # last chance — it may have landed just now
+    if up:
+        _prewarm_kick("wake")
+    return up
 
 
 def idle_suspend_loop():
@@ -1529,6 +1755,8 @@ def list_sessions():
         if not fn.endswith(".json"):
             continue
         sid = fn[:-5]
+        if sid == PREWARM_SESSION:
+            continue        # synthetic prewarm-after-wake turn, never a chat
         chat = load_chat(sid)
         if not chat["messages"]:
             continue
@@ -2534,10 +2762,18 @@ def set_model_thinking(enabled, mid=None):
     _write_template_args(mid)
     if agent_paused() or agent_idle_suspended():
         return {"ok": True, "enabled": bool(enabled), "restarted": False}
+    # The setting IS persisted by now, so `enabled` rides along on every branch
+    # — a failed restart means "saved, takes effect on the next start", not
+    # "nothing happened". Never claim restarted:True on a False return: the UI
+    # would show the loading swap and waitForModel against a server that is
+    # never coming back.
     try:
-        _mlx_restart()
+        restarted = bool(_mlx_restart())
     except Exception as e:
-        return {"ok": False, "error": f"restart failed: {e}"}
+        return {"ok": False, "error": f"restart failed: {e}", "enabled": bool(enabled)}
+    if not restarted:
+        return {"ok": False, "error": "restart failed — see dashboard log",
+                "enabled": bool(enabled)}
     _widget_cache.pop("sys_live", None)
     return {"ok": True, "enabled": bool(enabled), "restarted": True, "loading": True}
 
@@ -2683,6 +2919,10 @@ def models_payload():
             "idle_enabled": idle_suspend_enabled(),
             "idle_min": _idle_min(),
             "ram_gb": ram,
+            # prewarm-after-wake (backlog #1): {enabled, last_ms, last_at,
+            # last_result}. aux_promotion rebinds models_payload() but only ADDS
+            # keys to whatever the base returns, so this passes through.
+            "prewarm": prewarm_payload(),
             "mem": {"soft_gb": MLX_SOFT_GB, "hard_gb": MLX_HARD_GB,
                     "over": bool(ram and ram >= MLX_SOFT_GB),
                     "override": os.path.exists(MEM_OVERRIDE_FILE)}}
@@ -3133,6 +3373,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json(_cached("sys_live", 2, system_status))
         elif path == "/api/models":
             self._json(models_payload())
+        elif path == "/api/model/mem_free/status":
+            # progress/outcome of the last POST /api/model/mem_free restart
+            self._json(_mem_free_status())
         elif path == "/api/catalog":
             self._json(widget_catalog())
         elif path == "/api/briefing":
@@ -3146,10 +3389,16 @@ class Handler(BaseHTTPRequestHandler):
             self._json(get_access())
         elif path == "/api/sessions":
             self._json({"sessions": list_sessions()})
+        elif path == "/api/agent/prewarm":
+            # prewarm-after-wake state (also mirrored in /api/models.prewarm)
+            self._json({"ok": True, **prewarm_payload()})
         elif path == "/api/history":
             qs = urllib.parse.parse_qs(parsed.query)
             sid = (qs.get("session") or [""])[0]
-            if not SESSION_RE.match(sid):
+            # PREWARM_SESSION is a reserved key, not a conversation: the prewarm
+            # turn writes no chat file, but refuse it by name so it can never be
+            # read back even if something ever leaves one behind.
+            if not SESSION_RE.match(sid) or sid == PREWARM_SESSION:
                 self._json({"messages": [], "title": ""})
                 return
             self._json(load_chat(sid))
@@ -3349,6 +3598,23 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "enabled": idle_suspend_enabled(),
                         "minutes": _idle_min()})
             return
+        if path == "/api/agent/prewarm":
+            # {"enabled": bool} — turn the after-wake prefix warm-up on/off.
+            # Strict about the key being present: a body that forgot it must
+            # not silently switch the feature off.
+            d = self._body_json()
+            if "enabled" not in d:
+                self._json({"ok": False,
+                            "error": "missing 'enabled' (bool)"}, 400)
+                return
+            try:
+                set_prewarm_enabled(d.get("enabled"))
+            except Exception as e:
+                self._json({"ok": False,
+                            "error": f"{type(e).__name__}: {e}"}, 500)
+                return
+            self._json({"ok": True, **prewarm_payload()})
+            return
         if path == "/api/model/mem_override":
             # user's "allow it" escape hatch: touch/remove the override file so
             # mlx_admission stops refusing work while memory is over the ceiling.
@@ -3366,8 +3632,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/model/mem_free":
             # manual "clear the cache now" — reliable restart frees the balloon.
-            threading.Thread(target=_mlx_restart, daemon=True).start()
-            self._json({"ok": True, "restarting": True})
+            # Answers whether a restart STARTED; poll /api/model/mem_free/status
+            # for whether it worked (the old fire-and-forget always said yes).
+            self._json(_mem_free_start())
             return
         if path == "/api/models/switch":
             self._json(switch_model((self._body_json().get("id") or "").strip()))

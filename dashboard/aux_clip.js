@@ -424,6 +424,20 @@
   }
 
   // ---- open / close ---------------------------------------------------------
+  // Esc == clicking the scrim. The listener is installed ONLY while the sheet
+  // is up and torn down in closeSheet, so when we're shut the key is untouched
+  // and reaches whoever else wants it — in the menu-bar popover that's
+  // aux_quickask's POP.input keydown, the popover's only Escape handler (it
+  // "detects" us implicitly: while the sheet is open focus lives in the sheet,
+  // so that input handler never fires). CAPTURE + stopPropagation makes that
+  // implicit rule airtight for the one case focus is still in the popover
+  // field: the topmost surface wins, exactly one layer closes per press.
+  function onEscKey(e) {
+    if (e.key !== "Escape" && e.key !== "Esc") return;
+    if (!SHEET) return;                     // belt & braces: never swallow when shut
+    e.preventDefault(); e.stopPropagation();
+    closeSheet();
+  }
   function openSheet() {
     var d = DOC(); if (!d) return;
     if (SHEET) return;   // already open
@@ -431,6 +445,7 @@
       loadLast();
       if (STATE.action && !(CAT.actions && CAT.actions[STATE.action])) STATE.action = (CAT.order && CAT.order[0]) || "summarize";
       SHEET = buildSheet();
+      d.addEventListener("keydown", onEscKey, true);
       renderChips(); renderOpts();
       // read the clipboard (tiers 1/2); tier 3 (manual paste) shows if empty
       clipRead().then(function (t) {
@@ -442,6 +457,9 @@
     });
   }
   function closeSheet() {
+    var d = DOC();
+    // remove first: a no-op when it was never added (⌘⇧V toggle, double close)
+    if (d) d.removeEventListener("keydown", onEscKey, true);
     if (els && els.scrim && els.scrim.parentNode) els.scrim.parentNode.removeChild(els.scrim);
     SHEET = null; els = {}; STATE.result = ""; STATE.text = "";
   }

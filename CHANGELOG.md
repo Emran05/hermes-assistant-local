@@ -6,6 +6,41 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-04
+
+Small, measured follow-ups to 1.0.0 from the post-v1 backlog
+(`docs/plans/post-v1-backlog.md`; baseline numbers in `docs/plans/post-v1-baseline.md`).
+
+### Added
+- **Prewarm after wake.** After an idle-suspend wake the dashboard now runs one
+  throwaway turn through the serve backend so the ~18k-token system prompt is in the
+  prefix cache before your first real message. Measured through the real path on the
+  M5 Max (idle-suspend wake → first token of the next turn): **29.1 s before, 1.7 s
+  after**; the warm-up itself takes ~27 s in the background right after the wake. It
+  fires after a wake with no message pending ("Wake now", the popover's status strip,
+  a Telegram-triggered wake); if you type into a sleeping dashboard your own message
+  already does the prefill, so no second one is started. Off switch:
+  `POST /api/agent/prewarm {"enabled": false}`; state in `/api/models.prewarm`. The
+  warm-up session never appears in the conversation list and never counts as user
+  activity for the idle clock.
+
+### Changed
+- Release source tarballs no longer include `.claude/`, `skills-snapshot/`,
+  `graphify-out/` or `docs/state-snapshot.json` (`.gitattributes` export-ignore).
+- Efficiency baseline recorded: MTP draft block 3 stays the default (best prose,
+  second on code); block 4 wins code by ~8% but loses prose by ~7%; no drafter is
+  ~1.5-2x slower on decode.
+
+### Fixed
+- **Free Memory reports the truth**: the model-menu action polls the real restart
+  outcome (`GET /api/model/mem_free/status`) instead of a blind 4 s timer and shows the
+  error when the restart fails.
+- Toggling Thinking no longer claims `restarted: true` when the server restart failed.
+- The clipboard sheet closes on Esc.
+- Agent Desktop screenshots are recorded as read-only captures (no "irreversible"
+  badge in the Flight Recorder).
+
+
 ## [1.0.0] - 2026-09-03
 
 The first release meant to be installed by someone other than its author:

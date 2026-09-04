@@ -466,3 +466,44 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   Approve/Deny, Claude deep card, Copy/Continue hover actions, bridge-driven dynamic
   height 320..620. Verified with mocked turns (0 errors, model never woken); dual-role
   contract with index.html intact.
+- `<prewarm-after-wake>` (2026-09-04) Post-v1 backlog #1 — **prewarm after wake**.
+  `agent_wake()` returned as soon as `/v1/models` answered, so the model was
+  loaded but nothing was prefilled and the user's first real turn after every
+  idle-suspend paid the cold prefill of the ~18k-token Hermes system prompt
+  (~25s; every later turn is ~0.2s off the APC exact-prefix cache — measured in
+  `docs/plans/post-v1-baseline.md`). Now `agent_wake()` fires `_prewarm_kick()`
+  the moment `model_online()` FIRST returns true (only there; the `wait=False`
+  path returns before the server answers, so there is nothing to prefill) and
+  `_prewarm_after_wake(reason)` runs ONE trivial turn ("Reply with exactly: ok")
+  on a detached daemon thread through the SAME `hermes_rpc.run_turn` serve
+  WebSocket that dashboard and Telegram turns use — the byte-identical system
+  prompt is the whole point; a `hermes -z` no-op is a different invocation and
+  need not share the trie entry. The synthetic turn is invisible to every
+  "is a human using this" signal: not registered in `CHAT_JOBS`, never calls
+  `note_user_activity()` (so `_last_user_activity` is untouched), writes no
+  `chats/*.json` (`PREWARM_SESSION` `__prewarm__` is skipped by
+  `list_sessions()` and refused by `/api/history`), and its serve session
+  carries `source: "prewarm"` + title `__prewarm__`, BOTH excluded in
+  `_newest_external_turn_ts()` — the title as well, in case a future serve build
+  ignores the source we pass — or the prewarm would reset the idle clock on
+  every wake and the model would never sleep again. Skips when disabled, no
+  serve client, paused, a real chat job in flight, the briefing is generating,
+  or `mlx_admission()` refuses; holds no lock the chat path needs (a `/api/chat`
+  arriving mid-prewarm goes straight through, serve handles concurrent
+  sessions); 120s cap (`HERMES_PREWARM_TIMEOUT`); one stderr line with the
+  elapsed ms. Toggle: settings.json `prewarm: {enabled}` (default true) via
+  `GET/POST /api/agent/prewarm {enabled}`; state also in
+  `models_payload().prewarm {enabled,last_ms,last_at,last_result}` (aux_promotion
+  rebinds models_payload but only ADDS keys, so it passes through — asserted).
+  Only `hermes_rpc.py` change: `run_turn(..., source="hub")`, real turns
+  unaffected. VERIFIED offline, model never woken: 43/43 in a scratch harness
+  that exec-loads server.py under a throwaway `$HOME` with `hermes_rpc`,
+  `launchctl` (subprocess.run) and `model_online` stubbed — one prewarm per
+  wake, none on `wait=False`, each skip guard, `note_user_activity` never called
+  by the prewarm, no chat file written, the prewarm key absent from
+  `list_sessions()`, the `_newest_external_turn_ts()` SQL against a temp sqlite
+  holding both a `source='prewarm'` row AND a `source='hub'`/`title='__prewarm__'`
+  row (excluded) next to real hub/telegram rows (counted), and
+  `GET/POST /api/agent/prewarm` + `/api/models.prewarm` round-tripped against a
+  real `ThreadingHTTPServer`. PENDING: the "after" TTFT measurement (the
+  coordinator owns the before/after on the real model).

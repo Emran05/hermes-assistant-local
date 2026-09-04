@@ -232,7 +232,12 @@ def _desk_record_capture():
     if not callable(rrl):
         return
     try:
-        rrl("screencapture", "desktop-frame", kind="read", reversible="no",
+        # reversible="n/a", not "no": a capture reads the screen and changes
+        # nothing on the Mac, so there is no state to restore. aux_recorder's
+        # REVERSIBLE_POLICY gives every read/net/agent kind "n/a" (1.0.0) and
+        # the Flight Recorder draws NO badge for it — "no" painted every
+        # screenshot with the same irreversible warning as an rm -rf.
+        rrl("screencapture", "desktop-frame", kind="read", reversible="n/a",
             source="dashboard", status="done",
             summary="desktop thumbnail (local only, never sent)")
         _desk_last_rec[0] = now

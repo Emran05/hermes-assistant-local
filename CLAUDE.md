@@ -71,6 +71,34 @@ and explicit agent tool calls (web search etc.) touch the internet.
   {enabled,minutes}; `/api/models` carries `idle_suspended`/`idle_enabled`/
   `idle_min`; model menu shows a "sleeping · Wake now" row. Disable: touch
   `~/.hermes/dashboard/idle-suspend-off` (or the settings toggle).
+- **Prewarm after wake (backlog #1)** — `agent_wake()` returned as soon as
+  `/v1/models` answered, so the model was LOADED but nothing was PREFILLED and
+  the user's first real turn paid the cold prefill of the ~18k-token Hermes
+  system prompt (~25s; every later turn is ~0.2s off the APC exact-prefix
+  cache — see `docs/plans/post-v1-baseline.md`). Now `agent_wake()` fires
+  `_prewarm_kick("wake")` the moment `model_online()` FIRST returns true (only
+  there — the `wait=False` path returns before the server answers, so there is
+  nothing to prefill), and `_prewarm_after_wake()` runs on a detached daemon
+  thread. It does ONE trivial turn (`PREWARM_PROMPT` = "Reply with exactly:
+  ok") through the SAME `hermes_rpc.run_turn` serve WebSocket the dashboard and
+  Telegram use — the byte-identical system prompt is the whole point, a
+  `hermes -z` no-op is a different invocation and need not share the trie
+  entry. The synthetic turn is invisible to every "is a human using this"
+  signal: NOT registered in `CHAT_JOBS`, never calls `note_user_activity()`,
+  writes no `chats/*.json` (`PREWARM_SESSION` = `__prewarm__` is skipped by
+  `list_sessions()` and refused by `/api/history`), and its serve session
+  carries `source: "prewarm"` + title `__prewarm__` — both excluded in
+  `_newest_external_turn_ts()` (the title too, in case a future serve build
+  ignores the source we pass), or it would reset the idle clock on every wake
+  and the model would never sleep again. `run_turn(..., source=)` is the only
+  `hermes_rpc.py` change; real turns still default to `"hub"`. Skips when:
+  disabled, no serve client, paused, a real chat job in flight, the briefing is
+  generating, or `mlx_admission()` refuses. Holds no lock the chat path needs
+  (a `/api/chat` arriving mid-prewarm goes straight through — serve handles
+  concurrent sessions); 120s cap (`HERMES_PREWARM_TIMEOUT`), one stderr line
+  with the elapsed ms. Toggle: settings.json `prewarm: {enabled}` (default
+  true) via `GET/POST /api/agent/prewarm {enabled}`; state also rides in
+  `models_payload().prewarm {enabled,last_ms,last_at,last_result}`.
 - **Code knowledge graph (Graphify)** — `graphifyy` (official double-y pkg) in
   an ISOLATED venv `~/.hermes/graphify-venv` (never the fragile framework
   Python). `graphify update .` re-extracts the repo via tree-sitter (no LLM,
@@ -235,7 +263,9 @@ and explicit agent tool calls (web search etc.) touch the internet.
   `MLX_HARD_GB` (56) does a `_mlx_restart()` (bootout→bootstrap — NOT kickstart -k)
   to free the balloon. User override: `/api/model/mem_override {allow}` touches
   `~/.hermes/dashboard/mem-override`; `/api/model/mem_free` = manual cache-clear
-  restart. Surfaced in models_payload().mem + the model-menu memory row. When
+  restart (since 1.0.1 it returns `{started}` and `GET /api/model/mem_free/status`
+  carries the real `_mlx_restart()` outcome — the menu polls that instead of a blind
+  4 s timer; `set_model_thinking()` likewise reports `ok:false` when the restart failed). Surfaced in models_payload().mem + the model-menu memory row. When
   running many model-drilling agents concurrently, expect the ceiling to engage —
   that's it working, not a bug.
 - **Message Center (P2.4)** — the APP (holds FDA; launchd python cannot) reads

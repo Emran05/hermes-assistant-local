@@ -193,12 +193,18 @@ class ServeSession:
         self.ws.close()
 
 
-def run_turn(job, chat_meta, prompt, save_meta):
+def run_turn(job, chat_meta, prompt, save_meta, source="hub"):
     """Drive one agent turn; mutates `job` dict in place as events stream.
 
     job fields consumed by the poll endpoint: state, text, status, approval,
     reply, ok, done. `chat_meta` carries serve_sid/serve_key persistence via
     save_meta() so the conversation resumes across turns and serve restarts.
+
+    `source` is written to the serve session's `sessions.source` column in
+    state.db (the gateway takes it verbatim: `str(params.get("source") or
+    "tui")`). It stays "hub" for every real dashboard turn; server.py's
+    prewarm-after-wake passes its own value so that synthetic turn can be told
+    apart from genuine user activity in `_newest_external_turn_ts()`.
     """
     srv = ServeSession()
     try:
@@ -222,7 +228,7 @@ def run_turn(job, chat_meta, prompt, save_meta):
         if not alive:
             res = srv.call("session.create",
                            {"title": chat_meta.get("title") or "Hub chat",
-                            "cwd": os.path.expanduser("~"), "source": "hub"},
+                            "cwd": os.path.expanduser("~"), "source": source},
                            timeout=20)
             sid = res.get("session_id") or ""
             key = res.get("stored_session_id") or res.get("session_key") or ""

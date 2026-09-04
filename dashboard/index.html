@@ -1925,10 +1925,35 @@ async function loadModels(){
   if(ovr)ovr.onclick=async()=>{const on=!ovr.classList.contains('on');
     await fetch('/api/model/mem_override',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({allow:on})});loadModels();};
   const free=menu.querySelector('#mm-free');
+  // POST starts the restart; the STATUS route says when it finished and whether
+  // it worked. The old blind 4s timeout declared success while the model server
+  // was still cold — and said the same thing when the restart had failed.
   if(free)free.onclick=async()=>{free.textContent='Freeing…';
-    await fetch('/api/model/mem_free',{method:'POST'});
+    let s={};try{s=await(await fetch('/api/model/mem_free',{method:'POST'})).json();}catch(e){s={ok:false,error:'could not reach the dashboard'};}
+    if(!s||s.ok===false){free.textContent='Free memory now';memFreeError(s&&s.error||'could not start');return;}
     showModelSwap('','Freeing memory','Restarting the model to clear its cache — about 30–60s.');
-    setTimeout(()=>{hideModelSwap&&hideModelSwap();loadModels();},4000);};
+    let failed='',miss=0;
+    for(let i=0;i<120;i++){                     // ~2 min ceiling, then give up
+      await new Promise(r=>setTimeout(r,1000));
+      let st=null;try{const rs=await fetch('/api/model/mem_free/status');if(rs.ok)st=await rs.json();}catch(e){}
+      // no status route = a dashboard process older than this page (static files
+      // are served fresh, the service restarts later) — don't hang for 2 min
+      if(!st){if(++miss>=5)break;continue;}
+      miss=0;
+      if(!st.running){if(st.ok===false)failed=st.error||'restart failed';break;}
+    }
+    hideModelSwap&&hideModelSwap();
+    await loadModels();                          // re-renders the memory row…
+    if(failed)memFreeError(failed);};            // …so the note goes on AFTER
+}
+// Inline failure note inside the model menu's memory row — the one place the
+// user just clicked. loadModels() rebuilds that row, so call this after it.
+function memFreeError(msg){
+  const row=$('model-menu').querySelector('.mmmem');
+  if(!row)return;
+  let w=row.querySelector('.mmfree-err');
+  if(!w){w=document.createElement('div');w.className='mmmem-warn mmfree-err';row.appendChild(w);}
+  w.textContent='Couldn’t free memory — '+msg;
 }
 async function toggleThinking(on){
   if(!confirm((on?'Turn thinking ON? Turns get noticeably slower (the model reasons first).':'Turn thinking OFF? Direct answers, fastest for tool calls.')+' The model server restarts (~30–60s).'))return;

@@ -1,0 +1,16 @@
+# Release source tarball hygiene.
+#
+# .github/workflows/release.yml packages the source with
+#   git archive --format=tar.gz --prefix=... -o dist/...-source.tar.gz <tag>
+# i.e. it archives a COMMITTED TREE (the tag), never the working copy, so
+# `export-ignore` here only takes effect once this file is committed and
+# tagged. Locally, `git archive HEAD` reads the attributes out of HEAD too —
+# pass `--worktree-attributes` to dry-run an uncommitted edit to this file.
+#
+# Everything below is developer scaffolding or generated output: a user who
+# unpacks the tarball to run install.sh needs none of it, and .claude/ +
+# skills-snapshot/ additionally mirror this Mac's private agent config.
+.claude/                 export-ignore
+skills-snapshot/         export-ignore
+graphify-out/            export-ignore
+docs/state-snapshot.json export-ignore
