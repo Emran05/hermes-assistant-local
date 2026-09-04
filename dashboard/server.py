@@ -1244,18 +1244,30 @@ def _machine_ram_gb():
 
     Falls back to 64 when sysctl is missing or unparseable — a familiar default
     (the machine every measurement in docs/plans was taken on) beats raising at
-    import time inside a launchd service.
+    import time inside a launchd service.  That fallback SAYS SO on stderr: it
+    silently sets every memory ceiling in the process (MLX_SOFT_GB/MLX_HARD_GB
+    and each model row's `fit`) to 64GB numbers, so on a 16GB Mac admission
+    control would never engage and the only visible symptom is swap.  One line
+    per process — the memo below is filled in either way, so this branch runs
+    at most once (and `sysctl` needs /usr/sbin on PATH under launchd, a known
+    gotcha this line finally makes legible in ~/.hermes/logs/dashboard.log).
     """
     if _RAM_GB_CACHE[0] is None:
-        gb = 64.0
+        gb, why = 64.0, ""
         try:
             out = subprocess.run(["/usr/sbin/sysctl", "-n", "hw.memsize"],
                                  capture_output=True, text=True, timeout=3).stdout
             b = int(out.strip())
             if b > 0:
                 gb = b / (1024 ** 3)
-        except Exception:
-            pass
+            else:
+                why = "hw.memsize is %r" % (b,)
+        except Exception as e:
+            why = "%s: %s" % (type(e).__name__, e)
+        if why:
+            print("[mem] could not read hw.memsize (%s) — assuming %.0f GB of "
+                  "RAM for every ceiling in this process" % (why, gb),
+                  file=sys.stderr)
         _RAM_GB_CACHE[0] = gb
     return _RAM_GB_CACHE[0]
 
@@ -3258,18 +3270,45 @@ class RouteCtx:
         return v[0] if isinstance(v, list) and v else default
 
 
+def _check_header(name, value):
+    """Reject a header name/value that could split the response.  Raises.
+
+    BaseHTTPRequestHandler.send_header does no validation: a CR or LF anywhere
+    in either half ends the header line early and everything after it is read
+    by the browser as further headers — or, after a blank line, as a second
+    response body.  Every RawResponse header today is built from data the USER
+    controls (aux_convos' Content-Disposition carries a conversation TITLE),
+    so "the caller sanitises it" is exactly the assumption that eventually
+    fails silently.  Refuse here instead, once, for every caller and every
+    header a future aux module invents.
+    """
+    for part, what in ((name, "name"), (value, "value")):
+        s = part if isinstance(part, str) else str(part)
+        if "\r" in s or "\n" in s:
+            raise ValueError("illegal CR/LF in response header %s: %r"
+                             % (what, s))
+    return value
+
+
 class RawResponse:
     """What an aux route returns when the answer is NOT JSON — a file
     download, text/markdown, csv.  _dispatch_aux writes body + headers
     verbatim instead of json-encoding.  (Added for /api/sessions/export in
-    aux_convos.py, which has to send Content-Disposition.)"""
+    aux_convos.py, which has to send Content-Disposition.)
+
+    Headers are validated HERE, at construction, because that is still inside
+    the aux handler call `_dispatch_aux` wraps in try/except — so a bad header
+    becomes a clean 500 JSON error.  By the time the headers are written the
+    status line is already on the wire and nothing can be salvaged."""
     __slots__ = ("body", "content_type", "headers", "status")
 
     def __init__(self, body, content_type="text/plain; charset=utf-8",
                  headers=None, status=200):
         self.body = body.encode("utf-8") if isinstance(body, str) else body
-        self.content_type = content_type
-        self.headers = headers or {}
+        self.content_type = _check_header("Content-Type", content_type)
+        self.headers = dict(headers or {})   # copy: caller can't mutate ours
+        for k, v in self.headers.items():
+            _check_header(k, v)
         self.status = status
 
 
@@ -3563,6 +3602,18 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": False, "error": type(e).__name__ + ": " + str(e)}, 500)
             return
         if isinstance(res, RawResponse):     # non-JSON body (download, md, csv)
+            # Re-check before the status line goes out. RawResponse.__init__
+            # already validated, but `headers` is a plain dict a handler can
+            # still write to after constructing the response — and once
+            # send_response() has run, a bad header can only be answered with a
+            # split response, never with an error. So: validate, THEN commit.
+            try:
+                _check_header("Content-Type", res.content_type)
+                for k, v in res.headers.items():
+                    _check_header(k, v)
+            except ValueError as e:
+                self._json({"ok": False, "error": "ValueError: " + str(e)}, 500)
+                return
             self.send_response(res.status)
             self.send_header("Content-Type", res.content_type)
             self.send_header("Content-Length", str(len(res.body)))

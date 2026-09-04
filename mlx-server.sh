@@ -125,7 +125,13 @@ fi
 # — it falls back to 64GB, the configuration every number in docs/plans was
 # measured on.
 RAM_BYTES="$(/usr/sbin/sysctl -n hw.memsize 2>/dev/null || true)"
-case "$RAM_BYTES" in ''|*[!0-9]*) RAM_BYTES=68719476736 ;; esac
+# Say so when the guard fires. A silent fallback sizes the cache for a 64GB Mac
+# on a machine that might have 16, and the only symptom is swap — the one line
+# in ~/.hermes/logs/ is what turns that into a five-second diagnosis.
+case "$RAM_BYTES" in ''|*[!0-9]*)
+  echo "[mlx-server] hw.memsize unreadable — assuming 64 GB for cache sizing" >&2
+  RAM_BYTES=68719476736 ;;
+esac
 RAM_GB=$(( RAM_BYTES / 1073741824 ))
 if   [ "$RAM_GB" -ge 64 ]; then APC_ENTRIES_DEFAULT=6; PROMPT_CACHE_BYTES=8000000000
 elif [ "$RAM_GB" -ge 48 ]; then APC_ENTRIES_DEFAULT=4; PROMPT_CACHE_BYTES=5000000000

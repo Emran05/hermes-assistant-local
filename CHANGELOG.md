@@ -6,6 +6,27 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-09-04
+
+Fixes from the review pass over 1.0.1-1.0.3 (silent-failure and security reviews).
+
+### Fixed
+- "Free memory now" no longer closes silently when the restart cannot be confirmed within
+  two minutes or the dashboard stops answering — it says so in the model menu.
+- Deleting a conversation from the sidebar checks the server's answer and reports a
+  failure instead of pretending it worked.
+- RAM detection fallbacks (when `sysctl hw.memsize` is unreadable) now log that they are
+  assuming 64 GB, in the launch scripts and the dashboard.
+
+### Security
+- `update.sh` tarball installs now require the release's `SHA256SUMS` and a matching
+  entry for the tarball; it refuses to proceed unverified (`--force` does not bypass this).
+- Aux routes that return raw responses reject header values containing CR/LF, so
+  response splitting cannot depend on caller sanitization.
+- `update.sh` no longer aborts the unauthenticated tarball path on macOS's bash 3.2
+  (empty-array expansion under `set -u`).
+
+
 ## [1.0.3] - 2026-09-04
 
 Memory defaults that fit the Mac they run on, a reproducible model-server venv, and the

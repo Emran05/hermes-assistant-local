@@ -5,8 +5,9 @@
 #   git checkout  — fetch tags, check out the target (a release tag on the
 #                   `stable` channel, origin/main on `main`).
 #   tarball       — download the release's source tarball, verify its SHA256
-#                   against SHA256SUMS when the release publishes one, and
-#                   rsync it over the install directory.
+#                   against SHA256SUMS (REQUIRED — no sums, or no line for this
+#                   tarball, is a hard refusal that --force cannot override),
+#                   and rsync it over the install directory.
 # Then, in both shapes: re-run ./install-services.sh (re-renders the launchd
 # plists and restarts the dashboard + serve; the model servers stay ON-DEMAND),
 # and report whether app/ changed — replacing the app bundle is a deliberate,
@@ -276,7 +277,7 @@ else
   command -v curl  >/dev/null 2>&1 || die "curl is required for a tarball update"
   command -v rsync >/dev/null 2>&1 || die "rsync is required for a tarball update"
 
-  AUTH=()
+  AUTH=()   # expanded as ${AUTH[@]+"${AUTH[@]}"}: macOS bash 3.2 treats an empty array as unbound under set -u
   TOK="${HERMES_UPDATE_TOKEN:-${GITHUB_TOKEN:-${GH_TOKEN:-}}}"
   if [ -z "$TOK" ] && command -v gh >/dev/null 2>&1; then
     TOK="$(gh auth token 2>/dev/null || true)"
@@ -294,7 +295,7 @@ else
   trap 'cleanup; on_exit' EXIT
 
   curl -fsSL -H "User-Agent: hermes-assistant-updater" \
-       -H "Accept: application/vnd.github+json" "${AUTH[@]}" \
+       -H "Accept: application/vnd.github+json" ${AUTH[@]+"${AUTH[@]}"} \
        "$API" -o "$TMP/release.json" \
     || die "could not read the release (private repo without a token, offline, or no such tag)"
 
@@ -328,25 +329,37 @@ PY
     say "DRY RUN — would download $REL_SRC, verify it against SHA256SUMS, and rsync it over $ROOT"
   else
     say "downloading source tarball"
-    curl -fsSL -H "User-Agent: hermes-assistant-updater" "${AUTH[@]}" \
+    curl -fsSL -H "User-Agent: hermes-assistant-updater" ${AUTH[@]+"${AUTH[@]}"} \
          "$REL_SRC" -o "$TMP/src.tar.gz" || die "download failed"
 
-    if [ -n "${REL_SUMS:-}" ]; then
-      say "verifying SHA256"
-      curl -fsSL -H "User-Agent: hermes-assistant-updater" "${AUTH[@]}" \
-           "$REL_SUMS" -o "$TMP/SHA256SUMS" || die "could not download SHA256SUMS"
-      GOT="$(shasum -a 256 "$TMP/src.tar.gz" | awk '{print $1}')"
-      BASE="$(basename "$REL_SRC")"
-      WANT="$(awk -v f="$BASE" '$2 == f || $2 == "*" f {print $1}' "$TMP/SHA256SUMS" | head -1)"
-      if [ -z "$WANT" ]; then
-        WANT="$(awk '$2 ~ /source\.tar\.gz$/ {print $1}' "$TMP/SHA256SUMS" | head -1)"
-      fi
-      [ -n "$WANT" ] || die "SHA256SUMS has no entry for $BASE — refusing to install an unverified tarball"
-      [ "$GOT" = "$WANT" ] || die "SHA256 mismatch for $BASE (got $GOT, expected $WANT) — refusing"
-      say "checksum ok"
-    else
-      say "the release publishes no SHA256SUMS — proceeding without checksum verification"
+    # SHA256SUMS is REQUIRED on this path. It used to be best-effort: no
+    # SHA256SUMS asset and the updater said so, then rsync --delete'd whatever
+    # the download produced over the install. That is the one place an attacker
+    # with the release URL (or anyone able to answer for it) gets arbitrary code
+    # on this Mac, and "the release forgot to publish sums" is indistinguishable
+    # from "the sums were removed". The git path is unaffected — it verifies by
+    # fetching a ref from the remote instead.
+    #
+    # --force deliberately does NOT bypass any of this: it means "stash my dirty
+    # tree", a convenience about LOCAL edits. Integrity is not a dirty-tree
+    # concern, and a flag people reach for when an update is being awkward is
+    # exactly the wrong switch to wire to "skip the signature check".
+    [ -n "${REL_SUMS:-}" ] || die "release $REL_TAG publishes no SHA256SUMS asset — refusing to install an unverified tarball (not overridable with --force)"
+    say "verifying SHA256"
+    curl -fsSL -H "User-Agent: hermes-assistant-updater" ${AUTH[@]+"${AUTH[@]}"} \
+         "$REL_SUMS" -o "$TMP/SHA256SUMS" || die "could not download SHA256SUMS"
+    GOT="$(shasum -a 256 "$TMP/src.tar.gz" | awk '{print $1}')"
+    BASE="$(basename "$REL_SRC")"
+    WANT="$(awk -v f="$BASE" '$2 == f || $2 == "*" f {print $1}' "$TMP/SHA256SUMS" | head -1)"
+    if [ -z "$WANT" ]; then
+      # GitHub's own tarball_url has no filename to match on (the basename is
+      # the tag), so fall back to the single *source.tar.gz line — still a real
+      # entry from the signed-ish list, never a skip.
+      WANT="$(awk '$2 ~ /source\.tar\.gz$/ {print $1}' "$TMP/SHA256SUMS" | head -1)"
     fi
+    [ -n "$WANT" ] || die "SHA256SUMS has no entry for $BASE — refusing to install an unverified tarball"
+    [ "$GOT" = "$WANT" ] || die "SHA256 mismatch for $BASE (got $GOT, expected $WANT) — refusing"
+    say "checksum ok"
 
     mkdir -p "$TMP/x"
     tar -xzf "$TMP/src.tar.gz" -C "$TMP/x" || die "could not extract the tarball"

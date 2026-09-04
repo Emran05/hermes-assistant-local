@@ -54,7 +54,11 @@ VLM_PY="$HOME/.hermes/mlx-vlm-venv/bin/python"
 # it must never claim the primary's budget. The >=64 row is exactly today's
 # 4 entries / 3GB — nothing changes on the machine this was tuned on. Env wins.
 RAM_BYTES="$(/usr/sbin/sysctl -n hw.memsize 2>/dev/null || true)"
-case "$RAM_BYTES" in ''|*[!0-9]*) RAM_BYTES=68719476736 ;; esac
+# Same silent-fallback fix as mlx-server.sh — see the note there.
+case "$RAM_BYTES" in ''|*[!0-9]*)
+  echo "[mlx-bg] hw.memsize unreadable — assuming 64 GB for cache sizing" >&2
+  RAM_BYTES=68719476736 ;;
+esac
 RAM_GB=$(( RAM_BYTES / 1073741824 ))
 if   [ "$RAM_GB" -ge 64 ]; then APC_ENTRIES_DEFAULT=4; PROMPT_CACHE_BYTES=3000000000
 elif [ "$RAM_GB" -ge 48 ]; then APC_ENTRIES_DEFAULT=3; PROMPT_CACHE_BYTES=2500000000

@@ -1431,9 +1431,17 @@ function cvRenameRow(row,label,sid){
 }
 async function cvDeleteRow(sid){
   if(!confirm('Delete this conversation?'))return;
-  try{await fetch('/api/sessions/delete',{method:'POST',
-    headers:{'Content-Type':'application/json'},body:JSON.stringify({session:sid})});}
+  // The response was thrown away, so a 404/500 or an {ok:false} body still ran
+  // the success path: the row vanished from the re-render and, if this was the
+  // OPEN conversation, we switched the user to a fresh empty one — while the
+  // chat is in fact still on disk. Inspect it the way cvMeta does (transport,
+  // then status, then the JSON contract) and change nothing on failure.
+  let d;
+  try{const r=await fetch('/api/sessions/delete',{method:'POST',
+        headers:{'Content-Type':'application/json'},body:JSON.stringify({session:sid})});
+      d=r.ok?await r.json():null;}      // a non-2xx body is an error page, not our shape
   catch(e){toast('Could not reach the dashboard.');return;}
+  if(!d||!d.ok){toast('Could not delete that conversation.');return;}
   if(sid===session){session=newId();localStorage.setItem('hermes_session',session);emptyState();}
   loadSessions(); renderChatSide();
 }
@@ -2318,7 +2326,7 @@ async function loadModels(){
     let s={};try{s=await(await fetch('/api/model/mem_free',{method:'POST'})).json();}catch(e){s={ok:false,error:'could not reach the dashboard'};}
     if(!s||s.ok===false){free.textContent='Free memory now';memFreeError(s&&s.error||'could not start');return;}
     showModelSwap('','Freeing memory','Restarting the model to clear its cache — about 30–60s.');
-    let failed='',miss=0;
+    let failed='',miss=0,ended=false;
     for(let i=0;i<120;i++){                     // ~2 min ceiling, then give up
       await new Promise(r=>setTimeout(r,1000));
       let st=null;try{const rs=await fetch('/api/model/mem_free/status');if(rs.ok)st=await rs.json();}catch(e){}
@@ -2326,8 +2334,18 @@ async function loadModels(){
       // are served fresh, the service restarts later) — don't hang for 2 min
       if(!st){if(++miss>=5)break;continue;}
       miss=0;
-      if(!st.running){if(st.ok===false)failed=st.error||'restart failed';break;}
+      if(!st.running){ended=true;if(st.ok===false)failed=st.error||'restart failed';break;}
     }
+    // `running:false` is the ONLY proof the restart ended. The other two exits —
+    // the 120s ceiling and 5 dead polls in a row — used to fall straight through
+    // to a silent close, which looks exactly like success; the user walks away
+    // believing memory was freed while the restart may still be running or may
+    // have died. Say which of the two happened (miss hits 5 only on the misses
+    // break, so it distinguishes them) and still loadModels(), because a stale
+    // memory number under an unexplained note is the worst of both.
+    if(!ended)failed=miss>=5
+      ? 'Dashboard did not answer while restarting — reopen the menu to check'
+      : 'Could not confirm the restart finished — check the model row in a moment';
     hideModelSwap&&hideModelSwap();
     await loadModels();                          // re-renders the memory row…
     if(failed)memFreeError(failed);};            // …so the note goes on AFTER

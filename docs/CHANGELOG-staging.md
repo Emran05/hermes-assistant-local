@@ -548,3 +548,69 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   fires no request and no confirm — and the "tight" row still fully usable) in both
   themes; `bash -n` on all three scripts; and a dry run of both derivations on this Mac
   confirming 50/56 and 6 entries / 8 GB, i.e. byte-identical to 1.0.2.
+- `<review-fixes-1.0.4>` (2026-09-04) 1.0.4 — five small review fixes, one theme:
+  **a failure that produces no output is indistinguishable from success.**
+  (1) `index.html` "Free memory now" — the poll loop had three exits but only one
+  of them said anything. `running:false` reported the real outcome; the 120s
+  ceiling and the 5-consecutive-miss break fell straight through to
+  `hideModelSwap()` + `loadModels()`, so a restart that was still running (or had
+  died) closed the overlay and looked done. Both now set `failed` — "Could not
+  confirm the restart finished — check the model row in a moment" / "Dashboard did
+  not answer while restarting — reopen the menu to check" — through the existing
+  `memFreeError()`, still after `loadModels()` so the note survives the row
+  rebuild. Happy path untouched. (2) **RAM-detection fallbacks now say so**:
+  `mlx-server.sh` / `mlx-server-bg.sh` echo `hw.memsize unreadable — assuming
+  64 GB for cache sizing` (`[mlx-server]` / `[mlx-bg]`) when the `case` guard
+  fires, and `server.py`'s `_machine_ram_gb()` prints one stderr line naming the
+  exception before returning 64.0 — once per process, since the memo is filled
+  either way. Silent here meant every ceiling in the process (`MLX_SOFT_GB`/
+  `MLX_HARD_GB`, each row's `fit`, both prompt-cache tiers) was sized for a 64 GB
+  Mac with swap as the only symptom; `sysctl` needing `/usr/sbin` on PATH under
+  launchd is a KNOWN gotcha that had no log line. (3) `cvDeleteRow` threw the
+  response away, so a 404/500/`{ok:false}` still re-rendered the list AND — if it
+  was the open conversation — switched the user to a fresh empty one while the
+  chat was still on disk. Now mirrors `cvMeta`: transport, then `r.ok`, then the
+  `{ok}` contract; on failure `toast('Could not delete that conversation.')` and
+  return, changing nothing. (4) `RawResponse` **rejects CR/LF in header names and
+  values** (new `_check_header`, raises ValueError) instead of trusting callers —
+  today's only caller builds `Content-Disposition` from a user-chosen conversation
+  TITLE, sanitised by `_cv_slug` alone, and `send_header` validates nothing.
+  Validating in `__init__` puts the raise inside the aux call `_dispatch_aux`
+  already wraps, so it becomes a clean 500 JSON; `_dispatch_aux` re-checks before
+  `send_response()` because `headers` is a plain dict a handler can still poison
+  after construction, and once the status line is out a bad header can only be
+  answered with a split response. (5) `update.sh` tarball path: **SHA256SUMS is
+  now REQUIRED.** "the release publishes no SHA256SUMS — proceeding without
+  checksum verification" then `rsync --delete`d the download over the install —
+  the one place an attacker who can answer for the release URL gets arbitrary code
+  on the Mac, and a removed sums file is indistinguishable from a forgotten one.
+  Missing asset or missing line both `die` now. `--force` does NOT bypass it (it
+  means "stash my dirty tree" — a LOCAL-edits convenience; integrity is not a
+  dirty-tree concern, and a flag people reach for when an update is being awkward
+  is the worst switch to wire to "skip the check"); the git path is untouched.
+  VERIFIED, dashboard NOT restarted and no model server started: `node --check` on
+  the extracted inline script; **11/11 Playwright** against the live dashboard with
+  `/api/models` + `mem_free` + its status route all stubbed in the browser — the
+  misses branch (exactly 5 polls, the right message, one POST), the happy path
+  (stops at the first `running:false`, stays silent) and no premature message at
+  ~12s — plus a separate **full 122s run** proving the ceiling branch fires at
+  exactly 120 polls with the timeout message; **15/15 Playwright** on `cvDeleteRow`
+  across `{ok:false}` / HTTP 500 / non-JSON / success (session id and localStorage
+  unchanged on every failure, right toast each time, switches only on success);
+  **19/19** in a scratch harness for the header work — clean header passes, CR/LF
+  in a value raises, in a name raises, plus a REAL `ThreadingHTTPServer` where a
+  poisoned header (both at construction and by post-construction mutation) returns
+  500 `ok:false ValueError` with no `X-Evil` header on the wire while the clean
+  route still serves its body; **8/8** that real export filenames (unicode, quotes,
+  CRLF-in-title, empty, 200 chars) all still pass; **12/12** on `_machine_ram_gb`
+  (silent + 64.0 on this Mac, one line naming the exception on raise/garbage/0,
+  never twice, silent and honest on a faked 16 GB); the two `case` guards driven
+  through all four sysctl-failure shapes with `set -e` intact and the real sysctl
+  still silent at 6/8 GB and 4/3 GB; `bash -n` on all three scripts, `py_compile`
+  on server.py, and `./update.sh --dry-run` confirming the git path is unaffected
+  (resolves v1.0.3, "already up to date", exit 0) with the new SHA256SUMS block
+  driven through five cases (no asset → die; no asset + `--force` → still die;
+  sums present but no matching line → die; match → proceeds; mismatch → die).
+  ASIDE, not fixed (out of scope): `AUTH=()` + `"${AUTH[@]}"` under `set -u` is an
+  unbound-variable error on macOS's bash 3.2, which would break the whole
+  unauthenticated tarball path before it reaches any of this.
