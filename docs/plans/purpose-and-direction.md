@@ -84,9 +84,8 @@ Ordered by leverage; each is a small release or two.
 3. **Personal context MCP server (read-only first).** Loopback MCP exposing the sources
    above with the permission tiers Hermes already has; token-guarded like
    `/api/messages/ingest`. Lets Claude Code use Hermes's context; makes shape 3 real.
-4. **Voice, on demand.** Mic in Quick Ask and chat via a local STT sidecar (parakeet on
-   MLX or whisper.cpp), started on first press and exited after idle; "read aloud" via a
-   small TTS sidecar. Same on-demand discipline as the model lanes; battery measured.
+4. **Voice, on demand — parked.** See §4b: the microphone must be owned by the signed
+   app, which is frozen; ships with the next deliberate app rebuild.
 5. **Routines.** A Settings › Routines panel over hermes cron: see, edit, dry-run, run now,
    with recorder links; "turn this conversation into a routine".
 6. **Hub re-centering.** Brief + Needs-you + agenda + "what I did" first; feeds second.
@@ -105,7 +104,72 @@ list).
 - Context reach: number of sources answerable in one question (today: 1 — chats).
 - Battery: on-demand sidecars leave no resident process after idle.
 
+## 4b. Concrete designs (from the three sweeps, 2026-09-05)
+
+**Unified index (1.1.0).** SQLite FTS5 from the stdlib `sqlite3` — one table
+`items(id, source, ts, title, body, ref, meta_json)` with an FTS5 external-content index
+over `title, body`; sources: chats, notes, Message Center rows, calendar events (osascript
+export), watchtower items, exported docs. Incremental indexing on write paths plus a
+nightly sweep; `GET /api/search?q=&source=` returns ranked rows with BM25 and plain-text
+snippets + match offsets (the client escapes and highlights — same contract as the chat
+search). Vectors only if FTS proves insufficient: `sqlite-vec` (single loadable extension)
+with Reciprocal Rank Fusion, embeddings from `nomic-embed-text-v2` (137M, MIT, 8k context)
+on the background lane, or `all-MiniLM-L6-v2` on CPU — measured before adoption.
+
+**Needs-you inbox (1.1.1).** One record per inbound unit:
+`{id, source: imessage|calendar|news|approval|reminder|email, sender, summary, received_at,
+requires_reply, deadline_ts, sender_tier: vip|known|unknown|automated, bucket: now|today|
+later|never, confidence, reason, suggested_action: reply_draft|snooze|delegate|done|none}`.
+Rules a 9B model applies reliably, as a decision tree with 4-shot JSON output, not
+free-form urgency: **now** = VIP sender (two-way history ≤30 days or contact flag) AND a
+concrete time-bound ask (question/deadline ≤24 h, event <2 h, an approval waiting);
+**today** = needs a reply but no hard deadline, or a thread you have replied in, or an
+event later today; **never** = automated sender, no history, no deadline language →
+digest only. Confidence <0.6 falls to *today*, never *now* (false urgency is the trust
+killer every reviewed product is criticized for). Tag, never move or archive (reversible).
+Rhythm: morning brief = full now+today with reasons; midday pulse = delta only; evening
+wrap = what was deferred. Actions: Reply (agent-drafted, never auto-sent), Snooze,
+Delegate (agent task), Done. Trust metrics: precision of *now*, snooze rate on *now*,
+manual reclassification rate (drift → refresh the examples). Gmail is not connected on
+this Mac (OAuth pending), so v1 runs on iMessage, calendar, watchtower, approvals,
+reminders and degrades per available source.
+
+**Personal context MCP server (1.1.3).** One tool per source, never one blob tool:
+`calendar.search/next`, `messages.search`, `notes.search`, `files.search(folder)`,
+`chats.search`, `memory.get`; write-capable tools (`mail.draft`) are separate tools with
+their own flag. Scope is a static launch-time allowlist (which folders, chats, calendars),
+never negotiated at runtime by the model; loopback only, token-guarded like
+`/api/messages/ingest`; the same permission tiers the dashboard already enforces. Lesson
+from Rewind → Limitless → Meta: local storage is not a privacy guarantee by itself; the
+per-source access control has to live in the software.
+
+**Voice (parked behind an owner decision).** The right stack is torch-free MLX:
+`parakeet-mlx` (Parakeet TDT 0.6B v3, ~1 GB, ~60x real time on M3-class, streaming) for
+STT and `mlx-audio` Kokoro-82M for TTS, each as an on-demand sidecar that exits after idle.
+The blocker is TCC: microphone permission is attributed to the responsible process, and a
+launchd-started Python is attributed to the interpreter binary (re-prompted or silently
+denied after every Python upgrade). The mic must be captured by the signed app, which is
+frozen and has no microphone entitlement or usage string today. Voice therefore ships only
+with the next deliberate app rebuild (batched with other Swift changes; requires
+re-granting Full Disk Access). Until then: no voice.
+
 ## 6. Sources
 
-Filled in as the sweeps land: personal-context layers / local MCP servers; attention
-triage patterns; on-device STT/TTS on Apple Silicon (September 2026).
+- Context layer / MCP (2026-09-05 sweep): Apple Intelligence App Intents and Foundation
+  Models docs (WWDC26), Screenpipe docs and its incognito-capture bug write-up, Rewind →
+  Limitless → Meta coverage (Dec 2025), Khoj, Reor, mem0/OpenMemory status, the apple-mcp
+  family (EventKit/JXA/chat.db pattern), Raycast AI manual, Open WebUI RAG/memory docs, MCP
+  security guidance (per-tool least privilege; the `.startsWith()` path-check flaw), MLX
+  embedding benchmarks (nomic-embed-text-v2, bge-m3, mxbai), sqlite-vec + FTS5 hybrid
+  write-ups (Alex Garcia, sqlite.ai).
+- Attention triage (2026-09-05 sweep): Superhuman Auto Labels / Split Inbox and its 2025-26
+  criticism, Shortwave bundles, Gmail's Gemini "suggested to-dos / catch up" split (Jan
+  2026) and the sticky-importance complaint, Apple Mail categories + Priority (on-device),
+  Notion Mail, Hey's Screener/Imbox/Feed/Paper Trail, Slack recaps (extractive), Teams
+  Meeting Recap, Sunsama/Motion/Reclaim spectrum, Perplexity Email Assistant, arXiv
+  2605.15680 (few-shot triage with 8B models), local zero-shot classification throughput.
+- On-device speech (2026-09-05 sweep): parakeet-mlx, whisper.cpp / Lightning Whisper MLX
+  (vendor-reported speeds), Apple SpeechAnalyzer (macOS 26, Swift-only), Moonshine and
+  Kyutai (PyTorch-first), mlx-audio (Kokoro-82M, CSM, Dia, Orpheus), AVSpeechSynthesizer
+  premium voices, Piper (fork now GPL-3.0), TCC responsible-process behaviour for
+  launchd-spawned interpreters and the audio-input entitlement requirement.
