@@ -110,6 +110,61 @@ and explicit agent tool calls (web search etc.) touch the internet.
   registers the `/graphify` skill into those agents' configs (harness-gated —
   run via `!`). `graphify-out/` is generated (~5MB) — gitignore unless you want
   it versioned.
+- **Unified local index (1.1.0)** — `dashboard/aux_index.py`: SQLite **FTS5**
+  (stdlib `sqlite3`, no extension, no embeddings, no network) at
+  `~/.hermes/dashboard/index.db` (**0600**, and the WAL/-shm sidecars inherit
+  it). Closes the §2 gap in `docs/plans/purpose-and-direction.md` — every
+  context source was wired but nothing could search ACROSS them. Schema:
+  `items(id TEXT PRIMARY KEY, source, ts, title, body, ref, meta)` + an
+  **external-content** `items_fts(title, body)` (text stored once, FTS keeps
+  only the inverted index) kept in sync by three triggers — a missed `'delete'`
+  row is a permanent phantom hit, so never write `items` around them.
+  **Five adapters**, one row per unit: `chat` (one per conversation, user+bot
+  turns only — tool/approval/status rows and `__prewarm__` are skipped, the
+  same invariants aux_convos' search has), `note` (notes.json Scratchpad),
+  `message` (Message Center rows; nothing while the app lacks FDA),
+  `calendar` (icalBuddy `eventsFrom:/to:` over ±30 days with `-df %Y-%m-%d`,
+  falling back to `macos_calendar()`'s today-only data), `watchtower`
+  (intel.json items + curated, deduped by URL). **An adapter returns `None` for
+  "store absent" (nothing is pruned) and a list for "store present" (anything
+  not returned IS pruned)** — that distinction is the whole reason a
+  transiently unreadable or half-written intel.json does not silently empty
+  the news half of the index. **Freshness, two paths:** `index_touch(source,
+  id)` on the write paths the module reaches WITHOUT editing them — `save_chat`
+  is wrapped (the runtime-override pattern aux_shortcuts uses for
+  `access_preamble`) and `POST /api/notes` is re-registered as an aux route
+  (POST_ROUTES is checked before server.py's inline chain, so the 3-line
+  handler is re-implemented there verbatim + a touch — **if server.py's notes
+  handler changes, change that one too**); touches are COALESCED on a 2s drain
+  thread so three saves in one turn cost one re-index and no request waits on
+  sqlite. Plus a sweep at start+60s and every 30 min that upserts changed rows
+  (mtime for file-backed sources, full content compare otherwise, so a
+  no-change sweep writes ZERO rows) and prunes deleted ones.
+  `GET /api/search?q=&source=&limit=` → `{ok,q,results[{id,source,title,ts,
+  snippet,mark_start,mark_len,ref}],took_ms,sources{}}`; BM25 with the title
+  weighted 10×, `q`≤200 chars, `limit`≤50, `sources` counted over the WHOLE
+  match set (so the UI's filter row is right even when filtered).
+  `GET /api/search/status` = per-source counts + last sweep. **The server never
+  emits markup** — FTS5's own `snippet()` is deliberately unused; a result is
+  plain text plus `(mark_start, mark_len)` offsets and the client escapes the
+  three slices itself (same contract the chat search already shipped, so
+  `cvHi()` was untouched). **Query sanitisation is not optional**: `_ix_tokens`
+  keeps `\w+` runs only, double-quotes each (a quoted token is a literal
+  phrase, never an operator, so `OR`/`NEAR`/`NOT`/`title:`/a lone `"` are all
+  searched as words) and re-attaches one trailing `*` as the prefix operator —
+  never interpolate user text into a MATCH expression any other way. UI: the
+  sidebar/header search box is now **"Search everything"** with a source filter
+  row (All · Chats · Notes · Messages · Calendar · News, with counts), results
+  grouped by source with a chip; a chat hit opens the conversation and flashes
+  the bubble as before, note→`openPop('notes')`, message→`messages`,
+  calendar→`today`, news→its own URL (or the News Feed pop-out). `cvFetch`
+  falls back to `/api/sessions/search` when `/api/search` 404s, so a dashboard
+  that has not been restarted since the upgrade keeps its old chat-only search
+  instead of going dead. Agent-visible via `skills-snapshot/hermes-search/`
+  and one stable line in `access_preamble()`. Load order: aux files exec
+  SORTED, so aux_index runs BEFORE aux_messages/aux_watchtower — it must not
+  read their `MSG_STORE`/`INTEL_FILE` at module load (it resolves them by name
+  at sweep time, with its own literals as the fallback).
 - **Model toggle** — header pill is a switcher (`/api/models`, `/api/models/switch|download|add`). `mlx-server.sh` reads the chosen repo id from `~/.hermes/dashboard/active-model` (falls back to Qwen3.8-27B). Switch = write that file + `hermes config set model.default` + `launchctl kickstart com.hermes.mlx-server`, then poll `/api/health` until the new model loads. Roster seeded (`_SEED_MODELS`) with Qwen3.8-27B (primary/default) + Qwen3.5-9B (background lane) — see roster policy; user-extendable via models.json (`_model_registry()` merges NEW seed entries into an existing models.json by id). Per-model `template_args` (roster field) → written on switch to `~/.hermes/dashboard/chat-template-args` → mlx-server.sh passes it as `--chat-template-args`; Qwen3.8 defaults `{enable_thinking:false}` (its template thinks at xhigh by default, ~22k tokens on trivial prompts). `POST /api/models/thinking {enabled}` flips it (on = low effort) and restarts the server; the model menu shows a Thinking on/off row when `/api/models`.thinking.supported. Qwen3.8-27B is `model_type qwen3_5` (drill 6/6 on both backends).
 - **Model-server backends (`mlx-server.sh`)** — roster entries may set `backend: "mlx_vlm"` (+ `draft_model`/`draft_kind`/`draft_block_size`); the switcher writes `~/.hermes/dashboard/server-backend` (JSON) and mlx-server.sh execs `~/.hermes/mlx-vlm-venv/bin/python mlx-vlm-launch.py` (mlx_vlm.server, OpenAI-compatible, uvicorn) instead of `python3 -m mlx_lm server`; missing venv → silently falls back to mlx-lm. The venv is ISOLATED (`install-mlx-vlm-venv.sh`: mlx-vlm 0.6.14 + mlx 0.32.1 + transformers 5 — never into the framework Python, it breaks mlx-lm). Qwen3.8-27B runs there with its NATIVE MTP drafter `mlx-community/Qwen3.8-27B-MTP-bf16` (0.9GB; the `-MTP-4bit` drafter ships NaN weights, mlx-vlm #1931) → speculative decoding: M5 Max 31 → 63 tok/s code / 47 prose (block 3; block 6 is SLOWER than AR; ~88%/55% acceptance), Hermes drill cases ~1.4-1.8x faster. `APC_ENABLED=1` (+`APC_EXACT_CACHE_ENTRIES=6`) = exact prefix cache — hybrid SSM models use "exact" whole-prefix snapshots, ~64KB/token; the ~18k-token Hermes system prompt goes 26s cold → 0.4s cached. Prefill is compute-bound at ~630-690 tok/s regardless of `--prefill-step-size` — first turn of a fresh session pays ~25s, nothing else does. `mlx-vlm-launch.py` shims: (1) mlx≥0.32 made `mx.random.state` read-only → mlx-vlm 0.6.14 crashed on every temperature>0 speculative request (`_restore_rng_state`); the launcher no-ops the restore (only RNG-stream separation, sampling stays correct); (2) `MLX_VLM_DEFAULT_REASONING_EFFORT` env → default `reasoning_effort` when thinking is on (template default xhigh); (3) atexit `os._exit(0)` because mlx 0.32 segfaults in the CompileCache destructor at teardown (that's the "Python quit unexpectedly" dialog — harmless but noisy). Thinking toggle on this backend = `--enable-thinking --thinking-budget 8192` + effort low. `_mlx_footprint_gb` pgrep matches both backends. mlx_vlm's `/v1/models` also lists every cached model; Hermes must send the exact model id (both backends load whatever id the request names). Downloads run in a bg thread via `huggingface_hub.snapshot_download`. Rationale: 30B MoE resident ~18GB; a dense 8B (~5GB) is plenty for tool-calling since Claude does the coding.
   **DO NOT UPGRADE mlx-vlm past 0.6.14 (measured 2026-09-04, backlog #23/#25).** 0.6.16 and 0.6.17 CORRUPT OUTPUT when two requests overlap while the native MTP drafter is loaded — exactly this configuration. Two-concurrent-stream probe: 0.6.14 **6/6 rounds correct**; 0.6.17 **2/6** (token-0 floods of `!`, semantic collapse, early `finish_reason=stop`); 0.6.16 **1/3** plus a hard GPU fault (`kIOGPUCommandBufferCallbackErrorPageFault`). Confounders ruled out: reproduced with the RNG shim disabled, and with 0.6.17 forced back onto mlx 0.32.1 — the regression is in mlx-vlm, 0.6.15-0.6.16. Failures are NON-DETERMINISTIC (a clean round follows a corrupt one on the same process), so in production it is occasional garbage whenever a Telegram turn overlaps a dashboard turn, with nothing in the log. Single-stream the upgrade buys nothing (TTFT/prefill/code decode within noise, prose −8%, footprint −2GB). Re-test before ever bumping: a `baseline.py`-style concurrency probe (two 200-token streams, different prompts) must be **6/6 clean**; `install-mlx-vlm-venv.sh` now pins mlx/mlx-metal/transformers/huggingface_hub too (it let mlx float, so a re-run silently built against 0.32.2) and its header carries the rename-aside rollback plan.

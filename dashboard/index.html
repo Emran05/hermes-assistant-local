@@ -389,6 +389,33 @@
   .cv-mark{background:color-mix(in srgb,var(--iris) 30%,transparent);color:var(--ink);
     border-radius:3px;padding:0 1px}
   .cs-empty{padding:16px 10px;text-align:center;font-size:12px;color:var(--faint);text-wrap:pretty}
+  /* --- unified search (1.1.0): source filter row, group labels, row chips --- */
+  .cs-filt{display:flex;flex-wrap:wrap;gap:4px;padding:2px 2px 7px;border-bottom:1px solid var(--hairline);
+    margin-bottom:6px}
+  .cs-filt b{font:inherit;font-size:10.5px;font-weight:600;letter-spacing:.01em;cursor:pointer;
+    padding:3px 8px;border-radius:999px;color:var(--muted);background:transparent;
+    border:1px solid transparent;transition:background .15s,color .15s,border-color .15s;
+    user-select:none;white-space:nowrap}
+  .cs-filt b:hover{background:var(--chip);color:var(--ink)}
+  .cs-filt b:focus-visible{outline:2px solid var(--iris);outline-offset:1px}
+  .cs-filt b.on{color:var(--iris);background:color-mix(in srgb,var(--iris) 14%,transparent);
+    border-color:color-mix(in srgb,var(--iris) 28%,transparent)}
+  .cs-filt b .fn{margin-left:5px;font-weight:500;font-variant-numeric:tabular-nums;opacity:.7}
+  .cs-filt b.zero{opacity:.42}
+  .cs-grp{padding:9px 9px 3px;font-size:10px;font-weight:700;letter-spacing:.07em;
+    text-transform:uppercase;color:var(--faint);display:flex;align-items:baseline;gap:6px}
+  .cs-grp .gn{margin-left:auto;font-weight:600;letter-spacing:0;font-variant-numeric:tabular-nums}
+  .cs-chip{flex:none;margin-left:auto;font-size:9.5px;font-weight:700;letter-spacing:.05em;
+    text-transform:uppercase;padding:1px 6px;border-radius:999px;color:var(--muted);
+    background:var(--chip);border:1px solid var(--hairline)}
+  .cs-res .rt .tt{flex:0 1 auto}
+  .cs-res[data-src="chat"] .cs-chip{color:var(--iris)}
+  .cs-res[data-src="note"] .cs-chip{color:var(--ok)}
+  .cs-res[data-src="message"] .cs-chip{color:var(--warn)}
+  .cs-res[data-src="calendar"] .cs-chip{color:var(--iris)}
+  .cs-res[data-src="watchtower"] .cs-chip{color:var(--muted)}
+  .cs-res .rt .when{flex:none;font-size:10.5px;font-weight:500;color:var(--faint);
+    font-variant-numeric:tabular-nums}
   /* split mode: the <select> IS the conversation list, so the field and its
      results live in a popover hung under the chat header */
   /* it floats over the transcript, so .glass alone is far too see-through —
@@ -1005,7 +1032,7 @@
     </div>
     <div class="cs-search">
       <svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="20" y1="20" x2="16.65" y2="16.65"/></svg>
-      <input id="cs-q" type="text" placeholder="Search conversations" aria-label="Search conversations"
+      <input id="cs-q" type="text" placeholder="Search everything" aria-label="Search everything — chats, notes, messages, calendar, news"
              autocomplete="off" autocorrect="off" spellcheck="false">
       <button class="cs-x" id="cs-qx" type="button" title="Clear search" aria-label="Clear search" hidden>
         <svg class="ic" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
@@ -1092,9 +1119,9 @@
     <section class="card glass chat">
       <div class="chat-head">
         <select id="sessions" aria-label="Conversation"></select>
-        <input id="chat-q" type="text" placeholder="Search conversations" aria-label="Search conversations"
+        <input id="chat-q" type="text" placeholder="Search everything" aria-label="Search everything — chats, notes, messages, calendar, news"
                autocomplete="off" autocorrect="off" spellcheck="false" hidden>
-        <button class="ghost" id="chat-find" title="Search conversations" aria-label="Search conversations">
+        <button class="ghost" id="chat-find" title="Search everything" aria-label="Search everything">
           <svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="20" y1="20" x2="16.65" y2="16.65"/></svg></button>
         <button class="ghost" id="newchat" title="New conversation" aria-label="New conversation">
           <svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
@@ -1273,6 +1300,39 @@ let cvTerm='';        // active query ('' = not searching)
 let cvLast=[];        // last result set — a re-render keeps results on screen
 let cvSeq=0;          // stale-response guard for the 200ms debounce
 let cvTimer=null;
+// ---------- unified local search (1.1.0) -----------------------------------
+// This field used to search conversations only. It now searches the whole
+// local index (aux_index.py: chats, notes, Message Center, calendar, news)
+// through /api/search, and the chat-only behaviour is one click away on the
+// filter row. The wire contract did not change — a result is still a PLAIN
+// text snippet plus (mark_start, mark_len) offsets — so cvHi() below, and the
+// "content never reaches innerHTML unescaped" guarantee with it, is untouched.
+// If /api/search is not there (a dashboard that has not been restarted since
+// the upgrade), cvFetch falls back to /api/sessions/search and the box behaves
+// exactly as it did before rather than going dead.
+const CV_SOURCES=[{k:'',label:'All'},{k:'chat',label:'Chats'},{k:'note',label:'Notes'},
+  {k:'message',label:'Messages'},{k:'calendar',label:'Calendar'},{k:'watchtower',label:'News'}];
+const CV_SRC_NAME={chat:'Chats',note:'Notes',message:'Messages',calendar:'Calendar',watchtower:'News'};
+const CV_SRC_CHIP={chat:'Chat',note:'Note',message:'Message',calendar:'Event',watchtower:'News'};
+const CV_SRC_ORDER=['chat','note','message','calendar','watchtower'];
+// Where a non-chat hit opens. openPop() tolerates a widget the user has not
+// enabled (its meta falls back to a synthesized one and /api/expand serves the
+// whole catalogue), but a widget id that does not exist at all is checked for
+// first so a click can never land on an empty sheet.
+const CV_SRC_POP={note:'notes',message:'messages',calendar:'today',watchtower:'framing'};
+let cvSrc='';         // active source filter ('' = every source)
+let cvCounts={};      // per-source hit counts from the last response
+try{cvSrc=localStorage.getItem('hermes_search_src')||'';}catch(e){}
+if(!CV_SOURCES.some(s=>s.k===cvSrc))cvSrc='';
+// relTime() assumes the past; a calendar event is usually in the future.
+function cvWhen(ts){
+  ts=+ts||0; if(!ts)return '';
+  const s=Date.now()/1000-ts;
+  if(s>=0&&s<86400)return relTime(ts);
+  if(s<0&&-s<86400*7)return 'in '+Math.max(1,Math.round(-s/86400))+'d';
+  try{return new Date(ts*1000).toLocaleDateString(undefined,{month:'short',day:'numeric'});}
+  catch(e){return '';}
+}
 
 function toast(msg,ms){
   const t=$('toast'); if(!t)return;
@@ -1289,29 +1349,91 @@ function cvHi(sn,st,len){
   if(st==null||!len||st<0||len<0||st+len>sn.length)return esc(sn);
   return esc(sn.slice(0,st))+'<span class="cv-mark">'+esc(sn.slice(st,st+len))+'</span>'+esc(sn.slice(st+len));
 }
+// Legacy chat-only rows -> the unified shape, so one renderer covers both.
+function cvFromSessions(rows){
+  return (Array.isArray(rows)?rows:[]).map(r=>({
+    id:'chat:'+r.session, source:'chat', title:r.title, ts:r.ts,
+    snippet:r.snippet, mark_start:r.mark_start, mark_len:r.mark_len,
+    ref:r.session, hits:r.hits}));
+}
 async function cvFetch(q){
   const seq=++cvSeq;
-  let d;try{d=await(await fetch('/api/sessions/search?q='+encodeURIComponent(q))).json();}catch(e){d=[];}
+  let d=null;
+  try{
+    const u='/api/search?q='+encodeURIComponent(q)+'&limit=50'+
+            (cvSrc?'&source='+encodeURIComponent(cvSrc):'');
+    const r=await fetch(u);
+    if(r.ok)d=await r.json();
+  }catch(e){d=null;}
   if(seq!==cvSeq)return null;              // a newer keystroke already won
-  return Array.isArray(d)?d:[];
+  if(d&&Array.isArray(d.results)){cvCounts=d.sources||{};return d.results;}
+  // no unified index on this dashboard yet — degrade to the chat-only search
+  let legacy=null;
+  try{legacy=await(await fetch('/api/sessions/search?q='+encodeURIComponent(q))).json();}
+  catch(e){legacy=[];}
+  if(seq!==cvSeq)return null;
+  const rows=cvFromSessions(legacy);
+  cvCounts={chat:rows.length};
+  return rows;
 }
 function cvResultRow(r){
+  const src=r.source||'chat';
   const el=document.createElement('div');
   el.className='cs-res';el.tabIndex=0;el.setAttribute('role','button');
-  el.innerHTML='<div class="rt"><span class="tt">'+esc(r.title||r.session)+'</span>'+
-    '<span class="n">'+(r.hits>1?r.hits+' hits':'1 hit')+'</span></div>'+
+  el.dataset.src=src;
+  const when=cvWhen(r.ts);
+  el.innerHTML='<div class="rt"><span class="tt">'+esc(r.title||r.ref||'')+'</span>'+
+    '<span class="cs-chip">'+esc(CV_SRC_CHIP[src]||src)+'</span>'+
+    (when?'<span class="when">'+esc(when)+'</span>':'')+'</div>'+
     '<div class="rs">'+cvHi(r.snippet,r.mark_start,r.mark_len)+'</div>';
-  const open=()=>cvOpenResult(r.session);
+  const open=()=>cvOpenRow(r);
   el.onclick=open;
   el.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();open();}};
   return el;
 }
+// the All · Chats · Notes · Messages · Calendar · News row
+function cvFilterRow(){
+  const row=document.createElement('div');
+  row.className='cs-filt';row.setAttribute('role','group');
+  row.setAttribute('aria-label','Filter results by source');
+  CV_SOURCES.forEach(s=>{
+    const b=document.createElement('b');
+    b.tabIndex=0;b.setAttribute('role','button');
+    b.dataset.k=s.k;
+    const n=s.k?(cvCounts[s.k]||0)
+               :CV_SRC_ORDER.reduce((a,k)=>a+(cvCounts[k]||0),0);
+    b.className=(s.k===cvSrc?'on':'')+((s.k&&!n)?' zero':'');
+    b.setAttribute('aria-pressed',s.k===cvSrc?'true':'false');
+    b.innerHTML=esc(s.label)+(n?'<span class="fn">'+n+'</span>':'');
+    const pick=()=>{
+      if(cvSrc===s.k)return;
+      cvSrc=s.k;
+      try{localStorage.setItem('hermes_search_src',cvSrc);}catch(e){}
+      if(cvTerm)cvRun(cvTerm); else cvPaint(cvLast);
+    };
+    b.onclick=e=>{e.stopPropagation();pick();};
+    b.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();pick();}};
+    row.appendChild(b);
+  });
+  return row;
+}
 function cvPaint(list){
   const host=cvHost(); if(!host)return;
   host.innerHTML='';
+  host.appendChild(cvFilterRow());
   if(!list.length){const e=document.createElement('div');e.className='cs-empty';
-    e.textContent='No matches';host.appendChild(e);return;}
-  list.forEach(r=>host.appendChild(cvResultRow(r)));
+    e.textContent=cvSrc?('No matches in '+(CV_SRC_NAME[cvSrc]||cvSrc)):'No matches';
+    host.appendChild(e);return;}
+  // grouped by source, in a fixed order so the list never reshuffles itself
+  const byS={};list.forEach(r=>{(byS[r.source||'chat']=byS[r.source||'chat']||[]).push(r);});
+  const order=CV_SRC_ORDER.filter(k=>byS[k]).concat(
+    Object.keys(byS).filter(k=>CV_SRC_ORDER.indexOf(k)<0));
+  order.forEach(k=>{
+    const g=document.createElement('div');g.className='cs-grp';
+    g.innerHTML='<span>'+esc(CV_SRC_NAME[k]||k)+'</span><span class="gn">'+byS[k].length+'</span>';
+    host.appendChild(g);
+    byS[k].forEach(r=>host.appendChild(cvResultRow(r)));
+  });
   revealStagger(host.querySelectorAll('.cs-res'),14);
 }
 async function cvRun(q){
@@ -1323,14 +1445,40 @@ async function cvRun(q){
   cvLast=list; cvPaint(list);
 }
 function cvClear(){
-  clearTimeout(cvTimer); cvSeq++; cvTerm=''; cvLast=[];
+  clearTimeout(cvTimer); cvSeq++; cvTerm=''; cvLast=[]; cvCounts={};
   const q=$('cs-q'); if(q){q.value='';$('cs-qx').hidden=true;}
   const cq=$('chat-q'); if(cq)cq.value='';
   if($('cvfind-list'))$('cvfind-list').innerHTML='';
   if(cvFullMode())renderChatSide();
 }
-// open a hit: switch conversation, then scroll to + flash the first bubble
-// that actually contains the query
+// open a hit: a chat switches the conversation and flashes the bubble (below);
+// every other source opens the surface that owns it — the item's own link for
+// a news story, otherwise the widget pop-out.
+function cvPopId(id){
+  if(!id||typeof openPop!=='function')return null;
+  const w=(window.lastHub&&window.lastHub.widgets)||null;
+  // lastHub only lists ENABLED widgets, so an unknown id there is not proof
+  // the widget does not exist; WIDGET_DESC covers the whole catalogue.
+  if(w&&w[id])return id;
+  try{if(WIDGET_META&&(id in WIDGET_META))return id;}catch(e){}
+  return null;
+}
+function cvOpenRow(r){
+  const src=r.source||'chat';
+  if(src==='chat'){
+    cvOpenResult(r.ref||String(r.id||'').replace(/^chat:/,''));
+    return;
+  }
+  if(!cvFullMode())cvCloseFind();
+  const url=r.ref||'';
+  if(src==='watchtower'&&/^https?:\/\//i.test(url)){
+    window.open(url,'_blank','noopener');
+    return;
+  }
+  const pop=cvPopId(CV_SRC_POP[src])||cvPopId(src==='watchtower'?'rss':null);
+  if(pop){openPop(pop);return;}
+  toast('Nothing to open for this result.');
+}
 async function cvOpenResult(sid){
   const term=cvTerm;
   session=sid;localStorage.setItem('hermes_session',sid);
@@ -1369,11 +1517,21 @@ function cvBindSearch(input,onEmpty){
   });
 }
 // --- split mode: the header field + popover -------------------------------
+// the resting state still shows the filter row, so "just my chats" is one
+// click away before a single character is typed
+function cvPrompt(){
+  const host=$('cvfind-list'); if(!host)return;
+  host.innerHTML='';
+  host.appendChild(cvFilterRow());
+  const e=document.createElement('div');e.className='cs-empty';
+  e.textContent='Type to search chats, notes, messages, calendar and news.';
+  host.appendChild(e);
+}
 function cvOpenFind(){
   $('sessions').hidden=true;$('chat-q').hidden=false;
   $('chat-find').classList.add('on');
   $('cvfind').hidden=false;
-  $('cvfind-list').innerHTML='<div class="cs-empty">Type to search every conversation.</div>';
+  cvPrompt();
   $('chat-q').focus();
 }
 function cvCloseFind(){
@@ -1555,7 +1713,7 @@ setInterval(()=>{if((document.querySelector('.deck')||{}).dataset&&document.quer
 $('cs-new').onclick=()=>{$('newchat').click();setTimeout(renderChatSide,300);};
 // conversation management wiring (search field in both chat modes + export)
 cvBindSearch($('cs-q'),()=>{if(cvFullMode())renderChatSide();});
-cvBindSearch($('chat-q'),()=>{$('cvfind-list').innerHTML='<div class="cs-empty">Type to search every conversation.</div>';});
+cvBindSearch($('chat-q'),()=>{cvPrompt();});
 $('cs-qx').onclick=()=>{cvClear();$('cs-q').focus();};
 $('chat-find').onclick=()=>{$('cvfind').hidden?cvOpenFind():cvCloseFind();};
 $('exportchat').onclick=cvExport;
@@ -1643,7 +1801,10 @@ const WICONS={
   folders:'<path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4l2 2.5h9A1.5 1.5 0 0 1 21 9v9.5a1.5 1.5 0 0 1-1.5 1.5H4.5A1.5 1.5 0 0 1 3 18.5z" fill="currentColor" opacity=".16"/><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4l2 2.5h9A1.5 1.5 0 0 1 21 9v9.5a1.5 1.5 0 0 1-1.5 1.5H4.5A1.5 1.5 0 0 1 3 18.5z" stroke-linejoin="round"/>'
 };
 function widgetIcon(id){const g=WICONS[id];if(g)return '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">'+g+'</svg>';
-  const m=window.lastHub&&window.lastHub.widgets&&window.lastHub.widgets[id];return icon(m?m.meta.icon:'spark');}
+  const m=window.lastHub&&window.lastHub.widgets&&window.lastHub.widgets[id];
+  // a widget that is not on the hub still has a real icon in the catalogue
+  let cm=null; try{cm=WIDGET_META[id];}catch(e){}
+  return icon(m?m.meta.icon:((cm||{}).icon||'spark'));}
 function miniSpark(arr,up){
   if(!arr||arr.length<2)return '';
   const w=46,h=18,mn=Math.min(...arr),mx=Math.max(...arr),rng=(mx-mn)||1;
@@ -1924,6 +2085,25 @@ const WIDGET_DESC={clock:'Your local time and date.',weather:'Right-now conditio
   rss:'The latest from your news feeds.',github:'Repositories the world is starring this week.',
   agent_pulse:'Everything Hermes has been doing, across every surface.',quicklinks:'Your pinned links.',
   recent:'Recently changed files in folders you’ve granted.',folders:'Folders the assistant may read.'};
+// Pop-out header metadata for a widget the user has NOT enabled. openPop()
+// reads meta from the last /api/hub render, which only carries the ENABLED
+// layout — so before unified search nothing ever opened a disabled widget and
+// the "(id with underscores)" fallback was never seen. Search opens by SOURCE,
+// not by layout (a note hit opens the Scratchpad whether or not it is on the
+// hub), so the fallback needs real titles. Mirrors server.py's WIDGETS.
+const WIDGET_META={
+  clock:{title:'Clock',icon:'clock',cat:'system'},weather:{title:'Weather',icon:'sun',cat:'life'},
+  battery:{title:'Battery',icon:'battery',cat:'system'},system:{title:'System',icon:'cpu',cat:'system'},
+  markets:{title:'Markets',icon:'trend',cat:'markets'},crypto:{title:'Crypto',icon:'coin',cat:'markets'},
+  worldclock:{title:'World Clock',icon:'globe',cat:'life'},today:{title:'Today',icon:'calendar',cat:'life'},
+  tasks:{title:'Tasks',icon:'check',cat:'productivity'},reminders:{title:'Reminders',icon:'bell',cat:'productivity'},
+  notes:{title:'Scratchpad',icon:'note',cat:'productivity'},briefing:{title:'Briefing',icon:'spark',cat:'agent'},
+  messages:{title:'Message Center',icon:'chat',cat:'comms'},hackernews:{title:'Tech News',icon:'news',cat:'news'},
+  rss:{title:'News Feed',icon:'rss',cat:'news'},github:{title:'GitHub Trending',icon:'code',cat:'news'},
+  agent_pulse:{title:'Agent Pulse',icon:'activity',cat:'agent'},quicklinks:{title:'Quick Links',icon:'link',cat:'productivity'},
+  recent:{title:'Recent Activity',icon:'file',cat:'productivity'},folders:{title:'Folder Access',icon:'folder',cat:'productivity'},
+  claude_usage:{title:'Claude Usage',icon:'activity',cat:'agent'},foryou:{title:'For You',icon:'spark',cat:'agent'},
+  framing:{title:'Every Lens',icon:'news',cat:'news'},trends:{title:'Trend Radar',icon:'trend',cat:'news'}};
 // small horizontal bar-chart helper for expanded views
 function barRows(items,labelW,valW){const max=Math.max(1,...items.map(i=>+i.val||0));return items.map(i=>
   '<div style="display:flex;align-items:center;gap:9px;padding:3px 0;font-size:12px">'+
@@ -2098,7 +2278,7 @@ async function openPop(id){
   // meta comes from the last hub render (instant — no network); we NEVER
   // block the pop-out on /api/hub anymore.
   const w=(window.lastHub&&window.lastHub.widgets&&window.lastHub.widgets[id])||null;
-  const meta=w?w.meta:{title:(id||'widget').replace(/_/g,' '),icon:'spark',cat:'system'};
+  const meta=w?w.meta:(WIDGET_META[id]||{title:(id||'widget').replace(/_/g,' '),icon:'spark',cat:'system'});
   const data=w?w.data:{};
   const myToken=++popToken;
   if(popCtrl){try{popCtrl.abort();}catch(e){}}

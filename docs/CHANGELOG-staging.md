@@ -614,3 +614,64 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   ASIDE, not fixed (out of scope): `AUTH=()` + `"${AUTH[@]}"` under `set -u` is an
   unbound-variable error on macOS's bash 3.2, which would break the whole
   unauthenticated tarball path before it reaches any of this.
+- `<1.1.0>` **1.1.0 Unified local search** — `dashboard/aux_index.py` (new, 1002L)
+  + `dashboard/index.html` (search UI) + one line in `access_preamble()`
+  + `skills-snapshot/hermes-search/SKILL.md`. Closes the §2 gap in
+  `docs/plans/purpose-and-direction.md`: every context source was wired, none of
+  them could be searched together, and the only search box in the product
+  searched chats alone. Now: SQLite **FTS5** (stdlib `sqlite3` — no extension,
+  no embeddings, no network) at `~/.hermes/dashboard/index.db` (0600, sidecars
+  too), `items(id,source,ts,title,body,ref,meta)` + external-content
+  `items_fts(title,body)` + 3 sync triggers, and five adapters — chat (one row
+  per conversation, user+bot turns only: tool/approval/status rows and
+  `__prewarm__` are never indexed), note, message, calendar (icalBuddy ±30 days,
+  falling back to the existing today-only provider), watchtower. Every adapter
+  distinguishes **"store absent" (prune nothing) from "store present but empty"
+  (prune)**, so a missing or half-written intel.json cannot silently empty the
+  news half of the index. Freshness: `index_touch()` from the write paths reached
+  WITHOUT invasive edits — `save_chat` wrapped (aux_shortcuts' `access_preamble`
+  pattern), `POST /api/notes` re-registered as an aux route — coalesced on a 2s
+  drain thread so no request ever waits on sqlite, plus a sweep at start+60s and
+  every 30 min that upserts by mtime/content and prunes. `GET /api/search` (BM25,
+  title weighted 10×, `q`≤200, `limit`≤50, `sources` counted over the whole match
+  set) and `GET /api/search/status`. The server **never emits markup**: FTS5's own
+  `snippet()` is deliberately unused, a result is plain text plus
+  `(mark_start,mark_len)` and the client escapes the three slices — the same
+  contract the chat search already shipped, so `cvHi()` is untouched. Query
+  sanitisation quotes every `\w+` token (so `OR`/`NEAR`/`NOT`/`title:`/`"`/`*` are
+  literal words, never operators) and re-attaches one trailing `*` as prefix.
+  UI: "Search everything" with a source filter row (All · Chats · Notes ·
+  Messages · Calendar · News + counts), results grouped by source with a chip,
+  chat→open+flash (unchanged), note/message/calendar→the owning widget pop-out,
+  news→its URL; `cvFetch` falls back to `/api/sessions/search` when `/api/search`
+  404s so an un-restarted dashboard keeps its old behaviour instead of going dead.
+  Also fixed en route: `openPop()`/`widgetIcon()` had no metadata for a widget the
+  user has not enabled (search opens by SOURCE, not by layout, so a note hit was
+  landing on a sheet titled "notes") — `WIDGET_META` mirrors server.py's catalogue.
+  VERIFIED, dashboard NOT restarted and no model server started: `py_compile` on
+  server.py + aux_index.py; **100/100** in a throwaway-HOME harness running the
+  REAL Handler (guard + aux exec chain) over fixtures for all five sources —
+  hits in every source, title-outranks-body, mark slices exactly equal the query
+  word on every row, no markup in any snippet, prefix `kumq*` (and a bare prefix
+  matching nothing), **21 injection strings** (`"`, `a" OR b`, `NEAR(x y)`,
+  `title:x`, `(`, `{}`, `^`, 400 chars…) all 200/ok with `OR` proven literal,
+  limit/q clamps, source filter + 400 on an unknown source, the same-origin guard
+  refusing bad Host/Origin on both new routes, notes absent→present through a real
+  `POST /api/notes`, the save_chat touch (queued not inline, 3 saves coalescing to
+  1, update trigger firing, no phantom duplicate), sweep idempotence (second sweep
+  writes 0 and prunes 0), prune-on-delete with `items`/`items_fts` still in
+  lockstep, missing AND corrupt AND empty intel.json all handled differently and
+  correctly, `fda:false` pruning message rows, the REAL icalBuddy ±30-day path
+  parsing an ISO ts, 0600 on the db and (separately proven) on `-wal`/`-shm`, and
+  a check that the real `~/.hermes` gained no index.db and lost no chat; `node
+  --check` on the extracted inline script; **52/52 Playwright** against the live
+  dashboard with `/api/search` routed to a fixture, both themes × both chat modes
+  — grouping order, per-row chips, highlight offsets, filter-row counts and
+  re-query, every open-item branch (chat switches the session and closes the
+  popover; note/message/calendar open Scratchpad/Message Center/Today; a news row
+  opens its link, and one without a link falls back to a widget), Enter opens the
+  first hit, clearing restores the conversation list, and the 404 fallback path —
+  0 page errors and 0 console errors outside the deliberately-404'd phase.
+  NOT DONE (deliberate): Apple Notes titles (the notes pop-out reads them live via
+  osascript — there is no store to index), Gmail (OAuth not connected on this Mac),
+  granted-folder file contents, and embeddings — FTS first, per §4b.

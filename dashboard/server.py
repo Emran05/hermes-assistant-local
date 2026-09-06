@@ -1082,6 +1082,19 @@ def access_preamble():
         "couldn't confirm the rest (it may not exist or be too new). Never loop "
         "on the same search; a handful of distinct searches is the ceiling."
     )
+    # Unified local index (1.1.0, aux_index.py). Stable line — it names a route,
+    # not a value — so it sits with the other invariants, above the volatile
+    # tasks/calendar/clock lines that the prefix cache is ordered around.
+    lines.append(
+        "[context] You can search the user's OWN local index before reaching "
+        "for the web: GET http://127.0.0.1:7788/api/search?q=<words> (add "
+        "&source=chat|note|message|calendar|watchtower to narrow, &limit=N up "
+        "to 50). It covers their conversations with you, their scratchpad, "
+        "Message Center previews, calendar events and the watchtower news "
+        "store, ranked, with a plain-text snippet per hit. It is loopback, "
+        "keyless, read-only and instant — check it before web_search on "
+        "anything that might already be in their own data."
+    )
     tasks = [t for t in get_tasks()["tasks"] if not t.get("done")][:10]
     if tasks:
         lines.append("[context] The user's open tasks (from their dashboard task "

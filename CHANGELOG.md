@@ -6,6 +6,22 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-05
+
+First release of the 1.1 line (`docs/plans/purpose-and-direction.md`): the center of
+gravity moves from "chat + widgets" toward a personal context layer.
+
+### Added
+- **Search everything.** One local index (SQLite FTS5, `~/.hermes/dashboard/index.db`,
+  0600) over chats, notes, Message Center rows, calendar events and watchtower items;
+  sources degrade gracefully when a store is absent. The sidebar search now searches all
+  of it, grouped by source with a filter row; Enter or click opens the item where it lives.
+  `GET /api/search?q=&source=&limit=` returns BM25-ranked rows with plain-text snippets
+  and match offsets (the client escapes and highlights; the server never emits markup);
+  `GET /api/search/status` reports per-source counts. The assistant can use the same route
+  (skill `hermes-search`).
+
+
 ## [1.0.4] - 2026-09-04
 
 Fixes from the review pass over 1.0.1-1.0.3 (silent-failure and security reviews).
