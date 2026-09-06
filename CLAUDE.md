@@ -499,6 +499,57 @@ and explicit agent tool calls (web search etc.) touch the internet.
   drops FDA — see the Message Center note). `install.sh` is the fresh-Mac
   bootstrap; `.github/workflows/{ci,release}.yml` gate syntax + home-path
   hygiene and build/sign/publish on a `v*` tag.
+- **First-run onboarding (1.1.1)** — `dashboard/aux_onboarding.py` +
+  `aux_onboarding.js` (one `<script>` tag in index.html, after aux_update.js).
+  A four-step full-viewport sheet that auto-opens when
+  `~/.hermes/dashboard/onboarded` is absent and **never** when it is present.
+  Asks for nothing: chip (`sysctl machdep.cpu.brand_string`), RAM
+  (`_machine_ram_gb`), free disk (`statvfs(~)`, `f_bavail` — the space a
+  non-root download can really use), macOS (`sw_vers -productVersion`),
+  laptop (`pmset -g batt` mentions `InternalBattery`) and cores are DETECTED,
+  and the model recommendation falls out of RAM. Routes: `GET
+  /api/onboarding/state`, `POST /api/onboarding/apply|done|reset`.
+  **The model catalog is STATIC and there is no network at request time** — the
+  four entries (Qwen3.5-2B/4B/9B + Qwen3.8-27B) are FULL roster shapes (backend,
+  template_args, drafter) whose ids and download sizes were verified against the
+  HF API by hand (2026-09-05: 1.75/3.06/5.98/16.08 GB + the 0.87 GB MTP
+  drafter); re-verify by hand if you edit them. `_onb_tier(ram_gb)` is PURE (so
+  every machine size is testable without the hardware): `<16` 2B only, "chat
+  only, small context"; `16-23` 4B, no bg lane; `24-35` 9B + 2B; `36-47` 27B
+  *tight* + 9B (with a battery alternative of 9B + 2B); `>=48` 27B + 9B.
+  **It is deliberately stricter than `_model_fit`** — the tier budgets for the
+  whole running system (primary + always-on lane + OS + app + browser) while
+  `_model_fit` judges ONE model, so a 4B reads `ok` on an 8GB Air and is still
+  not recommended there, and the 27B+9B PAIR is tight at 36-47GB though the 27B
+  alone reads `ok` from 32GB up. Don't "fix" the divergence: the per-model
+  badges in the sheet ARE `_model_fit` (1.0.3 phrasing/tokens, identical to the
+  model menu), shown right next to the recommendation, so the honest per-model
+  verdict is never hidden. `apply` validates every field and writes ONLY through
+  existing helpers — idle marker files, `set_prewarm_enabled`,
+  `_cb_set_escalation`, and watchtower's own `set_master`/`set_quiet_hours` ops
+  via `watchtower_post_handler` (same clamping, same lock). Roster writes are
+  ADDITIVE with the full catalog shape (an `add_model`-style stub would download
+  fine then load on the wrong backend with thinking on); the background lane is
+  the `bg-model` file; **apply never switches the running model** (that restarts
+  the model server). A download is refused when free disk `< needed + 5GB`.
+  **Secrets:** `telegram_configured`/`google_configured` are BOOLEANS —
+  `_onb_env_has()` compares the `~/.hermes/.env` value to `""` inside the
+  function and never returns, logs or stores it. `fda` is True/False/**None**
+  (the Message Center's own verdict from messages.json); None means "the app has
+  not reported yet" and must render as unknown, never as denied. **Load order:**
+  aux files exec SORTED, so this module runs BEFORE aux_watchtower — every
+  watchtower/foreign global is resolved by name at REQUEST time through
+  `_onb_g()`, never captured at module load (the discipline aux_index uses).
+  UI notes: the "what leaves this Mac" table is generated from ONE constant
+  (`NETWORK_FACTS`) by ONE reusable function (`networkTableHTML`, `inputs:false`
+  for a read-only render) — that is deliberately the seed of the Data & Network
+  panel (#16), so extend the constant rather than copying the markup. Claude
+  escalation is shown only when `claude_cli` is detected. Esc does nothing until
+  the final step on a first run, and works everywhere on a re-run
+  (`window.hermesOnboarding.open()`; a "Run setup again" row is injected into
+  Settings › Overview the aux_update way — **aux_settings_shell.js is never
+  edited**). The sheet lives in index.html's own document and therefore INHERITS
+  the app palette — re-declaring a fifth copy of the tokens would be the bug.
 
 - **DeepSeek Harness (`dsh`) spike — 2026-08-18, NOT integrated** — installed
   locally (not global) at `~/.hermes/dsh` (`@deepseek-ai/dsh@0.1.0-rc.7`, MIT,

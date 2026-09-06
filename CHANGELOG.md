@@ -6,6 +6,20 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-09-05
+
+### Added
+- **First-run setup.** On a fresh install the dashboard opens a four-step setup sheet:
+  what stays local and what leaves the Mac (with the existing toggles), your Mac's chip,
+  RAM, free disk and macOS auto-detected with a model recommendation by RAM tier
+  (2B / 4B / 9B / 27B classes, download sizes, fit badges, one-tap download of the
+  recommended pair), preferences (theme, sleep-after minutes, prewarm, Claude escalation
+  when the CLI is present, briefings and news masters with quiet hours, and the status of
+  Telegram, Google and Full Disk Access with the exact next step), then a summary.
+  Re-run it any time from Settings ("Run setup again"). Endpoints:
+  `GET /api/onboarding/state`, `POST /api/onboarding/apply`, `/done`, `/reset`.
+
+
 ## [1.1.0] - 2026-09-05
 
 First release of the 1.1 line (`docs/plans/purpose-and-direction.md`): the center of

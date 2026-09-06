@@ -131,7 +131,9 @@ Then:
    `TELEGRAM_ALLOWED_USERS` if you want the Telegram reach-in. `RUNBOOK.md`
    walks through every integration.
 2. Open the dashboard at <http://127.0.0.1:7788>, or launch **Hermes
-   Assistant.app**.
+   Assistant.app**. Setup runs on first launch — it reads your Mac's chip, RAM
+   and free disk, shows exactly what ever leaves the machine, recommends a model
+   that fits, and sets your preferences (re-runnable from Settings › Overview).
 3. Pick a model in the header pill and let it download the first time (~17 GB).
 
 **First launch of the app.** The bundle is ad-hoc signed, not notarised by

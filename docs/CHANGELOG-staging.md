@@ -675,3 +675,78 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   NOT DONE (deliberate): Apple Notes titles (the notes pop-out reads them live via
   osascript — there is no store to index), Gmail (OAuth not connected on this Mac),
   granted-folder file contents, and embeddings — FTS first, per §4b.
+
+- `<1.1.1>` **1.1.1 — First-run onboarding.** `dashboard/aux_onboarding.py` (693L)
+  + `dashboard/aux_onboarding.js` (1265L) + one `<script>` tag in index.html.
+  Answers the owner's ask ("a sleek onboarding process that asks for sys info —
+  or pulls it — to recommend models, and sets preferences") by asking for
+  *nothing*: chip (`sysctl machdep.cpu.brand_string`), RAM (`_machine_ram_gb`),
+  free disk (`statvfs` of `~`, `f_bavail` so it is the space a non-root download
+  can really use), macOS (`sw_vers -productVersion`), laptop-vs-desktop (`pmset
+  -g batt` mentioning `InternalBattery`) and cores are all detected, and the
+  model recommendation falls out of RAM.
+  **Backend.** Four aux routes: `GET /api/onboarding/state`
+  (sysinfo + detect + recommendation + prefs), `POST …/apply`, `POST …/done`
+  (writes `~/.hermes/dashboard/onboarded` = `{version, ts, at}`), `POST …/reset`.
+  `detect` reports `hermes_cli` (+path), `claude_cli`, `mlx_venv`,
+  `models_downloaded`, `fda` (the Message Center's own verdict out of
+  messages.json — **True/False/None**, and None must render "unknown", never
+  "denied"), `telegram_configured` and `google_configured`. **Both connection
+  flags are booleans and nothing else**: `_onb_env_has()` compares the
+  `~/.hermes/.env` value to `""` inside the function and lets it go out of scope
+  — no secret is returned, logged or stored, and the harness asserts the token
+  string appears in no response.
+  **Catalog + tiers.** A STATIC catalog of four full roster shapes (2B/4B/9B/27B,
+  every id and download size verified against the HF API by hand on 2026-09-05:
+  1.75 / 3.06 / 5.98 / 16.08 GB + the 0.87 GB MTP drafter) — **no network at
+  request time**. `_onb_tier(ram_gb)` is PURE, so all seven machine sizes are
+  unit-tested without owning them: `<16` 2B only ("chat only, small context");
+  `16-23` 4B, no background lane; `24-35` 9B + 2B; `36-47` 27B *tight* + 9B, with
+  a "lighter on battery" alternative (9B + 2B); `>=48` 27B + 9B (today's roster).
+  It is DELIBERATELY STRICTER than `_model_fit` because it budgets for the whole
+  running system (primary + always-on lane + macOS + app + browser) rather than
+  one model — the 4B reads `ok` on an 8 GB Air and is still not what we
+  recommend, and the 27B+9B pair is tight at 36-47 GB even though the 27B alone
+  reads `ok` from 32 GB up. The per-model badges in the sheet ARE `_model_fit`
+  (1.0.3), phrasing and tokens identical to the model menu, so the honest
+  per-model verdict is always visible next to the stricter recommendation.
+  **apply** validates every field and goes through the EXISTING helpers only —
+  idle marker files, `set_prewarm_enabled`, `_cb_set_escalation`, and watchtower's
+  own `set_master` / `set_quiet_hours` ops via `watchtower_post_handler` (so the
+  same clamping and file lock apply). Roster writes are ADDITIVE with the full
+  catalog shape (a stub entry would download fine and then load on the wrong
+  backend with thinking left on); the background lane is the `bg-model` file;
+  **apply never switches the running model** — that restarts the model server.
+  A download is refused outright when free disk `< needed + 5 GB`.
+  **UI.** A full-viewport sheet on `--ground` that auto-opens when `done:false`
+  (and never when true), four steps behind a slim rail: (1) what stays local +
+  a "what leaves this Mac" table generated from ONE constant list by ONE reusable
+  function — `networkTableHTML()`, deliberately the seed of the future Data &
+  Network panel (#16), with the three real toggles wired live; (2) the detected
+  facts as quiet stats, the recommendation with fit badges, alternatives as a
+  compact list, one primary "Download recommended" (progress read off
+  `/api/models`' own `downloading`/`downloaded` flags — no second protocol) and
+  "I'll choose later", replaced by "already downloaded" when there is nothing to
+  fetch; (3) theme (applies instantly via `data-theme` + `localStorage
+  hermes_theme`), sleep-after 5/10/20/never, prewarm, Claude escalation (shown
+  only when `claude_cli` — offering a switch for a missing binary is a lie about
+  capability), briefing/news masters + quiet hours, and a read-only status list
+  whose every row carries the literal next step (the exact System Settings path for
+  FDA); (4) a summary, the ⌃⌥Space hint, and Start → writes `done` and focuses
+  the chat input. Esc does nothing until the final step on a first run and works
+  everywhere on a re-run. A "Run setup again" row is injected into Settings ›
+  Overview the way aux_update injects its card — **aux_settings_shell.js is not
+  edited**. The sheet lives in index.html's own document, so it INHERITS the app
+  palette; re-declaring a fifth copy would be the bug, and the harness asserts
+  the painted background equals `--ground` in both themes.
+  **Verified.** `py_compile` + `node --check`; **122/122** backend checks against
+  a throwaway HOME exec-loading server.py with `subprocess` stubbed for
+  sysctl/sw_vers/pmset (every tier at 8/15/16/23/24/32/35/36/47/48/64/128 GB, 13
+  bad-field refusals, low-disk refusal, done/reset/`state.done` flip, additive
+  roster, and the token value absent from every response); **73/73** Playwright
+  against the real index.html with `/api/onboarding/*` on fixtures (64 GB and
+  16 GB Macs, done:true) — all four steps in both themes, `--ground` inheritance,
+  keyboard nav (focus, Tab trap, Enter, both Esc rules), >=40 px hit areas, the
+  Settings row, and that the sheet does NOT appear when done:true.
+  **`/api/models/download` was stubbed to fail loudly in both harnesses: no model
+  was ever woken or downloaded.**
