@@ -170,7 +170,9 @@
     ".ny-chip.off{opacity:.45}",
     ".ny-draft{margin-top:7px;padding:9px 10px;border-radius:10px;",
     "background:var(--chip);border:1px solid var(--hairline);font-size:11.5px;",
-    "color:var(--ink);white-space:pre-wrap;text-wrap:pretty}"
+    "color:var(--ink);text-wrap:pretty}",
+    ".ny-draft.raw{white-space:pre-wrap}",
+    ".ny-draft.md p{margin:3px 0}.ny-draft.md p:first-child{margin-top:0}.ny-draft.md p:last-child{margin-bottom:0}"
   ].join("");
 
   function injectCSS() {
@@ -256,7 +258,9 @@
         "</div>";
     }
     if (UI.draft[it.id]) {
-      h += '<div class="ny-draft">' + E(UI.draft[it.id]) + "</div>";
+      h += (window.hermesMd && typeof window.hermesMd.render === "function")
+        ? '<div class="ny-draft md">' + window.hermesMd.render(UI.draft[it.id]) + "</div>"
+        : '<div class="ny-draft raw">' + E(UI.draft[it.id]) + "</div>";
     }
     if (UI.msg[it.id]) {
       h += '<div class="ny-msg' + (UI.msg[it.id].bad ? " bad" : "") + '">' +

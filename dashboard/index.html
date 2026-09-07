@@ -560,8 +560,24 @@
   .md code{background:var(--chip);padding:1.5px 6px;border-radius:6px;font-size:12px;
     font-family:ui-monospace,"SF Mono",SFMono-Regular,Menlo,monospace}
   .md pre{background:var(--chip);padding:10px 12px;border-radius:var(--radius-sm);overflow-x:auto;border:1px solid var(--hairline)}
-  .md pre code{background:none;padding:0}
+  .md pre code{background:none;padding:0;font-size:12px}
   .md a{color:var(--quick)}
+  .md h1{font-size:15px}
+  .md h4,.md h5,.md h6{font-size:12.5px;margin:8px 0 4px;color:var(--ink);font-weight:640}
+  .md ul ul,.md ol ol,.md ul ol,.md ol ul{margin:2px 0 2px 16px}
+  .md blockquote{margin:6px 0;padding:3px 12px;border-left:2.5px solid var(--hairline);color:var(--muted)}
+  .md blockquote p{margin:3px 0}
+  .md hr{border:0;border-top:1px solid var(--hairline);margin:10px 0}
+  .md del{color:var(--muted)}
+  .md-table{overflow-x:auto;margin:6px 0;border:1px solid var(--hairline);border-radius:8px}
+  .md table{border-collapse:collapse;font-size:12.5px;min-width:100%;font-variant-numeric:tabular-nums}
+  .md th,.md td{padding:5px 10px;border-bottom:1px solid var(--hairline);text-align:left;vertical-align:top}
+  .md th{font-weight:640;background:var(--chip);white-space:nowrap}
+  .md tr:last-child td{border-bottom:0}
+  .md-task{display:inline-flex;align-items:baseline;gap:6px}.md-task input{margin:0;transform:translateY(1px)}
+  .md-think{margin:4px 0 8px;font-size:12.5px;color:var(--muted)}
+  .md-think summary{cursor:pointer;font-weight:600;user-select:none}
+  .md-think[open]{padding:4px 10px 6px;border-left:2px solid var(--hairline)}
   .placeholder{color:var(--muted);font-size:13px}
   .skel{display:flex;flex-direction:column;gap:10px}
   .skel i{height:11px;border-radius:6px;background:linear-gradient(90deg,var(--hairline) 25%,var(--chip) 50%,var(--hairline) 75%);
@@ -1204,6 +1220,7 @@
 </div>
 
 <script src="/motion.min.js"></script>
+<script src="/aux_md.js"></script>
 <script>
 const $=id=>document.getElementById(id);
 // Motion One (vanilla Framer Motion) — spring animations for pop-outs.
@@ -1228,27 +1245,13 @@ const animate=(el,kf,opt)=>{try{return M?M.animate(el,kf,opt):el.animate(kf,opt)
     if(spark._cap)drawSpark(spark._cap);};
 })();
 
-// ---------- tiny safe markdown ----------
+// ---------- markdown (the renderer itself lives in /aux_md.js, shared with
+// the Quick Ask popover and Needs-you; escape-first, http(s) links only) ----------
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
-function inline(s){return s
-  .replace(/`([^`]+)`/g,(m,c)=>'<code>'+c+'</code>')
-  .replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>')
-  .replace(/(^|[^*])\*([^*]+)\*/g,'$1<em>$2</em>')
-  .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');}
+function inline(s){return window.hermesMd?hermesMd.inline(s):s;}
 function renderMd(src){
-  const lines=esc(src).split('\n'); let html='',list=null,inCode=false;
-  const close=()=>{if(list){html+='</'+list+'>';list=null;}};
-  for(const raw of lines){
-    if(/^```/.test(raw)){ if(inCode){html+='</code></pre>';inCode=false;} else{close();html+='<pre><code>';inCode=true;} continue;}
-    if(inCode){html+=raw+'\n';continue;}
-    let m;
-    if(m=raw.match(/^(#{1,3})\s+(.*)$/)){close();const n=m[1].length;html+='<h'+n+'>'+inline(m[2])+'</h'+n+'>';continue;}
-    if(m=raw.match(/^\s*[-*]\s+(.*)$/)){if(list!=='ul'){close();list='ul';html+='<ul>';}html+='<li>'+inline(m[1])+'</li>';continue;}
-    if(m=raw.match(/^\s*\d+\.\s+(.*)$/)){if(list!=='ol'){close();list='ol';html+='<ol>';}html+='<li>'+inline(m[1])+'</li>';continue;}
-    if(raw.trim()===''){close();continue;}
-    close();html+='<p>'+inline(raw)+'</p>';
-  }
-  if(inCode)html+='</code></pre>'; close(); return html;
+  if(window.hermesMd)return hermesMd.render(src);
+  return '<p>'+esc(src).replace(/\n/g,'<br>')+'</p>';   // aux_md.js failed to load: still safe, still readable
 }
 function relTime(ts){
   const s=(Date.now()/1000-ts);
@@ -2394,10 +2397,12 @@ function setAgentState(txt){
 // The route is being built in parallel, so `null` means "this backend has no
 // switch" and EVERY consumer then behaves exactly as before (row hidden, chip
 // unchanged, Escalate button shown) rather than guessing.
-let claudeEscalation=null, escFetched=false;
+let claudeEscalation=(()=>{try{const v=localStorage.getItem('hermes_claude_esc');return v==='0'?false:v==='1'?true:null;}catch(e){return null;}})(), escFetched=false;
 function escBroadcast(){
   // one event, all consumers (model menu · Settings > Claude Bridge · topbar
   // chip · aux_agent's per-reply Escalate button) — see aux_* listeners.
+  try{if(claudeEscalation===null)localStorage.removeItem('hermes_claude_esc');
+      else localStorage.setItem('hermes_claude_esc',claudeEscalation?'1':'0');}catch(e){}
   try{window.dispatchEvent(new CustomEvent('hermes:claude-escalation',
     {detail:{enabled:claudeEscalation!==false,available:claudeEscalation!==null}}));}catch(e){}
 }

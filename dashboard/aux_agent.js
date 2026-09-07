@@ -653,10 +653,14 @@
   // B2 — SHOWIN_RENDER dispatcher (tool activity -> inline cards)
   // ==========================================================================
   function toolFromStatus(txt) {
-    // status arrives as "using <name>" (hermes_rpc) or a free status string.
+    // Only a real tool announcement ("using <name>", hermes_rpc) is classified.
+    // Free status strings ("thinking…", "writing…") are NOT tool names — the old
+    // fallback ran them through the regexes and "thinking…" matched the bare
+    // `think` alternative, so every ordinary turn grew an "Escalated to Claude"
+    // card even with escalation switched off.
     var m = String(txt).match(/using\s+([a-z0-9_.\-]+)/i);
-    var name = m ? m[1].toLowerCase() : String(txt).toLowerCase();
-    return TOOL_MAP_fn(name);
+    if (!m) return null;
+    return TOOL_MAP_fn(m[1].toLowerCase());
   }
   function TOOL_MAP_fn(name) {
     if (/shell|bash|terminal|command|\bexec\b|run_/.test(name)) return "terminal";
@@ -666,7 +670,11 @@
     if (/skill|invoke_skill/.test(name)) return "skill";
     if (/memor|remember|recall/.test(name)) return "memory";
     if (/delegate|sub_?agent|subagent|\btask\b/.test(name)) return "delegate";
-    if (/claude|bridge|escalat|deep_think|think/.test(name)) return "claude-bridge";
+    if (/claude|bridge|escalat|deep_think|think_hard|deep_reason/.test(name)) {
+      // With the master switch off the bridge refuses every call, so a card that
+      // says "Escalated to Claude" would be a lie — show nothing instead.
+      return escEnabled === false ? null : "claude-bridge";
+    }
     return null;                              // unknown -> FAIL OPEN (no card)
   }
 

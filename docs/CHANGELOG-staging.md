@@ -1093,3 +1093,7 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   `index.html`/`aux_needsyou.js` from a scratch copy and both new sections
   failed exactly as predicted — no `.ny-msg.bad` on a refused act, and
   `onModelClick` rejecting out of the download click.
+
+## 1.1.6 (2026-09-07)
+- aux_md.js shared Markdown renderer (popover self-loads it via document.write; shell frozen in main.swift). Unit test: scratch md_test.js 46/46; Playwright md_ui_test.py green.
+- aux_agent.js toolFromStatus only classifies `using <name>`; claude-bridge suppressed when escEnabled===false; index.html caches hermes_claude_esc in localStorage.

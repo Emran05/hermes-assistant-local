@@ -6,6 +6,24 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [1.1.6] - 2026-09-07
+
+### Fixed
+- Answers render fully formatted. One shared renderer (`dashboard/aux_md.js`) now
+  serves the chat, the deep cards, the menu-bar Quick Ask popover and Needs-you
+  drafts, and it understands tables, blockquotes, horizontal rules, headings 1–6,
+  nested and loose lists, task lists, strikethrough, bare links, fenced code with a
+  language class and `<think>` reasoning blocks (folded away once complete).
+  Previously each surface had its own minimal renderer and those constructs arrived
+  as raw Markdown; the popover could not even render headings. Still escape-first,
+  links stay http(s)-only, images render as links.
+- "Escalated to Claude" no longer appears on ordinary local turns. The tool-card
+  classifier matched the bare word "think" inside the generic "thinking…" status,
+  so every turn grew a Claude card regardless of the master switch. Only real tool
+  announcements are classified now, and bridge cards are suppressed while
+  escalation is off. The last known switch state is cached so the per-reply
+  Escalate button cannot flash on before the setting loads.
+
 ## [1.1.5] - 2026-09-07
 
 Review pass over 1.1.0–1.1.4 (silent-failure and security reviews); fixes only.

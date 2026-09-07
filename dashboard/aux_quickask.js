@@ -120,8 +120,19 @@
     } catch (e) { return ""; }
   }
 
-  // escape-FIRST, then a short format pass (mirrors index.html's renderMd order)
+  // The shared renderer (/aux_md.js: tables, quotes, rules, nested lists, code
+  // languages, <think> folds) is what the main chat uses. index.html loads it
+  // with a <script> tag; the popover shell is frozen in main.swift, so in that
+  // document we pull it in ourselves while the parser is still open. The short
+  // format pass below stays only as the fallback if that load ever fails.
+  if (window.__HERMES_QUICKASK__ && !window.hermesMd) {
+    try {
+      if (document.readyState === "loading") document.write('<script src="/aux_md.js"><\/script>');
+      else { var _mdS = document.createElement("script"); _mdS.src = "/aux_md.js"; document.head.appendChild(_mdS); }
+    } catch (e) {}
+  }
   function qaMd(src) {
+    if (window.hermesMd && typeof window.hermesMd.render === "function") return window.hermesMd.render(src);
     var lines = E(src).split("\n"), html = "", list = null, inCode = false;
     var close = function () { if (list) { html += "</" + list + ">"; list = null; } };
     var inline = function (s) {
@@ -324,6 +335,30 @@
     ".qa-b .md li{margin:1px 0}",
     ".qa-b .md a{color:var(--quick)}",
     ".qa-b .md strong{font-weight:640}",
+    ".qa-b .md h1,.qa-b .md h2,.qa-b .md h3,.qa-b .md h4,.qa-b .md h5,.qa-b .md h6{font-size:12.5px;margin:7px 0 3px;font-weight:640;line-height:1.35}",
+    ".qa-b .md h1:first-child,.qa-b .md h2:first-child,.qa-b .md h3:first-child{margin-top:0}",
+    ".qa-b .md blockquote{margin:4px 0;padding:2px 9px;border-left:2px solid color-mix(in srgb,var(--ink) 18%,transparent);color:var(--muted)}",
+    ".qa-b .md hr{border:0;border-top:1px solid color-mix(in srgb,var(--ink) 12%,transparent);margin:7px 0}",
+    ".qa-b .md del{color:var(--muted)}",
+    ".qa-b .md ul ul,.qa-b .md ol ol,.qa-b .md ul ol,.qa-b .md ol ul{margin:1px 0}",
+    ".qa-b .md-table{overflow-x:auto;margin:5px 0;border:1px solid color-mix(in srgb,var(--ink) 12%,transparent);border-radius:7px}",
+    ".qa-b .md table{border-collapse:collapse;font-size:11.5px;min-width:100%;font-variant-numeric:tabular-nums}",
+    ".qa-b .md th,.qa-b .md td{padding:3px 8px;border-bottom:1px solid color-mix(in srgb,var(--ink) 10%,transparent);text-align:left;vertical-align:top}",
+    ".qa-b .md th{font-weight:640;background:color-mix(in srgb,var(--ink) 6%,transparent);white-space:nowrap}",
+    ".qa-b .md tr:last-child td{border-bottom:0}",
+    ".qa-b .md-task{display:inline-flex;align-items:baseline;gap:5px}.qa-b .md-task input{margin:0}",
+    ".qa-b .md-think{margin:2px 0 6px;color:var(--muted)}.qa-b .md-think summary{cursor:pointer;font-weight:600}",
+    ".qa-b .md-think[open]{padding:2px 8px 4px;border-left:2px solid color-mix(in srgb,var(--ink) 14%,transparent)}",
+    ".qa-deep .bd blockquote{margin:4px 0;padding:2px 9px;border-left:2px solid color-mix(in srgb,var(--ink) 18%,transparent);color:var(--muted)}",
+    ".qa-deep .bd hr{border:0;border-top:1px solid color-mix(in srgb,var(--ink) 12%,transparent);margin:7px 0}",
+    ".qa-deep .bd h1,.qa-deep .bd h2,.qa-deep .bd h3,.qa-deep .bd h4{font-size:12.5px;margin:7px 0 3px;font-weight:640}",
+    ".qa-deep .bd pre{background:color-mix(in srgb,var(--ink) 9%,transparent);padding:8px;border-radius:8px;overflow-x:auto;margin:5px 0}",
+    ".qa-deep .bd pre code{background:none;padding:0}",
+    ".qa-deep .bd .md-table{overflow-x:auto;margin:5px 0;border:1px solid color-mix(in srgb,var(--ink) 12%,transparent);border-radius:7px}",
+    ".qa-deep .bd table{border-collapse:collapse;font-size:11.5px;min-width:100%}",
+    ".qa-deep .bd th,.qa-deep .bd td{padding:3px 8px;border-bottom:1px solid color-mix(in srgb,var(--ink) 10%,transparent);text-align:left}",
+    ".qa-deep .bd th{font-weight:640;background:color-mix(in srgb,var(--ink) 6%,transparent)}",
+    ".qa-deep .bd tr:last-child td{border-bottom:0}",
     // streaming caret: inline at the end of the LAST block, not a stray block
     // of its own on a new line (which is what appending a <span> after the
     // rendered markdown produced)
