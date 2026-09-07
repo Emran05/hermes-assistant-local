@@ -2721,13 +2721,27 @@ async function onModelClick(el){
       if(!confirm('Download '+nm+'?\n~'+gbTxt(dlGb)+' download'+free+
                   '\nIt keeps downloading in the background — keep the app open.'))return;
     }
-    const r=await(await fetch('/api/models/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})})).json().catch(()=>null);
+    // ONE try/catch around the whole round trip (1.1.5 review fix). The old
+    // shape only caught .json(): a dropped connection or a 500 with an HTML
+    // body threw out of onModelClick, the row kept its idle "download" text
+    // with no error and no poller — a dead row that looked clickable and was
+    // not. Now every failure (throw, non-JSON, ok:false) lands on the SAME
+    // failure chip, and the row is only marked busy once the pull is real.
+    let r=null,dlErr=false;
+    try{
+      const resp=await fetch('/api/models/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+      r=await resp.json();
+      dlErr=!r||r.ok===false;
+    }catch(e){ dlErr=true; }
     // The server enforces the same headroom rule. If it refused (a stale menu,
     // a volume that filled since the last poll), say so instead of showing a
     // "downloading…" spinner for something that never started.
-    if(r&&r.ok===false){
-      el.querySelector('.act').textContent=r.error==='not enough free disk'?'not enough disk':'failed';
-      el.querySelector('.act').style.color='var(--bad)';
+    if(dlErr){
+      const act=el.querySelector('.act');
+      act.textContent=(r&&r.error==='not enough free disk')?'not enough disk':'failed';
+      act.style.color='var(--bad)';
+      // reload the menu so the row comes back live and retryable rather than
+      // frozen on the chip
       setTimeout(loadModels,1500);
       return;
     }

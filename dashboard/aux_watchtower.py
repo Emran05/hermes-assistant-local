@@ -1398,7 +1398,14 @@ def _wt_needsyou_line():
         f = globals().get("_ny_payload")
         d = (f(mark=False) if callable(f) else {}) or {}
         n, t = len(d.get("now") or []), len(d.get("today") or [])
-    except Exception:
+    except Exception as e:
+        # Fail open, but never silently (1.1.5 review fix): a brief that has
+        # quietly lost its needs-you line for weeks is INDISTINGUISHABLE from
+        # "nothing needs you", which is exactly the false calm §4b exists to
+        # prevent.  The message, not just the class — an AttributeError from a
+        # renamed payload key and a TypeError from a signature change read the
+        # same otherwise.
+        _wt_log_err("needsyou line failed: %s: %s" % (type(e).__name__, e))
         return ""                              # a brief never fails on this
     return ("\nNeeds you: %d now, %d today.\n" % (n, t)) if (n or t) else ""
 

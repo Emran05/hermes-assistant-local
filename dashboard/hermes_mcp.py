@@ -119,6 +119,55 @@ _CV_HERMES_PATH_RE = re.compile(
     r"(?:~|/Users/[A-Za-z0-9._-]+|/home/[A-Za-z0-9._-]+)/\.hermes"
     r"(?:/[^\s`'\"),;]*)?")
 
+# The block below is MIRRORED VERBATIM from dashboard/aux_convos.py (copied,
+# not imported: importing would drag server.py's globals into this process and
+# break rule 1).  Change it there, change it here; the markers make the diff
+# mechanical.
+
+# ===== BEGIN MIRRORED SECRET BLOCK — KEEP BYTE-IDENTICAL (1.1.5) ===========
+# Raw, UNLABELED secrets.  The key=value rule above only fires when a label
+# ("token:", "api_key=") precedes the value and the Bearer rule only when the
+# scheme does — but an agent that echoes a bare `sk-ant-...`, a PEM block or a
+# Telegram bot token leaks exactly as hard with no label anywhere in sight.
+# Ordered most-specific-first where prefixes overlap (sk-ant- before sk-) so
+# the narrower shape wins the match, and PEM first because its body is base64
+# that a later pattern could nibble at.  Every entry is anchored on a fixed
+# vendor prefix (or a digits-colon shape) plus a minimum length, so ordinary
+# prose and a 40-char git sha — hex only, no prefix, no colon — cannot match.
+# That restraint is the point: a redactor that eats normal text gets switched
+# off, and a switched-off redactor protects nothing.
+_CV_RAW_SECRET_RES = (
+    # PEM private key — multiline; non-greedy so two keys are two matches
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?"
+               r"-----END [A-Z ]*PRIVATE KEY-----"),
+    # JWT: three base64url segments, the first being the `{"alg"...` header
+    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+    re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}"),                  # Anthropic
+    re.compile(r"\bsk-[A-Za-z0-9_-]{20,}"),                      # OpenAI-style
+    re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}"),   # GitHub PAT
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{30,}"),               # GH fine-grained
+    re.compile(r"\bAKIA[0-9A-Z]{16}"),                           # AWS key id
+    re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{20,}"),               # Slack
+    re.compile(r"\bAIza[0-9A-Za-z_-]{30,}"),                     # Google API key
+    # Telegram bot token, <8-10 digit bot id>:<35 chars>.  Deliberately NO \b
+    # in front: the shape this Mac actually leaks is the send URL
+    # ".../bot<id>:<secret>/sendMessage", where "bot" runs straight into the
+    # digits and a word boundary would never match.
+    re.compile(r"[0-9]{8,10}:[A-Za-z0-9_-]{35}"),
+)
+
+
+def _cv_redact_raw(text):
+    """Replace secrets that arrive with no label in front of them.
+
+    Runs LAST, after the labeled and Bearer rules: those already collapsed the
+    values they own, so whatever still matches here genuinely had no label.
+    """
+    for _rx in _CV_RAW_SECRET_RES:
+        text = _rx.sub("[redacted]", text)
+    return text
+# ===== END MIRRORED SECRET BLOCK ==========================================
+
 # Defensive only: an upstream body is never forwarded unparsed, so nothing
 # should ever match.  If a stored note or chat literally contains a script
 # tag we neutralise the opening bracket rather than hand a model markup.
@@ -128,10 +177,12 @@ _CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 def _redact(text):
-    """aux_convos._cv_redact, verbatim — key=value first, then bare Bearer."""
+    """aux_convos._cv_redact, verbatim — path, key=value, Bearer, then the
+    unlabeled raw shapes (1.1.5)."""
     text = _CV_HERMES_PATH_RE.sub("[redacted path]", text)
     text = _CV_SECRET_RE.sub(lambda m: m.group(1) + ": [redacted]", text)
-    return _CV_BEARER_RE.sub("Bearer [redacted]", text)
+    text = _CV_BEARER_RE.sub("Bearer [redacted]", text)
+    return _cv_redact_raw(text)          # unlabeled shapes last (1.1.5)
 
 
 def _plain(v, limit=0):
@@ -207,6 +258,20 @@ def load_allow():
         # fail SAFE, never open: a corrupt file yields the defaults
         _log("allowlist unreadable (%s) — using defaults" % type(e).__name__)
         return allow
+
+    # 1.1.5 review fix: the create path opens this 0600, but a file that
+    # already existed — restored from a backup, copied in, written by an
+    # editor with a loose umask — kept whatever mode it arrived with.  This
+    # file is the switch deciding whether this process may read the user's
+    # messages at all, so a group- or world-WRITABLE copy is a privilege
+    # escalation into the MCP surface.  chmod unconditionally on every
+    # successful read: it is a no-op on an already-0600 file, costs one
+    # syscall per process start, and needs no stat to decide.
+    try:
+        os.chmod(ALLOW_PATH, 0o600)
+    except OSError as e:
+        _log("allowlist chmod 0600 failed (%s: %s) — %s may be readable by "
+             "others" % (type(e).__name__, e, ALLOW_PATH))
 
     if not isinstance(raw, dict):
         _log("allowlist is not an object — using defaults")

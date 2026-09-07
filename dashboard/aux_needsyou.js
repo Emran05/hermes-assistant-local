@@ -393,8 +393,23 @@
           if (!id) return;
 
           if (a === "open") {
+            // The server records "you opened this" before it answers, so an
+            // ok:false here is a real store failure, not a cosmetic one — say
+            // so with the same .ny-msg.bad the draft path uses instead of
+            // silently jumping to a surface as if the act had been logged.
             post({ id: id, action: "open" }).then(function (r) {
-              openTarget(host, id, (r && r.open) || "", (r && r.ref) || "");
+              if (!(r && r.ok)) {
+                UI.msg[id] = {
+                  bad: true,
+                  text: (r && r.error) || "Could not open this. Try again."
+                };
+                return redraw(host, expanded);
+              }
+              delete UI.msg[id];
+              openTarget(host, id, r.open || "", r.ref || "");
+            }).catch(function () {
+              UI.msg[id] = { bad: true, text: "Could not open this. Try again." };
+              redraw(host, expanded);
             });
             return;
           }
@@ -424,11 +439,27 @@
           if (a === "rc") body.to = b.getAttribute("data-to") || "later";
           b.disabled = true;
           UI.snooze = "";
-          post(body).then(function () {
+          // TAG, NEVER MOVE means this module's store is the ONLY record the
+          // decision happened: if the write failed, reloading would re-list the
+          // row with no explanation and the user would read it as "my click did
+          // nothing".  Check ok, keep the row, say why, leave the button live.
+          post(body).then(function (r) {
+            if (!(r && r.ok)) {
+              b.disabled = false;
+              UI.msg[id] = {
+                bad: true,
+                text: (r && r.error) || "That did not save. Try again."
+              };
+              return redraw(host, expanded);
+            }
             delete UI.msg[id];
             delete UI.draft[id];
             reload(host, expanded);
-          }).catch(function () { b.disabled = false; });
+          }).catch(function () {
+            b.disabled = false;
+            UI.msg[id] = { bad: true, text: "That did not save. Try again." };
+            redraw(host, expanded);
+          });
         };
       })(btns[i]);
     }

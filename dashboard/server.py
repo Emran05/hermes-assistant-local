@@ -3024,6 +3024,25 @@ def _draft_ready(m):
 # --------------------------------------------------------------------------
 DISK_HEADROOM_GB = 5.0     # a download must leave at least this much free
 
+# The disk guard FAILS OPEN by design: _disk_short() answers False on a None,
+# so a helper that starts raising silently turns the headroom rule off and the
+# next click pulls 19 GB onto a volume that cannot hold it — the exact outcome
+# 1.1.3 added this for.  Failing open is still right (never refuse on a number
+# we do not have), so the 1.1.5 fix is to SAY it once per process per helper:
+# a flag, not a rate limiter, because _dir_size_gb runs per model per
+# /api/models poll and an unthrottled line would be thousands a day.
+_DISK_GUARD_WARNED = {}
+
+
+def _disk_guard_warn(which, e):
+    """One stderr line, first time only, when a disk helper swallows an error."""
+    if _DISK_GUARD_WARNED.get(which):
+        return
+    _DISK_GUARD_WARNED[which] = True
+    print("[models] disk guard FAILING OPEN — %s: %s: %s "
+          "(headroom checks skipped; further occurrences suppressed)"
+          % (which, type(e).__name__, e), file=sys.stderr, flush=True)
+
 
 def _disk_free_gb(path=None):
     """Free space on the volume holding ~ in GB (GiB, matching _machine_ram_gb
@@ -3034,7 +3053,8 @@ def _disk_free_gb(path=None):
     try:
         st = os.statvfs(path or HOME)
         return round(st.f_bavail * st.f_frsize / (1024 ** 3), 1)
-    except Exception:
+    except Exception as e:
+        _disk_guard_warn("_disk_free_gb", e)
         return None
 
 
@@ -3052,8 +3072,9 @@ def _dir_size_gb(d):
                 try:
                     total += os.stat(os.path.join(root, fn)).st_size
                 except OSError:
-                    pass
-    except OSError:
+                    pass          # one unreadable file is normal, not a failure
+    except OSError as e:
+        _disk_guard_warn("_dir_size_gb", e)
         return None
     return round(total / (1024 ** 3), 1) if total else None
 

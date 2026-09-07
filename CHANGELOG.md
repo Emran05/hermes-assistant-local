@@ -6,6 +6,25 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [1.1.5] - 2026-09-07
+
+Review pass over 1.1.0–1.1.4 (silent-failure and security reviews); fixes only.
+
+### Fixed
+- Needs-you actions (Done, Snooze, Reclassify, Draft) now report a failure when the store
+  could not be written, on the server and in the widget, instead of pretending it worked;
+  the brief's "Needs you" line and the disk-space guard log when they fall back.
+- The model-download click no longer dies silently on a network error.
+
+### Security
+- Secret redaction in chat exports and in the MCP server's chat tools now also catches raw
+  unlabeled keys (OpenAI/Anthropic/GitHub/AWS/Slack/Google shapes, JWTs, PEM blocks), not
+  only `key: value` pairs and bearer tokens.
+- "Draft reply" fences the third-party message as inert quoted data and tells the agent not
+  to follow instructions inside it.
+- `~/.hermes/mcp-allow.json` is re-tightened to 0600 on every load.
+
+
 ## [1.1.4] - 2026-09-07
 
 ### Added
