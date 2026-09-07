@@ -250,8 +250,41 @@
   .mmi[data-fit="no"]:not(.on):hover{background:transparent}
   .mmi[data-fit="no"]:not(.on) .act{color:var(--faint);font-weight:500}
   .mmi[data-fit="no"]:not(.on) .nm{opacity:.75}
+  /* Free-disk refusal (1.1.3). Same shape as data-fit="no": the row stays
+     visible and legible, the action is inert in CSS *and* in onModelClick, and
+     the action word turns --bad because "not enough disk" is a real refusal,
+     not a caution. Distinct attribute from data-fit so a model that fits RAM
+     but not the volume reads correctly (and vice versa). */
+  .mmi[data-disk="short"]:not(.on){cursor:default}
+  .mmi[data-disk="short"]:not(.on):hover{background:transparent}
+  .mmi[data-disk="short"]:not(.on) .act{color:var(--bad)}
+  .mmi .mmdisk{font-size:10.5px;line-height:1.35;color:var(--bad);margin-top:2px;
+    font-variant-numeric:tabular-nums;text-wrap:pretty}
   .mmi .act{margin-left:auto;font-size:11px;color:var(--iris);font-weight:600;white-space:nowrap}
   .mmi.on .act{color:var(--ok)}
+  /* Per-model Details (1.1.3, backlog #17). The disclosure lives INSIDE .mmi
+     (40x40 hit area, chevron 14px) but the detail block is a SIBLING after it,
+     so expanding never changes the row's own height — the roster keeps the
+     stable rhythm the .rm2 line-clamp above exists to protect. */
+  .mmdt{flex:0 0 auto;width:40px;height:40px;display:flex;align-items:center;justify-content:center;
+    margin-right:-8px;padding:0;border:0;border-radius:10px;background:none;cursor:pointer;
+    color:var(--faint);-webkit-appearance:none;appearance:none;
+    transition-property:color,background-color;transition-duration:150ms;transition-timing-function:ease-out}
+  .mmdt:hover{color:var(--ink);background:var(--chip)}
+  .mmdt:focus-visible{outline:2px solid var(--iris);outline-offset:-2px}
+  .mmdt svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;
+    stroke-linecap:round;stroke-linejoin:round;
+    transition-property:transform;transition-duration:180ms;transition-timing-function:cubic-bezier(.22,1,.36,1)}
+  .mmdt[aria-expanded="true"] svg{transform:rotate(180deg)}
+  .mmdt[aria-expanded="true"]{color:var(--ink)}
+  .mmdd{margin:-1px 10px 6px 28px;padding:9px 11px;border-radius:9px;background:var(--chip);
+    display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 14px;font-size:10.5px;line-height:1.4}
+  .mmdd[hidden]{display:none}
+  .mmdd dt{color:var(--faint);white-space:nowrap}
+  .mmdd dd{margin:0;color:var(--muted);font-variant-numeric:tabular-nums;text-wrap:pretty}
+  .mmdd.just{animation:mmddin 220ms cubic-bezier(.22,1,.36,1)}
+  @keyframes mmddin{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
+  @media (prefers-reduced-motion:reduce){.mmdd.just{animation:none}.mmdt svg{transition:none}}
   .mmhead{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);font-weight:640;padding:8px 10px 4px}
   .mmpower{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:10px;cursor:pointer;
     margin-top:5px;border-top:1px solid var(--hairline);color:var(--warn);
@@ -2405,6 +2438,46 @@ window.claudeEscalationState=()=>claudeEscalation;
 addEventListener('hermes:claude-escalation',()=>{const m=$('model-menu');
   if(m&&!m.hidden&&typeof loadModels==='function')loadModels();});
 
+// ---- per-model Details (1.1.3, backlog #17) -------------------------------
+// loadModels() rebuilds the menu's innerHTML every 30s, so "which rows are
+// expanded" has to live outside the DOM or every poll would silently collapse
+// the panel the user just opened (the same reason aux_update.js keeps
+// S.notesOpen). Keyed by model id, not by index: the roster can reorder.
+const mmOpen=new Set();
+// free GB from the last /api/models, so the download confirm can quote it
+// without a second round-trip. null on an older backend = quote nothing.
+let lastModelDisk=null;
+function mmddId(id){return 'mmdd-'+String(id).replace(/[^A-Za-z0-9_-]/g,'_');}
+// "16.1" -> "16.1 GB"; whole numbers lose the .0 — same shape as the
+// onboarding sheet's gb(), so a size means the same thing in both places.
+function gbTxt(n){const v=Number(n||0);if(!v)return '0 GB';
+  return (Math.round(v*10)%10===0?String(Math.round(v)):v.toFixed(1))+' GB';}
+function ctxTxt(n){const v=Number(n||0);if(!v)return '';
+  return v.toLocaleString()+' tokens'+(v>=1024?' · '+Math.round(v/1024)+'K':'');}
+// The six facts a roster row already knows. Rendered as a <dl> so a screen
+// reader gets label/value pairs, and only for facts that are actually present:
+// a model with no `ctx` shows no context row rather than "unknown".
+function modelDetailsHTML(m,machineGb,diskFree){
+  const rows=[];
+  if(m.ctx)rows.push(['Context',ctxTxt(m.ctx)]);
+  if(m.thinking!==undefined)rows.push(['Thinking',m.thinking?'supported — toggle below':'not supported']);
+  const be=m.backend==='mlx_vlm'?'mlx_vlm (venv)':(m.backend||'mlx-lm');
+  rows.push(['Backend',be]);
+  const draft=m.draft_model||m.draft_subfolder;
+  rows.push(['Drafter',draft
+    ?('yes · '+(m.draft_kind||'draft')+(m.draft_block_size?' · block '+m.draft_block_size:''))
+    :'no']);
+  if(m.ram)rows.push(['RAM needed','~'+m.ram+' GB'+(machineGb?' of '+machineGb+' GB':'')]);
+  if(m.download_gb)rows.push([m.downloaded?'On disk':'Download',
+    gbTxt(m.download_gb)+(!m.downloaded&&diskFree!=null?' · '+gbTxt(diskFree)+' free':'')]);
+  // NOTE: values go through esc() at render time below — never pre-escape here
+  // or a role like "a&b" would render as "a&amp;b".
+  if(m.role)rows.push(['Lane',m.role==='background'?'background lane (:8081)':String(m.role)]);
+  const open=mmOpen.has(m.id);
+  return '<dl class="mmdd" id="'+mmddId(m.id)+'"'+(open?'':' hidden')+'>'+
+    rows.map(r=>'<dt>'+esc(r[0])+'</dt><dd>'+esc(r[1])+'</dd>').join('')+'</dl>';
+}
+
 async function loadModels(){
   if(!escFetched)await loadClaudeEscalation();
   let d;try{d=await(await fetch('/api/models')).json();}catch(e){return;}
@@ -2420,17 +2493,32 @@ async function loadModels(){
   // Physical RAM of THIS Mac (mem.machine_gb, new in 1.0.3). Absent on an older
   // backend → every fit line is skipped rather than compared against a guess.
   const machineGb=(d.mem&&d.mem.machine_gb)||0;
+  // 1.1.3: free space on ~ and the headroom a pull must leave. Absent on an
+  // older backend → diskFree stays null and NOTHING is refused or quoted, the
+  // same fail-open rule `fit` follows.
+  const diskFree=(d.disk_free_gb!=null)?d.disk_free_gb:null;
+  const headroom=(d.disk_headroom_gb!=null)?d.disk_headroom_gb:5;
+  lastModelDisk=diskFree;
   menu.innerHTML='<div class="mmhead">Agent model · lighter = less RAM</div>'+d.models.map(m=>{
     // fit: "ok" | "tight" | "no" — the roster's `ram` judged against machineGb
     // by the backend (server.py _model_fit). Undefined on older backends.
     const fit=m.fit;
+    // download_gb: what the PULL costs (measured on disk once local, else the
+    // onboarding catalog). Never m.ram — that is the resident footprint.
+    const dlGb=(m.download_gb!=null&&m.download_gb>0)?m.download_gb:null;
+    // Would this download leave under the headroom? Mirrors server.py
+    // _disk_short() exactly, including "unknown → never refuse".
+    const diskShort=!m.downloaded&&!m.active&&dlGb!=null&&diskFree!=null&&
+      (diskFree-dlGb)<headroom;
     let act;
     if(m.active)act=agentPaused?'paused':(agentIdle?'sleeping':'active');
     else if(m.downloading)act='downloading…';
     else if(fit==='no')act="won't fit";      // inert: see the data-fit CSS + onModelClick
     else if(m.downloaded)act='switch';
-    else act='download'+(m.ram?' · '+m.ram+'GB':'');
-    return '<div class="mmi'+(m.active&&!agentPaused&&!agentIdle?' on':'')+'" data-id="'+esc(m.id)+'" data-dl="'+(m.downloaded?1:0)+'" data-active="'+(m.active?1:0)+'" data-busy="'+(m.downloading?1:0)+'"'+(fit?' data-fit="'+esc(fit)+'"':'')+'>'+
+    else if(diskShort)act='not enough disk'; // inert: data-disk + onModelClick
+    else act='download'+(dlGb?' · '+gbTxt(dlGb):(m.ram?' · '+m.ram+'GB':''));
+    const inert=fit==='no'||diskShort;
+    return '<div class="mmi'+(m.active&&!agentPaused&&!agentIdle?' on':'')+'" data-id="'+esc(m.id)+'" data-dl="'+(m.downloaded?1:0)+'" data-active="'+(m.active?1:0)+'" data-busy="'+(m.downloading?1:0)+'"'+(fit?' data-fit="'+esc(fit)+'"':'')+(diskShort?' data-disk="short"':'')+(dlGb?' data-dlgb="'+dlGb+'"':'')+'>'+
       '<span class="dot"></span><div style="min-width:0"><div class="nm">'+esc(m.label)+'</div><div class="rm2">'+esc(m.note||'')+(m.ram?' · ~'+m.ram+'GB RAM':'')+'</div>'+
       // The honest answer to "can I run this?" — the roster's RAM figure is the
       // author's measured footprint and means nothing until it sits next to the
@@ -2439,10 +2527,20 @@ async function loadModels(){
       (fit&&m.ram&&machineGb?'<div class="mmfit'+(fit==='no'?' bad':(fit==='tight'?' warn':''))+'">'+
         esc('needs ~'+m.ram+' GB · this Mac has '+machineGb+' GB'+
             (fit==='no'?' · too big to run here':(fit==='tight'?' · tight, expect swapping':'')))+'</div>':'')+
+      // Why the download is refused, in the same place the fit line explains a
+      // RAM refusal — never a bare disabled control with no reason next to it.
+      (diskShort?'<div class="mmdisk">'+esc('needs '+gbTxt(dlGb)+' · '+gbTxt(diskFree)+
+        ' free — free up '+gbTxt(Math.max(0,Math.round((dlGb+headroom-diskFree)*10)/10)))+'</div>':'')+
       // download_error is a new, optional backend field (absent/null on older
       // builds) — a failed pull otherwise looked identical to "never fetched".
       (m.download_error?'<div class="mm-dlerr" title="'+esc(m.download_error)+'">'+esc(m.download_error)+'</div>':'')+'</div>'+
-      '<span class="act">'+esc(act)+'</span></div>';}).join('');
+      '<span class="act">'+esc(act)+'</span>'+
+      // Details disclosure — 40x40, stops the click reaching the row's own
+      // switch/download action. aria-expanded is the state; the panel below is
+      // a sibling so the row height never moves.
+      '<button type="button" class="mmdt" data-det="'+esc(m.id)+'" aria-expanded="'+(mmOpen.has(m.id)?'true':'false')+'" aria-controls="'+mmddId(m.id)+'" aria-label="Details for '+esc(m.label)+'" title="Details"><svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg></button>'+
+      '</div>'+
+      modelDetailsHTML(m,machineGb,diskFree);}).join('');
   // power row: park the model to free its RAM / wake it back up
   const ram=(d.ram_gb!=null&&d.ram_gb>0.2)?(' · frees ~'+(Math.round(d.ram_gb*10)/10)+' GB RAM'):'';
   menu.innerHTML+=agentIdle
@@ -2483,6 +2581,20 @@ async function loadModels(){
       '</div>';
   }
   menu.querySelectorAll('.mmi').forEach(el=>el.onclick=()=>onModelClick(el));
+  // Details toggles: stopPropagation, or the click would also fire the row's
+  // switch/download action underneath it.
+  menu.querySelectorAll('.mmdt').forEach(b=>b.onclick=e=>{
+    e.stopPropagation();
+    // mmddId() has already reduced the id to [A-Za-z0-9_-] behind a literal
+    // prefix, so getElementById is enough — no CSS.escape needed.
+    const id=b.dataset.det, panel=document.getElementById(mmddId(id));
+    if(!panel)return;
+    const open=!mmOpen.has(id);
+    if(open)mmOpen.add(id);else mmOpen.delete(id);
+    panel.hidden=!open;
+    panel.classList.toggle('just',open);   // one-shot entrance, click only
+    b.setAttribute('aria-expanded',open?'true':'false');
+  });
   const pw=menu.querySelector('#mm-power');
   if(pw)pw.onclick=()=>agentPaused?resumeAgent():pauseAgent();
   const wk=menu.querySelector('#mm-wake');
@@ -2582,6 +2694,11 @@ async function onModelClick(el){
   // can never load is the worst possible outcome of a stray click. The active
   // model is exempt above: if it is already running, it evidently fits.
   if(el.dataset.fit==='no')return;
+  // Free-disk refusal (1.1.3): the row already says why in --bad next to the
+  // action word. Refused HERE too, not only in CSS — same reason data-fit is:
+  // a multi-GB pull onto a volume that cannot hold it is the worst outcome of
+  // a stray click, and download_model() enforces the identical rule anyway.
+  if(el.dataset.disk==='short')return;
   if(el.dataset.dl==='1'){
     // switch
     const nm=el.querySelector('.nm').textContent;
@@ -2593,8 +2710,27 @@ async function onModelClick(el){
     waitForModel(nm);
   } else {
     // download (multi-GB, several minutes — HF gives no easy % so show a
-    // clear working state and poll to completion)
-    await fetch('/api/models/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+    // clear working state and poll to completion). 1.1.3: say what it costs
+    // and what is left BEFORE spending it. The confirm is skipped only when
+    // the backend gave us no estimate at all — an older server, where quoting
+    // a number would be a guess.
+    const nm=el.querySelector('.nm').textContent;
+    const dlGb=el.dataset.dlgb?Number(el.dataset.dlgb):null;
+    if(dlGb){
+      const free=(lastModelDisk!=null)?' · '+gbTxt(lastModelDisk)+' free':'';
+      if(!confirm('Download '+nm+'?\n~'+gbTxt(dlGb)+' download'+free+
+                  '\nIt keeps downloading in the background — keep the app open.'))return;
+    }
+    const r=await(await fetch('/api/models/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})})).json().catch(()=>null);
+    // The server enforces the same headroom rule. If it refused (a stale menu,
+    // a volume that filled since the last poll), say so instead of showing a
+    // "downloading…" spinner for something that never started.
+    if(r&&r.ok===false){
+      el.querySelector('.act').textContent=r.error==='not enough free disk'?'not enough disk':'failed';
+      el.querySelector('.act').style.color='var(--bad)';
+      setTimeout(loadModels,1500);
+      return;
+    }
     el.dataset.busy='1';
     el.querySelector('.act').innerHTML='<span class="livedot" style="background:var(--iris)"></span> downloading…';
     el.querySelector('.rm2').textContent='fetching weights — a few minutes, keep the app open';
@@ -3044,6 +3180,9 @@ try{
 <script src="/aux_newsdesk.js"></script>
 <script src="/aux_update.js"></script>
 <script src="/aux_onboarding.js"></script>
+<!-- Data & Network card (1.1.3). MUST load after aux_onboarding.js: it renders
+     that module's NETWORK_FACTS through its networkTableHTML/netCSS. -->
+<script src="/aux_network.js"></script>
 <script src="/aux_needsyou.js"></script>
 </body>
 </html>

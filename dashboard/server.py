@@ -2733,8 +2733,14 @@ _SEED_MODELS = [
     # template at reasoning_effort=xhigh (~22k think tokens on trivial prompts),
     # far too slow for a tool loop → roster default enable_thinking=false; the
     # model-menu "Thinking" row flips it (low effort) and restarts the server.
+    # `ctx` (1.1.3) is the model's native context window in tokens — 262144 for
+    # the whole Qwen3.5/3.8 family. It is a ROSTER fact, not a served one: the
+    # dashboard must be able to answer "how much can it hold" for a model that
+    # is not loaded (and asking the model server would wake it), so it is
+    # written down here and shown in the model menu's Details block. What the
+    # agent actually sends is hermes's own `model.context_length`.
     {"id": "mlx-community/Qwen3.8-27B-4bit", "label": "Qwen3.8-27B",
-     "ram": 19, "note": "assistant brain · dense · MTP ~2x · Aug-2026",
+     "ram": 19, "ctx": 262144, "note": "assistant brain · dense · MTP ~2x · Aug-2026",
      "thinking": True,
      "template_args": {"enable_thinking": False},
      "backend": "mlx_vlm",
@@ -2758,7 +2764,7 @@ _SEED_MODELS = [
     #    mlx-server.sh passes as --draft-model. Block 3 = the size measured best
     #    for this architecture on the M5 Max (see the primary entry).
     {"id": "orcarouter/Qwen3.8-27B-Uncensored-MLX", "label": "Qwen3.8-27B Uncensored",
-     "ram": 19, "note": "no refusals · abliterated 27B · MTP ~2x · Aug-2026",
+     "ram": 19, "ctx": 262144, "note": "no refusals · abliterated 27B · MTP ~2x · Aug-2026",
      "thinking": True,
      "template_args": {"enable_thinking": False},
      "backend": "mlx_vlm",
@@ -2766,7 +2772,7 @@ _SEED_MODELS = [
      "ignore_patterns": ["2-bit/*", "4-bit/*", "6-bit/*", "8-bit/*"],
      "hf_offline": True},
     {"id": "mlx-community/Qwen3.5-9B-4bit", "label": "Qwen3.5-9B",
-     "ram": 7, "note": "background lane · news, scraping, briefings · fast",
+     "ram": 7, "ctx": 262144, "note": "background lane · news, scraping, briefings · fast",
      "role": "background", "thinking": True,
      "template_args": {"enable_thinking": False},
      "backend": "mlx_vlm"},
@@ -3006,6 +3012,108 @@ def _draft_ready(m):
     return (not dm) or _model_downloaded(dm)
 
 
+# --------------------------------------------------------------------------
+# Download estimate before confirm (1.1.3, backlog #15).
+#
+# The menu used to quote the model's RESIDENT footprint ("download · 19GB")
+# next to the download action, which is the wrong number twice over: it is not
+# what the pull costs, and it invited a multi-GB download onto a volume that
+# could not hold it.  models_payload() now carries `download_gb` per row and
+# `disk_free_gb` once, download_model() enforces the same headroom server-side,
+# and the two agree because they call these helpers.
+# --------------------------------------------------------------------------
+DISK_HEADROOM_GB = 5.0     # a download must leave at least this much free
+
+
+def _disk_free_gb(path=None):
+    """Free space on the volume holding ~ in GB (GiB, matching _machine_ram_gb
+    and the onboarding sheet's `disk_free_gb`), or None.
+
+    f_bavail, not f_bfree: the blocks a NON-root process may actually use are
+    the ones a huggingface download can spend."""
+    try:
+        st = os.statvfs(path or HOME)
+        return round(st.f_bavail * st.f_frsize / (1024 ** 3), 1)
+    except Exception:
+        return None
+
+
+def _dir_size_gb(d):
+    """Bytes on disk under `d`, in GB (GiB), following symlinks.
+
+    HF materializes a snapshot as symlinks into ../../blobs, so os.stat (which
+    follows) is what reports the real weight size; os.lstat would report a
+    handful of bytes per link. Directory symlinks are NOT walked (followlinks
+    stays False) so a self-referential cache cannot loop."""
+    total = 0
+    try:
+        for root, _dirs, files in os.walk(d, followlinks=False):
+            for fn in files:
+                try:
+                    total += os.stat(os.path.join(root, fn)).st_size
+                except OSError:
+                    pass
+    except OSError:
+        return None
+    return round(total / (1024 ** 3), 1) if total else None
+
+
+def _catalog_dl_gb(mid):
+    """Download size in GB from the onboarding catalog, or None.
+
+    aux_onboarding.py execs into these globals AFTER this module's body runs
+    (aux files exec sorted, and this is server.py itself), so `_ONB_BY_ID` is
+    resolved BY NAME AT CALL TIME — the discipline aux_index documents. Absent
+    catalog => None => the UI shows no estimate rather than a guess."""
+    cat = globals().get("_ONB_BY_ID") or {}
+    m = cat.get(mid) or {}
+    gb = float(m.get("size_gb") or 0) + float(m.get("draft_size_gb") or 0)
+    return round(gb, 1) or None
+
+
+def _model_download_gb(m):
+    """What this roster entry costs on disk, in GB, or None when unknown.
+
+    Downloaded  -> measured: the snapshot dir(s) actually on disk, main repo
+                   PLUS a separate-repo drafter (download_model pulls both and
+                   the user is quoted ONE number). An in-repo drafter
+                   (draft_subfolder) already sits inside the main snapshot.
+    Not (fully) downloaded -> the onboarding catalog's verified size, when it
+                   knows this id. A PARTIAL download is deliberately NOT
+                   measured: half a repo would understate the estimate for the
+                   pull that is still to come.
+    Cached 300s — models_payload() is polled every 30s by the open menu and the
+    walk is ~30 stats per model."""
+    mid = m.get("id") or ""
+    if not mid:
+        return None
+
+    def _measure():
+        if not (_model_downloaded(mid) and _draft_ready(m)):
+            return _catalog_dl_gb(mid)
+        total = 0.0
+        snap = _hf_snapshot_dir(mid)
+        if snap:
+            total += _dir_size_gb(snap) or 0
+        dm = m.get("draft_model")
+        if dm and dm != mid and not m.get("draft_subfolder"):
+            dsnap = _hf_snapshot_dir(dm)
+            if dsnap:
+                total += _dir_size_gb(dsnap) or 0
+        return round(total, 1) or _catalog_dl_gb(mid)
+
+    return _cached("dlgb:" + mid, 300, _measure)
+
+
+def _disk_short(dl_gb, free_gb=None):
+    """Would this download leave less than DISK_HEADROOM_GB free? Unknown
+    inputs answer False — never refuse a click on a number we do not have."""
+    free = _disk_free_gb() if free_gb is None else free_gb
+    if not dl_gb or free is None:
+        return False
+    return (free - dl_gb) < DISK_HEADROOM_GB
+
+
 def _config_model_default():
     """Read model.default from config.yaml without a YAML dep (stdlib only)."""
     try:
@@ -3045,10 +3153,17 @@ def models_payload():
                 "note": "active"}] + reg
     out = []
     machine_gb = _machine_ram_gb()
+    free_gb = _disk_free_gb()
     for m in reg:
         out.append({**m, "active": m["id"] == active,
                     "downloaded": _model_downloaded(m["id"]) and _draft_ready(m),
                     "downloading": _model_dl.get(m["id"]) == "downloading",
+                    # 1.1.3: what the PULL costs (measured on disk once local,
+                    # else the onboarding catalog's verified size), never the
+                    # resident footprint — conflating the two is how you tell
+                    # someone a 16 GB download needs 16 GB of RAM. None = unknown,
+                    # and the menu then quotes no estimate at all.
+                    "download_gb": _model_download_gb(m),
                     # 1.0.3: "will this run on MY Mac" — the roster's `ram` is
                     # the author's measured footprint, meaningless to a reader
                     # until it is put next to their own hardware. None when the
@@ -3070,6 +3185,12 @@ def models_payload():
             "idle_enabled": idle_suspend_enabled(),
             "idle_min": _idle_min(),
             "ram_gb": ram,
+            # 1.1.3: free space on ~ (GiB, f_bavail). Paired with each row's
+            # download_gb the menu can quote "~17 GB download · 412 GB free"
+            # BEFORE the confirm, and refuse when the pull would leave under
+            # DISK_HEADROOM_GB — the same rule download_model() enforces.
+            "disk_free_gb": free_gb,
+            "disk_headroom_gb": DISK_HEADROOM_GB,
             # prewarm-after-wake (backlog #1): {enabled, last_ms, last_at,
             # last_result}. aux_promotion rebinds models_payload() but only ADDS
             # keys to whatever the base returns, so this passes through.
@@ -3179,6 +3300,20 @@ def download_model(mid):
         return {"ok": False, "error": "unknown model"}
     if _model_dl.get(mid) == "downloading":
         return {"ok": True, "status": "downloading"}
+    # Free-disk gate (1.1.3, backlog #15). The menu already refuses this click,
+    # but the route is reachable from curl, the Quick Ask popover and anything
+    # added later, and a pull that fills the boot volume is not a UI concern.
+    # Same helpers the payload uses, so the button and the server can never
+    # disagree about where the boundary is.
+    ent0 = _model_entry(mid) or {}
+    dl_gb, free_gb = _model_download_gb(ent0), _disk_free_gb()
+    if _disk_short(dl_gb, free_gb):
+        print(f"[models] download {mid} refused: needs ~{dl_gb} GB, "
+              f"{free_gb} GB free (headroom {DISK_HEADROOM_GB} GB)",
+              file=sys.stderr, flush=True)
+        return {"ok": False, "error": "not enough free disk",
+                "download_gb": dl_gb, "disk_free_gb": free_gb,
+                "disk_headroom_gb": DISK_HEADROOM_GB}
     # Resolve the interpreter BEFORE the thread so a missing huggingface_hub is
     # an immediate, actionable answer to the click instead of an "error" chip
     # that appears seconds later with nothing behind it.

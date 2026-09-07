@@ -6,6 +6,20 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-09-07
+
+Trust made visible.
+
+### Added
+- **Data & Network** panel in Settings: every outbound call Hermes can make (release
+  checks, weather/markets/news feeds, Telegram, Claude Bridge, Google) in one table with
+  the toggle that governs it, generated from the same list the setup sheet uses.
+- **Per-model details** in the model menu: context length, thinking support, backend,
+  drafter, RAM need, and download size.
+- **Download estimate before you confirm**: "~17 GB download · 412 GB free"; the menu
+  refuses a download that would leave less than 5 GB free.
+
+
 ## [1.1.2] - 2026-09-05
 
 ### Added

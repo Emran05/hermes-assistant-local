@@ -175,17 +175,78 @@
   }
 
   // ==========================================================================
-  // THE NETWORK TABLE — one function, reused by the future Data & Network panel.
+  // netCSS(scope) — the network table's styling, for ONE selector.
+  //
+  // The sheet's CSS() emits netCSS("#onb-sheet"); the Data & Network card
+  // (aux_network.js, 1.1.3) emits netCSS("#mind-extra-network"). Same rules,
+  // one source: the table markup and the table's look drift together or not at
+  // all. Every colour is an index.html token with a light-theme literal
+  // fallback, so both callers are theme-correct without a dark-mode rule.
+  //
+  // The switch rules ride along because the table's live toggles ARE .onb-sw —
+  // a caller that gets the markup and not the switch would render a checkbox.
+  // ==========================================================================
+  function netCSS(scope) {
+    var S_ = scope;
+    return S_ + ' .onb-tablewrap{overflow-x:auto;margin:0 0 4px}' +
+      S_ + ' table.onb-net{width:100%;border-collapse:collapse;font-size:12.5px;' +
+        'min-width:520px}' +
+      S_ + ' table.onb-net caption{text-align:left;font-size:11px;color:var(--faint,#868DA1);' +
+        'padding:0 0 8px}' +
+      S_ + ' table.onb-net th,' + S_ + ' table.onb-net td{text-align:left;vertical-align:top;' +
+        'padding:9px 12px 9px 0;border-bottom:1px solid var(--hairline,rgba(16,19,29,.10))}' +
+      S_ + ' table.onb-net thead th{font-size:10px;font-weight:700;letter-spacing:.07em;' +
+        'text-transform:uppercase;color:var(--faint,#868DA1);padding-top:0}' +
+      S_ + ' table.onb-net tbody th{font-weight:620;white-space:nowrap;padding-right:16px}' +
+      S_ + ' .onb-net-when{color:var(--muted,#565E72);text-wrap:pretty;min-width:150px}' +
+      S_ + ' .onb-net-data{color:var(--muted,#565E72);text-wrap:pretty;min-width:170px}' +
+      S_ + ' .onb-net-ctl{white-space:nowrap;padding-right:0}' +
+      S_ + ' .onb-net-always{font-size:11px;color:var(--faint,#868DA1)}' +
+      // "Last outbound" — a timestamp, so tabular-nums; quiet, because it is
+      // evidence, not a status anyone has to act on.
+      S_ + ' .onb-net-last{color:var(--faint,#868DA1);white-space:nowrap;font-size:11px;' +
+        'font-variant-numeric:tabular-nums}' +
+      S_ + ' table.onb-net tbody tr:last-child th,' +
+        S_ + ' table.onb-net tbody tr:last-child td{border-bottom:0}' +
+      // ---- switch ---------------------------------------------------------
+      S_ + ' .onb-sw{position:relative;display:inline-flex;align-items:center;gap:8px;' +
+        'min-height:40px;cursor:pointer;-webkit-user-select:none;user-select:none}' +
+      S_ + ' .onb-sw input{position:absolute;opacity:0;width:0;height:0;margin:0}' +
+      S_ + ' .onb-sw-t{position:relative;flex:0 0 auto;width:36px;height:21px;border-radius:11px;' +
+        'background:color-mix(in srgb,var(--ink,#10131D) 16%,transparent);' +
+        'transition-property:background-color;transition-duration:170ms;' +
+        'transition-timing-function:ease-out}' +
+      S_ + ' .onb-sw-t::after{content:"";position:absolute;top:2.5px;left:2.5px;width:16px;' +
+        'height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.28);' +
+        'transition-property:transform;transition-duration:170ms;' +
+        'transition-timing-function:cubic-bezier(.2,.8,.3,1)}' +
+      S_ + ' .onb-sw input:checked + .onb-sw-t{background:var(--iris,#5B63E6)}' +
+      S_ + ' .onb-sw input:checked + .onb-sw-t::after{transform:translateX(15px)}' +
+      S_ + ' .onb-sw input:focus-visible + .onb-sw-t{outline:2px solid var(--iris,#5B63E6);' +
+        'outline-offset:2px}' +
+      S_ + ' .onb-sw-l{font-size:11.5px;color:var(--muted,#565E72);min-width:22px}' +
+      S_ + ' .onb-sw.is-busy{opacity:.5;pointer-events:none}';
+  }
+
+  // ==========================================================================
+  // THE NETWORK TABLE — one function, reused by the Data & Network panel.
   //
   // opts.prefs  current pref values, so a row's toggle shows its real state
-  // opts.inputs when true, render the toggles as live checkboxes (the sheet);
-  //             when false, render them as read-only state words (a panel that
-  //             only reports). Everything else is identical.
+  // opts.inputs when true, render the toggles as live checkboxes (the sheet
+  //             AND the panel); when false, render them as read-only state
+  //             words. Everything else is identical.
+  // opts.last   optional {factId: "already-formatted string"}. Present => a
+  //             "Last outbound" column is added. The strings are formatted by
+  //             the CALLER: this module owns what leaves the Mac, not a clock,
+  //             and the panel's 12-hour formatter already exists next door.
+  // opts.caption overrides the table caption (the panel says it in its own
+  //             heading, so it passes "" to drop the duplicate).
   // ==========================================================================
   function networkTableHTML(opts) {
     opts = opts || {};
     var prefs = opts.prefs || {};
     var live = opts.inputs !== false;
+    var last = opts.last || null;
     var rows = (opts.facts || NETWORK_FACTS).map(function (f) {
       var ctl;
       if (!f.toggle) {
@@ -205,12 +266,16 @@
       return '<tr><th scope="row">' + E(f.what) + "</th>" +
         '<td class="onb-net-when">' + E(f.when) + "</td>" +
         '<td class="onb-net-data">' + E(f.data) + "</td>" +
+        (last ? '<td class="onb-net-last">' + E(last[f.id] || "no record") + "</td>" : "") +
         '<td class="onb-net-ctl">' + ctl + "</td></tr>";
     }).join("");
+    var cap = (opts.caption === undefined) ? "Everything that ever leaves this Mac" : opts.caption;
     return '<div class="onb-tablewrap"><table class="onb-net">' +
-      "<caption>Everything that ever leaves this Mac</caption>" +
+      (cap ? "<caption>" + E(cap) + "</caption>" : "") +
       '<thead><tr><th scope="col">Goes to</th><th scope="col">When</th>' +
-      '<th scope="col">What</th><th scope="col">Switch</th></tr></thead>' +
+      '<th scope="col">What</th>' +
+      (last ? '<th scope="col" class="onb-net-lasth">Last outbound</th>' : "") +
+      '<th scope="col">Switch</th></tr></thead>' +
       "<tbody>" + rows + "</tbody></table></div>";
   }
 
@@ -260,23 +325,8 @@
         'padding-bottom:7px;border-bottom:1px solid var(--hairline,rgba(16,19,29,.10))}' +
       S_ + ' .onb-h h2{margin:0;font-size:12px;font-weight:680;letter-spacing:.02em}' +
       S_ + ' .onb-h span{font-size:11.5px;color:var(--muted,#565E72)}' +
-      // ---- the network table ----------------------------------------------
-      S_ + ' .onb-tablewrap{overflow-x:auto;margin:0 0 4px}' +
-      S_ + ' table.onb-net{width:100%;border-collapse:collapse;font-size:12.5px;' +
-        'min-width:520px}' +
-      S_ + ' table.onb-net caption{text-align:left;font-size:11px;color:var(--faint,#868DA1);' +
-        'padding:0 0 8px}' +
-      S_ + ' table.onb-net th,' + S_ + ' table.onb-net td{text-align:left;vertical-align:top;' +
-        'padding:9px 12px 9px 0;border-bottom:1px solid var(--hairline,rgba(16,19,29,.10))}' +
-      S_ + ' table.onb-net thead th{font-size:10px;font-weight:700;letter-spacing:.07em;' +
-        'text-transform:uppercase;color:var(--faint,#868DA1);padding-top:0}' +
-      S_ + ' table.onb-net tbody th{font-weight:620;white-space:nowrap;padding-right:16px}' +
-      S_ + ' .onb-net-when{color:var(--muted,#565E72);text-wrap:pretty;min-width:150px}' +
-      S_ + ' .onb-net-data{color:var(--muted,#565E72);text-wrap:pretty;min-width:170px}' +
-      S_ + ' .onb-net-ctl{white-space:nowrap;padding-right:0}' +
-      S_ + ' .onb-net-always{font-size:11px;color:var(--faint,#868DA1)}' +
-      S_ + ' table.onb-net tbody tr:last-child th,' +
-        S_ + ' table.onb-net tbody tr:last-child td{border-bottom:0}' +
+      // ---- the network table + its switch (scoped copy, see netCSS) --------
+      netCSS(S_) +
       // ---- stats row (step 2) ---------------------------------------------
       S_ + ' .onb-stats{display:flex;flex-wrap:wrap;gap:0 26px;margin:0 0 22px;' +
         'padding:0;list-style:none}' +
@@ -349,23 +399,6 @@
         'color:var(--iris-ink,#fff)}' +
       S_ + ' .onb-seg label:has(input:focus-visible){outline:2px solid var(--iris,#5B63E6);' +
         'outline-offset:2px}' +
-      // ---- switch ---------------------------------------------------------
-      S_ + ' .onb-sw{position:relative;display:inline-flex;align-items:center;gap:8px;' +
-        'min-height:40px;cursor:pointer;-webkit-user-select:none;user-select:none}' +
-      S_ + ' .onb-sw input{position:absolute;opacity:0;width:0;height:0;margin:0}' +
-      S_ + ' .onb-sw-t{position:relative;flex:0 0 auto;width:36px;height:21px;border-radius:11px;' +
-        'background:color-mix(in srgb,var(--ink,#10131D) 16%,transparent);' +
-        'transition-property:background-color;transition-duration:170ms;' +
-        'transition-timing-function:ease-out}' +
-      S_ + ' .onb-sw-t::after{content:"";position:absolute;top:2.5px;left:2.5px;width:16px;' +
-        'height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.28);' +
-        'transition-property:transform;transition-duration:170ms;' +
-        'transition-timing-function:cubic-bezier(.2,.8,.3,1)}' +
-      S_ + ' .onb-sw input:checked + .onb-sw-t{background:var(--iris,#5B63E6)}' +
-      S_ + ' .onb-sw input:checked + .onb-sw-t::after{transform:translateX(15px)}' +
-      S_ + ' .onb-sw input:focus-visible + .onb-sw-t{outline:2px solid var(--iris,#5B63E6);' +
-        'outline-offset:2px}' +
-      S_ + ' .onb-sw-l{font-size:11.5px;color:var(--muted,#565E72);min-width:22px}' +
       // ---- time inputs ----------------------------------------------------
       S_ + ' .onb-time{min-height:36px;padding:6px 9px;border-radius:9px;font-size:12.5px;' +
         'color:inherit;font-variant-numeric:tabular-nums;' +
@@ -1261,8 +1294,11 @@
       mountCard();
       return r;
     },
-    // reusable pieces (networkTableHTML is the seed of the Data & Network panel)
+    // reusable pieces — the Data & Network card (aux_network.js, 1.1.3) renders
+    // the SAME table from the SAME constant with netCSS() re-scoped to its own
+    // id, so adding an egress path here updates both surfaces at once.
     networkTableHTML: networkTableHTML, NETWORK_FACTS: NETWORK_FACTS,
+    netCSS: netCSS, LOCAL_LINES: LOCAL_LINES,
     statusRows: statusRows, sheetHTML: sheetHTML, cardHTML: cardHTML,
     gb: gb, fitLine: fitLine, fitClass: fitClass, sysLine: sysLine,
     summarize: summarize, applyTheme: applyTheme, currentTheme: currentTheme,

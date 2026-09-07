@@ -61,6 +61,14 @@ ONB_IDLE_CHOICES = (5, 10, 20)  # the sheet's radio row; None/"never" = off
 # Verified against the HF API on 2026-09-05 (repo exists, sum of sibling blob
 # sizes): 2B 1.75 GB · 4B 3.06 GB · 9B 5.98 GB · 27B 16.08 GB · MTP 0.87 GB.
 #
+# `ctx` (1.1.3) is the native context window — 262144 across the whole
+# Qwen3.5/3.8 family — carried here for the same reason `backend` is: an entry
+# copied into models.json must be a COMPLETE roster shape, and the model menu's
+# Details block reads `ctx` off the roster (asking the model server would mean
+# waking it).  server.py's `_model_download_gb()` also reads `size_gb` /
+# `draft_size_gb` out of this table by name, so a model that is not downloaded
+# yet can still be quoted an estimate.
+#
 # All four are the same Qwen3.5/3.8 GatedDeltaNet family and share a chat
 # template, so `backend: mlx_vlm` applies to every one of them for the reason
 # the 9B seed entry documents: their tokenizer_config uses transformers-5's
@@ -68,23 +76,23 @@ ONB_IDLE_CHOICES = (5, 10, 20)  # the sheet's radio row; None/"never" = off
 # --------------------------------------------------------------------------
 _ONB_CATALOG = [
     {"id": "mlx-community/Qwen3.5-2B-4bit", "label": "Qwen3.5-2B",
-     "ram": 3, "size_gb": 1.7,
+     "ram": 3, "size_gb": 1.7, "ctx": 262144,
      "note": "smallest brain · chat and light tools · fastest",
      "thinking": True, "template_args": {"enable_thinking": False},
      "backend": "mlx_vlm"},
     {"id": "mlx-community/Qwen3.5-4B-4bit", "label": "Qwen3.5-4B",
-     "ram": 4, "size_gb": 3.1,
+     "ram": 4, "size_gb": 3.1, "ctx": 262144,
      "note": "small brain · chat and everyday tools",
      "thinking": True, "template_args": {"enable_thinking": False},
      "backend": "mlx_vlm"},
     {"id": "mlx-community/Qwen3.5-9B-4bit", "label": "Qwen3.5-9B",
-     "ram": 7, "size_gb": 6.0,
+     "ram": 7, "size_gb": 6.0, "ctx": 262144,
      "note": "background lane · news, scraping, briefings · fast",
      "role": "background", "thinking": True,
      "template_args": {"enable_thinking": False},
      "backend": "mlx_vlm"},
     {"id": "mlx-community/Qwen3.8-27B-4bit", "label": "Qwen3.8-27B",
-     "ram": 19, "size_gb": 16.1, "draft_size_gb": 0.9,
+     "ram": 19, "size_gb": 16.1, "draft_size_gb": 0.9, "ctx": 262144,
      "note": "assistant brain · dense · MTP ~2x · Aug-2026",
      "thinking": True, "template_args": {"enable_thinking": False},
      "backend": "mlx_vlm",

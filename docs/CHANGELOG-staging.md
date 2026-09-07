@@ -851,3 +851,88 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   **The model pass was proven skipped twice (disabled, and lane offline with
   `bg_online` stubbed False) and `bg_lane` was asserted never called: no model
   was woken or contacted in any harness.**
+- `<1.1.3>` 1.1.3 **"Trust made visible"** — backlog #15/#16/#17, the three
+  places the product asked to be believed without showing its work.
+  `dashboard/aux_network.js` (new, 1 script tag in index.html) + edits to
+  `server.py`, `index.html`, `aux_onboarding.js`, `aux_onboarding.py`.
+  **(a) Data & Network card, Settings › Connections.** Checked first whether a
+  module can register a NEW Settings panel: it cannot. `aux_settings_shell.js`
+  builds its rail and all twelve panels ONCE from a `PANELS` array captured
+  inside its IIFE (`ensureShell()` early-returns on the second call) and
+  `window.SETTINGS_PANELS` is a read-out with no re-build path — so this is a
+  CARD at the top of Connections (`order:-1` in the panel's flex `.set-body`),
+  and **aux_settings_shell.js was not edited**. It mounts DIRECTLY into
+  `#sec-connections` and, unlike aux_update.js, never falls back to `#view-mind`
+  — the relocator sends an unknown id to sec-system, correct for the update card
+  and wrong for this one.
+  The table is `hermesOnboarding.networkTableHTML({prefs, inputs:true, last})`
+  over the same `NETWORK_FACTS` the first-run sheet renders, with the sheet's
+  table CSS extracted into an exported `netCSS(scope)` and emitted here
+  re-scoped to `#mind-extra-network` — one constant, one function, one
+  stylesheet, so a new egress path is one row and both surfaces update. No
+  markup was copied. Toggles are LIVE and are the switches that already exist
+  (`setClaudeEscalation()` → `/api/claude/escalate`; `POST /api/watchtower
+  {op:"set_master"}` for briefings/news), optimistic with revert and an error
+  line; the card listens to `hermes:claude-escalation`, so it, the model menu
+  and the Claude Bridge panel can never disagree.
+  **"Last outbound" is evidence, not status** — a real per-destination
+  timestamp built by the pure `lastMap()` from four cheap local reads the
+  dashboard already keeps (`/api/update/check.checked_at`; watchtower `recent[]`,
+  newest overall for feeds and newest with `"telegram"` in `delivered` for
+  Telegram; `/api/claude/bridge.recent[0].ts`; `/api/google/status`). If not one
+  of them answers, the whole column is dropped rather than printing five dashes.
+  Then the one-line footer "Everything else runs on this Mac" and a read-only
+  "What stays local" list (inference, search index, chats, notes, Flight
+  Recorder). **Table fit:** measured 732 px of intrinsic minimum against 673 px
+  of room in a ~700 px panel — `.onb-tablewrap{overflow-x:auto}` was silently
+  scrolling the **Switch** column out of view, and a `max-width` on the table
+  does not fix it (table-layout:auto overflows a max-width below its minimum).
+  Relaxing `tbody th` to `white-space:normal` and When/What `min-width` to 0,
+  **in the card scope only**, does; the sheet is untouched.
+  **(b) Per-model details in the model menu** — context / thinking / backend /
+  drafter / RAM / download size / lane as a `<dl>` behind a 40x40 "Details"
+  chevron. The panel is a SIBLING after `.mmi`, never a child, so the row height
+  is identical collapsed and expanded (measured 121/107/135 px both ways); open
+  rows live in a module-level `mmOpen` Set because `loadModels()` rebuilds the
+  menu every 30 s and would otherwise collapse what the user just opened. `ctx`
+  (262144 across the Qwen3.5/3.8 family) is a ROSTER field on `_SEED_MODELS`
+  and `_ONB_CATALOG` — the menu must answer "how big is its context" for a model
+  that is NOT loaded, and asking the model server would wake it.
+  **(c) Download estimate before confirm.** `models_payload()` gains
+  `download_gb` per row plus `disk_free_gb` / `disk_headroom_gb`.
+  `_model_download_gb()` measures the on-disk snapshot when the model is
+  COMPLETE (`_dir_size_gb` uses `os.stat`, which follows HF's blob symlinks —
+  `lstat` reports ~137 B per shard), main repo plus a separate-repo drafter; a
+  PARTIAL download is deliberately not measured (it would understate the pull
+  still to come) and falls back to the onboarding catalog's verified
+  `size_gb + draft_size_gb`, resolved through `globals().get("_ONB_BY_ID")` at
+  call time. 300 s cache. `_disk_free_gb()` is `statvfs(~).f_bavail` in GiB.
+  The menu quotes "~17 GB download · 412 GB free" in the confirm and refuses
+  with `data-disk="short"`, an inert row and a `--bad` reason line when
+  `free - download < 5 GB`; **`download_model()` enforces the identical rule**
+  (`{"ok": false, "error": "not enough free disk"}`) because the route is
+  reachable from curl and the Quick Ask popover. Unknown size or unknown free
+  space never refuses — the same fail-open rule `fit` follows. `_model_fit` is
+  untouched, and the action word now quotes the DOWNLOAD size instead of the
+  resident footprint it used to print.
+  **Verified.** `py_compile` (server.py, aux_onboarding.py) + `node --check`
+  (aux_network.js, aux_onboarding.js, aux_settings_shell.js, aux_update.js, and
+  index.html's inline script extracted); **34/34** backend checks on a throwaway
+  HOME exec-loading server.py with hand-built HF cache entries (blobs + snapshot
+  symlinks + refs/main) — symlink-following measurement, complete-repo +
+  separate-drafter sizing, catalog fallback, partial-snapshot refusal to
+  measure, the `_disk_short` boundary at exactly 5.0 GB free-after (allowed) vs
+  4.9 (short), `download_model()` refusing with the numbers attached and
+  starting NO thread, allowing at the boundary, unknown-id still refused first,
+  payload fields present, and `fit` byte-identical for 19/22, 19/30, 19/64 and
+  the no-`ram` case. **Playwright** against the real dashboard in both themes
+  with `/api/models` on fixtures — card present in `#sec-connections` and
+  visually first, 5 rows / 5 columns / 3 live toggles, Last-outbound
+  timestamps, the footer line, the 5 local facts, a stubbed news flip
+  (`{op:"set_master",news:false}` posted, checkbox and its On/Off word follow),
+  three 40x40 Details targets, all three panels expanded with unchanged row
+  heights, the confirm text captured verbatim ("~17 GB download · 412 GB free"),
+  and the refused state at 12 GB free ("not enough disk" in `--bad`,
+  "needs 17 GB · 12 GB free — free up 10 GB", `cursor:default`, and clicking the
+  row posts NOTHING). **0 page errors, 0 console errors, 0 download POSTs in
+  every run — no download was ever started and no model was woken.**

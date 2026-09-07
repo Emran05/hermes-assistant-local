@@ -624,6 +624,67 @@ and explicit agent tool calls (web search etc.) touch the internet.
   Settings › Overview the aux_update way — **aux_settings_shell.js is never
   edited**). The sheet lives in index.html's own document and therefore INHERITS
   the app palette — re-declaring a fifth copy of the tokens would be the bug.
+- **Trust made visible (1.1.3)** — backlog #15/#16/#17: the three places the
+  product asked to be believed without showing its work.
+  **(a) Data & Network card** — `dashboard/aux_network.js` (one `<script>` tag
+  in index.html, AFTER aux_onboarding.js). **A module cannot register a new
+  Settings panel id**: `aux_settings_shell.js` builds its rail and its twelve
+  panels ONCE from a `PANELS` array captured in its IIFE, `ensureShell()`
+  early-returns on the second call, and `window.SETTINGS_PANELS` is a read-out,
+  not a hook — so this is a CARD at the top of **Settings › Connections**
+  (`order:-1` in the panel's flex `.set-body`). It mounts DIRECTLY into
+  `#sec-connections` and, unlike aux_update.js, **never falls back to
+  `#view-mind`** — the relocator sends an unknown id to sec-system, which is
+  right for the update card and wrong for this one. Content is
+  `hermesOnboarding.networkTableHTML({prefs, inputs:true, last})` over the SAME
+  `NETWORK_FACTS` the first-run sheet uses, so **adding an egress path means
+  adding one row to that constant** and both surfaces update; the sheet's table
+  CSS was extracted into `netCSS(scope)` (exported) and is emitted here
+  re-scoped to `#mind-extra-network`, so markup and styling cannot drift apart.
+  The toggles are the EXISTING switches (`setClaudeEscalation()` →
+  `/api/claude/escalate`; `POST /api/watchtower {op:"set_master"}`), optimistic
+  with revert, and the card listens to `hermes:claude-escalation` so the model
+  menu, the Bridge panel and this card never disagree. **"Last outbound" is
+  evidence, not status**: a real per-destination timestamp built by the pure
+  `lastMap()` from four cheap local reads the dashboard already keeps
+  (`/api/update/check.checked_at`, watchtower `recent[]` — newest overall for
+  feeds, newest with `"telegram"` in `delivered` for Telegram —
+  `/api/claude/bridge.recent[0].ts`, `/api/google/status`); if not one of them
+  answers, the whole column is dropped rather than printing five dashes. Then
+  one line, "Everything else runs on this Mac", and a read-only "What stays
+  local" list (inference, index, chats, notes, recorder). **Table fit:** the
+  Settings panel is ~700px and this card adds a fifth column — the sheet's own
+  min-widths plus the nowrap row header come to 732px of intrinsic minimum
+  against 673px of room, and `.onb-tablewrap{overflow-x:auto}` then silently
+  scrolls the **Switch** column out of view. A `max-width` on the table does
+  NOT fix that (table-layout:auto overflows a max-width below its minimum);
+  relaxing `tbody th` to `white-space:normal` and the When/What `min-width` to
+  0 **in the card scope only** does.
+  **(b) Per-model details** in the model menu (`.mmi` rows, index.html) —
+  context / thinking / backend / drafter / RAM / download size / lane as a
+  `<dl>` behind a 40×40 "Details" chevron. The panel is a **SIBLING after
+  `.mmi`**, never a child, so expanding does not change the row's height
+  (measured identical collapsed and expanded); open rows live in a module-level
+  `mmOpen` Set because `loadModels()` rebuilds the menu every 30 s and would
+  otherwise collapse what the user just opened. `ctx` (262144 for the whole
+  Qwen3.5/3.8 family) is a ROSTER field on `_SEED_MODELS` + `_ONB_CATALOG`, not
+  a served one — the menu must answer "how big is its context" for a model that
+  is not loaded, and asking the model server would wake it.
+  **(c) Download estimate before confirm** — `models_payload()` gains
+  `download_gb` per row and `disk_free_gb`/`disk_headroom_gb` once.
+  `_model_download_gb()` measures the on-disk snapshot when the model is
+  COMPLETE (`_dir_size_gb` uses `os.stat`, which follows HF's blob symlinks —
+  `lstat` would report ~137 bytes per shard), main repo plus a separate-repo
+  drafter; a PARTIAL download is deliberately not measured (it would understate
+  the pull still to come) and falls back to the onboarding catalog's verified
+  `size_gb + draft_size_gb`, resolved through `globals().get("_ONB_BY_ID")` at
+  call time. 300 s cache. `_disk_free_gb()` is `statvfs(~).f_bavail` in GiB.
+  The menu quotes "~17 GB download · 412 GB free" in the confirm and refuses
+  with `data-disk="short"` + a `--bad` reason line when
+  `free - download < 5 GB`; **`download_model()` enforces the identical rule**
+  (`{"ok": false, "error": "not enough free disk"}`) because the route is
+  reachable from curl and Quick Ask. Unknown size or unknown free space never
+  refuses — same fail-open rule `fit` follows. `_model_fit` is untouched.
 
 - **DeepSeek Harness (`dsh`) spike — 2026-08-18, NOT integrated** — installed
   locally (not global) at `~/.hermes/dsh` (`@deepseek-ai/dsh@0.1.0-rc.7`, MIT,
