@@ -1,0 +1,13 @@
+name: tool-budget
+version: 1.0.0
+description: "Caps the size of every tool result before it enters the conversation. Over budget, keeps a head+tail with a per-tool bias, spills the full output to ~/.hermes/dashboard/spill/ and leaves an explicit marker saying the result was TRUNCATED, not incomplete."
+author: "Hermes Assistant (local)"
+kind: standalone
+# `provides_hooks` is the key hermes_cli/plugins.py::_parse_manifest actually
+# reads; `hooks` is what loop-breaker's manifest carries and is decorative.
+# Both are listed so the manifest reads the same either way. The hook is
+# registered in register(ctx) regardless — the manifest is metadata only.
+provides_hooks:
+  - transform_tool_result
+hooks:
+  - transform_tool_result

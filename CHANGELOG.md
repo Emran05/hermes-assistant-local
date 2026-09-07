@@ -6,6 +6,46 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+- **Memory layer v1** — a small facts store (`~/.hermes/dashboard/memory.db`, 0600,
+  SQLite FTS5) searched for each outgoing message and injected as one short block at the
+  end of the prompt, after every stable `[context]` line and before the clock. Ranked
+  `BM25 × recency` (30-day half-life on last use), pinned first, plus up to two
+  "earlier: …" lines naming past conversations by title and date. Default budget 600
+  chars ≈ 170 tokens (off / 300 / 600 / 1,200); facts already carried by the agent's own
+  system-prompt snapshot are listed but never injected twice. Settings › Memory &
+  You-Model › What I know about you, with an exact per-message preview;
+  `GET/POST /api/memory/facts`, `/facts/update`, `/facts/import`, `/preview`, `/layer`.
+
+### Fixed
+- `read_memory()` split `USER.md` on newlines instead of the `\n§\n` entry
+  delimiter, so a wrapped multi-line fact became several bogus facts and the bare `§`
+  separator was reported as a fact of its own.
+
+## [1.2.1] - 2026-09-07
+
+Tool results get a budget, and the context becomes visible: how full it is, how much came
+from the prefix cache, and when compaction runs.
+
+### Added
+- **Tool output budget**: a cap on how much of any single tool result reaches the model,
+  enforced inside the agent by the new `hermes-plugins/tool-budget` plugin
+  (`transform_tool_result`), so it covers the hub, Telegram, background runs and the CLI.
+  Default 24,000 chars — about 6,700 tokens, ~10 % of a 65k window. Over budget it keeps
+  head+tail (tail-heavy for `terminal`/`process`/`execute_code`, head-heavy otherwise),
+  keeps whole JSON that fits when minified, spills the full output to
+  `~/.hermes/dashboard/spill` (0600, 7-day sweep) and leaves a marker that says the result
+  was TRUNCATED, not incomplete. Settings › Agent & Models › Tool output budget, or
+  `GET/POST /api/tool/budget`; `install.sh`/`update.sh` link and enable it.
+- **Context meter and compaction** — after every finished turn a chip next to
+  the model pill reads `26.9k ctx · 96 % cached · 9.8 s prefill` (amber past
+  70 % of the window, red past 90 %), parsed from the MLX server's own log with
+  no model started. A compaction shows as "Compacting context" while it runs and
+  leaves a note in the transcript afterwards. New card **Settings › Agent &
+  Models › Context & compaction**: the window, the four `compression.*` knobs
+  with ranges and live previews, the summarising model, and the last ten turns
+  as a table. `GET /api/context/turn|recent`, `GET/POST /api/context/compression`.
+
 ## [1.2.0] - 2026-09-07
 
 The harness line begins: measure the fixed prompt, put the user in charge of it, and ship a

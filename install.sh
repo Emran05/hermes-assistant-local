@@ -180,7 +180,52 @@ else
 fi
 
 # ===========================================================================
-# 4. model server backend (optional isolated venv)
+# 4. agent plugins
+# ===========================================================================
+step "Agent plugins"
+# tool-budget caps how much of any single tool result reaches the model. It
+# runs inside the agent (hook `transform_tool_result`), so it is a plugin, not
+# dashboard code: linked into ~/.hermes/plugins and switched on in
+# plugins.enabled. Both steps are idempotent — a re-run changes nothing.
+TB_SRC="$ROOT/hermes-plugins/tool-budget"
+TB_DST="$HERMES_DIR/plugins/tool-budget"
+if [ ! -f "$TB_SRC/__init__.py" ]; then
+  warn "hermes-plugins/tool-budget is missing from this checkout — skipped"
+elif [ "$DRY" = "1" ]; then
+  plan "link $TB_DST -> hermes-plugins/tool-budget"
+  plan "add tool-budget to plugins.enabled in $HERMES_DIR/config.yaml (backed up first)"
+else
+  mkdir -p "$HERMES_DIR/plugins"
+  if [ -L "$TB_DST" ] && [ "$(readlink "$TB_DST")" = "$TB_SRC" ]; then
+    oky "tool-budget already linked"
+  else
+    if [ -e "$TB_DST" ] && [ ! -L "$TB_DST" ]; then
+      # never delete something the owner may have edited by hand
+      mv "$TB_DST" "$TB_DST.old-$(date +%Y%m%d-%H%M%S)"
+      warn "moved an existing $TB_DST aside"
+    fi
+    ln -sfn "$TB_SRC" "$TB_DST"
+    oky "linked ~/.hermes/plugins/tool-budget -> hermes-plugins/tool-budget"
+  fi
+  if [ -f "$HERMES_DIR/config.yaml" ]; then
+    if tb_out="$("${PY:-python3}" "$ROOT/hermes-plugins/plugin_enable.py" \
+                 tool-budget --config "$HERMES_DIR/config.yaml" 2>&1)"; then
+      oky "plugins.enabled: $tb_out"
+    else
+      warn "could not enable tool-budget: $tb_out"
+    fi
+  else
+    warn "no config.yaml yet — run this script again to enable tool-budget"
+  fi
+  info "Tool results over ~24,000 chars (about 10% of a 65k context) are"
+  info "trimmed to head+tail and the full output is written to"
+  info "~/.hermes/dashboard/spill. Change it in Settings > Agent & Models >"
+  info "Tool output budget. Plugins load when the agent backend starts, which"
+  info "the services step below does."
+fi
+
+# ===========================================================================
+# 5. model server backend (optional isolated venv)
 # ===========================================================================
 step "Fast model backend (optional)"
 if [ -d "$HOME/.hermes/mlx-vlm-venv" ]; then
@@ -209,7 +254,7 @@ else
 fi
 
 # ===========================================================================
-# 5. the app bundle (opt-in)
+# 6. the app bundle (opt-in)
 # ===========================================================================
 step "Native app window"
 if [ "$WITH_APP" != "1" ]; then
@@ -235,7 +280,7 @@ else
 fi
 
 # ===========================================================================
-# 6. services
+# 7. services
 # ===========================================================================
 step "Background services"
 if [ "$WITH_SERVICES" != "1" ]; then

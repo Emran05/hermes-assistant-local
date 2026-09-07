@@ -153,6 +153,125 @@ Two honest caveats, both visible in the card:
   (`json.dumps(defs, ensure_ascii=False)`), which is why the two agree on Full
   and differ on Lean.
 
+### Context meter and compaction
+
+The prompt budget is what a **new** conversation costs. This is what an **old**
+one costs: a conversation grows with every turn, and when it approaches the
+model's window the agent summarises the earlier part of it and carries on. That
+is a compaction, and it is the moment detail gets quietly lost.
+
+After each finished turn a chip appears next to the model pill:
+
+```
+26.9k ctx · 96 % cached · 9.8 s prefill
+```
+
+— the context the turn ended at, how much of it the prefix cache served for
+free, and the prefill seconds that bought. It turns amber past 70 % of the
+window and red past 90 %. Hover it for the full numbers, including how many
+model requests the turn actually took (a tool loop re-sends the whole
+conversation after every tool result, so one turn is often five requests).
+
+Nothing is measured by asking the model — no model is ever started for this.
+The MLX server logs `Prefill completed` and `Request completed` for every
+request to `~/.hermes/logs/mlx-server.log`, and the dashboard reads the tail of
+that file, reusing the parser from `tools/bench/prompt_size.py`. Requests are
+matched to a turn by time, and to the conversation lane by `stream=True` (the
+auxiliary traffic that shares the same server — conversation titles, the
+summariser itself — is `stream=False` and two orders of magnitude smaller).
+
+When a compaction happens, the status line reads **Compacting context** while it
+runs and the transcript keeps a one-line note afterwards:
+
+> Context compacted — prompt went from 31.2k to 12.4k tokens
+
+**Settings › Agent & Models › Context & compaction** shows the window, the four
+knobs and the last ten turns as a table:
+
+| Setting | Range | What it does |
+|---|---|---|
+| Compact at | 0.3 – 0.9 | When to compact, as a fraction of the window |
+| Summarise down to | 0.1 – 0.5 | How small the summary comes out, as a fraction of that threshold |
+| Keep the last | 2 – 60 | Recent messages that are never summarised |
+| Keep the first | 0 – 10 | Opening messages that are never summarised |
+
+Defaults are 0.5 / 0.2 / 20 / 3. With a 65,536-token window that is a
+compaction at 32,768 tokens, summarised down to roughly 6,553. Applying writes
+the `compression` block of `~/.hermes/config.yaml` after a timestamped backup;
+a no-op leaves the file byte-identical, and the next **new** conversation picks
+the values up with no restart (an open one keeps the compressor it was built
+with). The card also names the model doing the summarising —
+`auxiliary.compression.model` if you set one, otherwise the main model.
+
+`GET /api/context/recent?n=20`, `GET /api/context/turn?job=<id>` and
+`GET/POST /api/context/compression` for scripts.
+
+### Tool output budget
+
+Prompt budget is the *fixed* cost of a conversation. This is the *variable*
+one: every tool result is appended to the transcript exactly as the tool
+produced it, so a single `read_file` of a build log, a chatty `terminal`
+command or a large page can spend a quarter of the 65,536-token window in one
+turn — and every later turn in that conversation prefills it again.
+
+The agent caps three tools on its own, with three different numbers and three
+different config keys: `terminal` at 50,000 chars, `read_file` at 100,000, and
+`web_extract` at 15,000 (that one already stores the full page and hands back
+a pointer). `search_files`, `web_search`, `session_search`, `process`,
+`execute_code`, `memory` and every MCP or plugin tool are uncapped. And even
+the capped ones are sized per tool rather than against the window — 100,000
+chars is about 28,000 tokens, 42 % of the context, in one result.
+
+**Tool output budget** is the floor underneath all of that, applied at the one
+seam every tool result passes through, and quoted as a share of your context
+window:
+
+| Budget | Tokens | Share of a 65k window |
+|---|---|---|
+| 8k chars | ~2,200 | 3.4 % |
+| 16k chars | ~4,400 | 6.8 % |
+| **24k chars** (default) | ~6,700 | **10.2 %** |
+| 48k chars | ~13,300 | 20.3 % |
+
+Over the budget, the start and the end are kept and the middle is replaced by
+a marker. The split is biased per tool: `terminal`, `process` and
+`execute_code` keep 35 % head / 65 % tail, because a command's exit status and
+stack trace are at the end; files, pages and search results keep 65 % / 35 %.
+Cuts land on line boundaries, and a result that is valid JSON is kept **whole**
+if minifying it gets under the budget — a parseable result is worth more intact
+than head-and-tailed.
+
+The full, untrimmed output is written to
+`~/.hermes/dashboard/spill/<date>/<tool>-<id>.txt` (0600, kept seven days) and
+the marker names the path, so nothing is lost:
+
+```
+[… 3,921 lines / 277,347 chars omitted by tool-budget — full output saved to
+~/.hermes/dashboard/spill/2026-09-07/terminal-360b8bbf.txt; use read_file with
+an offset, or search_files on it — the tool SUCCEEDED and its output was
+complete; this text was TRUNCATED to fit the context window, it is not an
+error and not a partial result …]
+```
+
+That last clause is the point. A model that sees an ellipsis and concludes the
+command failed will simply run it again — truncated is not incomplete, so the
+marker says so in words.
+
+It runs **inside the agent**, as a plugin (`hermes-plugins/tool-budget`, hooked
+on `transform_tool_result`), not in the dashboard — so it applies to the hub,
+to Telegram, to `hermes` in a terminal and to background runs alike. `install.sh`
+and `update.sh` link it into `~/.hermes/plugins` and add it to
+`plugins.enabled` in `~/.hermes/config.yaml` (once, after a timestamped
+backup); **Settings › Agent & Models › Tool output budget** does the same on
+demand and is where you change the size, turn it off, or stop saving full
+outputs. Plugins load when the agent backend starts, so switching it on needs
+one restart of that service; changing the size or turning it off does not —
+the plugin re-reads `settings.json` on the next tool call. `GET/POST
+/api/tool/budget` for scripts, and every truncation is one JSON line in
+`~/.hermes/dashboard/tool-budget.jsonl`, which is where the card's savings
+figure comes from.
+
+
 ## Requirements
 
 - A Mac with **Apple Silicon** (M-series). There is no Intel path — MLX runs on

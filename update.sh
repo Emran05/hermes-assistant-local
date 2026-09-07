@@ -386,6 +386,44 @@ APP_AFTER="$(app_fingerprint)"
 [ "$APP_BEFORE" = "$APP_AFTER" ] || APP_CHANGED=1
 
 # ---------------------------------------------------------------------------
+# agent plugins — keep ~/.hermes/plugins/tool-budget pointed at this checkout
+# and make sure it is in plugins.enabled. Both steps are idempotent: a link
+# that already points here and an entry that is already present change nothing
+# and write no backup, so an update that ships no plugin change is a no-op.
+# Never fatal — a plugin that cannot be linked must not fail an update.
+# ---------------------------------------------------------------------------
+TB_SRC="$ROOT/hermes-plugins/tool-budget"
+TB_DST="$HOME/.hermes/plugins/tool-budget"
+if [ ! -f "$TB_SRC/__init__.py" ]; then
+  say "tool-budget plugin not in this build — skipping"
+elif [ "$DRY" = "1" ]; then
+  say "DRY RUN — would link $TB_DST and ensure tool-budget is in plugins.enabled"
+else
+  mkdir -p "$HOME/.hermes/plugins" 2>/dev/null || true
+  if [ -L "$TB_DST" ] && [ "$(readlink "$TB_DST")" = "$TB_SRC" ]; then
+    say "tool-budget plugin already linked"
+  else
+    if [ -e "$TB_DST" ] && [ ! -L "$TB_DST" ]; then
+      mv "$TB_DST" "$TB_DST.old-$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+      say "moved an existing $TB_DST aside"
+    fi
+    if ln -sfn "$TB_SRC" "$TB_DST" 2>/dev/null; then
+      say "linked tool-budget plugin -> $TB_SRC"
+    else
+      say "WARNING: could not link the tool-budget plugin"
+    fi
+  fi
+  if [ -f "$HOME/.hermes/config.yaml" ]; then
+    if tb_out="$(python3 "$ROOT/hermes-plugins/plugin_enable.py" tool-budget \
+                 --config "$HOME/.hermes/config.yaml" 2>&1)"; then
+      say "plugins.enabled: $tb_out"
+    else
+      say "WARNING: could not enable tool-budget: $tb_out"
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # services — re-render the plists and restart the always-on pair.
 # install-services.sh writes the model plists with RunAtLoad/KeepAlive false,
 # so bootstrapping them here LOADS but does not START them: the model servers
