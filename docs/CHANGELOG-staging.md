@@ -936,3 +936,81 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   "needs 17 GB · 12 GB free — free up 10 GB", `cursor:default`, and clicking the
   row posts NOTHING). **0 page errors, 0 console errors, 0 download POSTs in
   every run — no download was ever started and no model was woken.**
+
+- `<1.1.4>` 1.1.4 **Personal context MCP server** — `dashboard/hermes_mcp.py`
+  (new, 933L, stdlib only, no dashboard change). Ships §4 item 3 / §4b of
+  `docs/plans/purpose-and-direction.md` — shape 3, "Hermes becomes
+  infrastructure": another agent on this Mac asks Hermes what it knows instead
+  of building a second reader of the same data. Install is one owner-run line,
+  `claude mcp add hermes-assistant -- python3 <repo>/dashboard/hermes_mcp.py`;
+  nothing in the repo touches `~/.claude.json`.
+  **Protocol** (verified against the 2025-06-18 spec, transports + tools
+  pages): JSON-RPC 2.0, newline-delimited on stdio, never an embedded newline
+  (`json.dumps` guarantees it — every write goes through `_send()`);
+  `initialize` echoes a known `protocolVersion` and otherwise answers with the
+  newest supported, declares `capabilities.tools {listChanged:false}` and
+  `serverInfo {name:"hermes-assistant", version:<VERSION>}`;
+  `notifications/*` are consumed silently; `tools/list` is one page (no
+  `nextCursor`); `tools/call` returns `content:[{type:"text",text}]` plus
+  `isError`; `ping` → `{}`; unknown method `-32601`; unknown **or disabled**
+  tool `-32602` (indistinguishable on purpose); a malformed line answers
+  `-32700` and the read loop continues.
+  **It is a proxy, not a second reader.** No sqlite, no icalBuddy, no
+  `chats/*.json`, no `USER.md` — every tool is a `urllib` GET against
+  `http://127.0.0.1:7788`, so the store invariants stay in one place
+  (`PREWARM_SESSION` reserved, FTS sanitisation, absent store ⇒ degrade). It
+  sends **no `Origin` header**, which is exactly what the same-origin guard
+  allows (measured live: `Origin: http://evil.example` → 403, none → 200).
+  `HERMES_MCP_DASHBOARD` overrides the base URL; a dead dashboard becomes
+  `isError:true` carrying the `launchctl kickstart` line, and the server
+  survives it.
+  **Nine tools, one per source** (§4b: never one blob tool) — `hermes_search`
+  → `/api/search`; `calendar_next(hours=24)` → `/api/expand?id=today`
+  (`expand_today`'s `eventsToday+7`, re-parsed into datetimes, all-day events
+  kept, in-progress marked, ≤168 h); `calendar_search`/`notes_search`/
+  `messages_search` → `/api/search?source=`; `chats_search` →
+  `/api/sessions/search`; `chat_get` → `/api/history?session=`; `needs_you` →
+  `/api/needsyou`; `memory_get` → `/api/capabilities`.`memory.facts`.
+  **No dashboard-side route was needed** (the calendar and memory reads both
+  already existed) — hence no `aux_context.py`, and no restart. `files_search`
+  is **omitted rather than stubbed**: granted folders have `/api/access` and a
+  `recent_files()` provider but no search route to proxy.
+  **Static launch-time allowlist** `~/.hermes/mcp-allow.json` — 0600 from birth
+  (`os.open(..., O_EXCL, 0o600)`), created on first run, read ONCE. A disabled
+  tool is not listed, so it never enters a model's context as an option;
+  unknown keys are ignored; a corrupt file falls back to the defaults
+  (messages **off**), never to "allow everything". `messages_search:false`
+  additionally filters `message` rows out of the unfiltered `hermes_search` —
+  otherwise switching the tool off would hide the tool and leak the content
+  through the general one.
+  **Output discipline:** ≤ 8 KB per result, cut on a codepoint boundary;
+  control characters stripped; `<script`/`<iframe`/`<html`-style openers
+  `&lt;`-escaped; the aux_convos export scrubber's three regexes **copied
+  verbatim, not imported** (importing would drag server.py's globals in and
+  break the proxy rule); a dashboard body that is not JSON is **discarded, not
+  forwarded** — the only path by which an HTML error page could have reached a
+  model. `chat_get` keeps only `role in (user,bot,assistant)` rows with no
+  `tool`/`tool_name`/`approval`/`status`/`kind` key and never reads the chat
+  payload's `serve_sid`/`serve_key`. All logging is one stderr line per call
+  (`tool=<name> ms=<n> ok=<0|1>`) — stdout belongs to the protocol.
+  **Known, documented side-effect:** `GET /api/needsyou` always marks the
+  payload as *shown*, so an MCP `needs_you()` enters `now_precision`'s
+  denominator exactly as opening the Hub does; a `mark=false` route would need
+  a dashboard restart and was deliberately deferred.
+  **Verified.** `py_compile` on Homebrew 3.14 and framework 3.12. A harness
+  spawning the script and driving the real protocol over stdio against the LIVE
+  dashboard: **111/111 on both interpreters** — handshake and version
+  negotiation, `serverInfo.version` == the `VERSION` file, `tools/list` = the
+  eight enabled tools with `messages_search` and `files_search` absent, a real
+  call to every enabled tool (`content[0].type=="text"`, ≤ 8192 bytes, no HTML,
+  no `serve_sid`/`serve_key`/`~/.hermes` leakage in chat output), traversal and
+  `__prewarm__` refusals, the disabled-source refusal naming the allowlist,
+  `ping`, `-32601`, `-32602`, `-32700` + survival, an ignored unknown
+  notification, the stderr log format, and the closed-port down-case (helpful
+  `isError` text, server stays alive). Also connected by the REAL Claude Code
+  MCP client (`claude mcp list` → "✔ Connected") under an isolated
+  `CLAUDE_CONFIG_DIR`; the owner's `~/.claude.json` `mcpServers` verified
+  unchanged (`['rlm-repl']`) before and after. Docs: README "Use Hermes as
+  context in Claude Code", CLAUDE.md bullet, purpose-and-direction §4 item 3
+  marked shipped.
+- `<needsyou-mark0>` (1.1.4) `GET /api/needsyou?mark=0` reads without recording a sighting; hermes_mcp.py uses it, closing the one non-read-only edge of the MCP server.

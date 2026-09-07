@@ -686,6 +686,70 @@ and explicit agent tool calls (web search etc.) touch the internet.
   reachable from curl and Quick Ask. Unknown size or unknown free space never
   refuses — same fail-open rule `fit` follows. `_model_fit` is untouched.
 
+- **Personal context MCP server (1.1.4)** — `dashboard/hermes_mcp.py`, a
+  stdio **Model Context Protocol** server (JSON-RPC 2.0, newline-delimited, no
+  embedded newlines — `json.dumps` guarantees that, which is why every write
+  goes through `_send()`). Ships §4 item 3 / §4b of
+  `docs/plans/purpose-and-direction.md`: shape 3, "Hermes becomes
+  infrastructure". Install is one line the owner runs — `claude mcp add
+  hermes-assistant -- python3 <repo>/dashboard/hermes_mcp.py`; nothing in the
+  repo touches `~/.claude.json`. `initialize` echoes a known
+  `protocolVersion` (`2025-06-18`/`2025-03-26`/`2024-11-05`) and otherwise
+  answers with the latest, declares `capabilities.tools {listChanged:false}`
+  and `serverInfo {name:"hermes-assistant", version:<VERSION>}`; `tools/list`
+  is one page (no `nextCursor`), `tools/call` returns
+  `content:[{type:"text",text}]` + `isError`, `ping` returns `{}`, an unknown
+  method is `-32601`, an unknown **or disabled** tool is `-32602` (indistinguishable
+  on purpose), a malformed line is `-32700` and the loop continues.
+  **It is a PROXY, never a second reader.** No sqlite, no icalBuddy, no
+  `chats/*.json`, no `USER.md` — every tool is a `urllib` GET against
+  `http://127.0.0.1:7788`, so the dashboard stays the one place that knows the
+  store invariants (`PREWARM_SESSION` reserved, FTS query sanitisation, absent
+  store ⇒ degrade not raise). A second reader would drift the first time
+  either side changed. **It sends NO `Origin` header** — the same-origin guard
+  refuses a *present* cross-origin Origin and allows requests carrying none
+  (verified live: `Origin: http://evil.example` → 403, no Origin → 200), and
+  its `Host` (`127.0.0.1:7788`) is in `ALLOWED_HOSTS`. `HERMES_MCP_DASHBOARD`
+  overrides the base URL (that is how the down-case is tested); a refused
+  connection becomes `isError:true` with the `launchctl kickstart` line, and
+  the server stays alive.
+  **Nine tools, one per source (§4b: never one blob tool)** — `hermes_search`
+  → `/api/search`; `calendar_next(hours=24)` → `/api/expand?id=today`
+  (`expand_today`'s `eventsToday+7`, parsed back into datetimes, all-day
+  events kept, in-progress ones marked, 60-min lookback, ≤168 h);
+  `calendar_search`/`notes_search`/`messages_search` → `/api/search?source=
+  calendar|note|message`; `chats_search` → `/api/sessions/search`;
+  `chat_get` → `/api/history?session=`; `needs_you` → `/api/needsyou`;
+  `memory_get` → `/api/capabilities`.`memory.facts`. **No new dashboard route
+  was needed** — the calendar and memory reads both already existed, which is
+  why there is no `aux_context.py`. `files_search` is **omitted, not stubbed**:
+  granted folders have `/api/access` and a `recent_files()` widget provider but
+  **no search route**, and inventing one would have meant a dashboard restart.
+  **Static launch-time allowlist** `~/.hermes/mcp-allow.json` (0600 from birth
+  via `os.open(..., O_EXCL, 0o600)`, created on first run), read ONCE at
+  import: scope is the owner's decision at launch, never negotiated at runtime
+  by a model. A disabled tool is **not listed**, so it never enters the model's
+  context as an option; unknown keys in the file are ignored, and a corrupt
+  file falls back to the defaults (messages **off**) rather than to "allow
+  everything". `messages_search:false` also **filters `message` rows out of the
+  unfiltered `hermes_search`** — otherwise switching the tool off would hide
+  the tool and leak the content through the general one.
+  **Output discipline:** ≤ 8 KB per result (`_bound`, cut on a codepoint
+  boundary); `_plain()` runs every upstream string through control-character
+  stripping, an `&lt;`-escape of `<script`/`<iframe`/`<html`-style openers and
+  `_redact()` — the aux_convos.py export scrubber's three regexes **copied
+  verbatim, not imported** (importing would drag server.py's globals in and
+  break the proxy rule; if they change there, change them here); and a
+  dashboard body that is not JSON is **never forwarded**, which is the only way
+  an HTML error page could have reached a model. `chat_get` keeps only
+  `role in (user,bot,assistant)` rows with no `tool`/`tool_name`/`approval`/
+  `status`/`kind` key — the same two constants aux_convos uses — and never
+  reads the chat payload's `serve_sid`/`serve_key` at all.
+  **stdout is the protocol channel**: all logging is stderr, one line per call
+  (`hermes-mcp tool=<name> ms=<n> ok=<0|1>`).
+  Read-only in practice too: `GET /api/needsyou?mark=0` (1.1.4) skips the sighting
+  bookkeeping and the MCP `needs_you()` uses it, so only the Hub/pop-out (real eyes)
+  feed `now_precision`.
 - **DeepSeek Harness (`dsh`) spike — 2026-08-18, NOT integrated** — installed
   locally (not global) at `~/.hermes/dsh` (`@deepseek-ai/dsh@0.1.0-rc.7`, MIT,
   Node 22 via nvm, 306MB); `DSH_HOME=~/.hermes/dsh/home` holds `settings.yaml`

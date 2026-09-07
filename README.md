@@ -172,6 +172,84 @@ asleep, and logs to `~/.hermes/logs/update.log`. If a release changes `app/`, it
 says so rather than silently replacing a bundle whose Full Disk Access grant
 would be dropped.
 
+## Use Hermes as context in Claude Code
+
+Hermes can act as a **personal context MCP server**: another agent on this Mac —
+Claude Code, primarily — asks Hermes what it already knows instead of re-reading
+your calendar, notes and conversations for itself.
+
+```bash
+claude mcp add hermes-assistant -- python3 /path/to/HermesAssistant/dashboard/hermes_mcp.py
+```
+
+That is the whole install. There is no extra daemon: Claude Code launches the
+script, it speaks JSON-RPC over stdin/stdout, and it exits when the client does.
+It is stdlib-only Python, so whatever `python3` you have will run it. The Hermes
+dashboard has to be running (it normally is — it's a launchd agent); if it
+isn't, every tool says so and tells you how to start it.
+
+### The tools that appear
+
+| Tool | What it answers |
+|---|---|
+| `hermes_search(q, source?, limit?)` | one search across chats, notes, calendar and saved news |
+| `calendar_next(hours=24)` | what is coming up, out to a week |
+| `calendar_search(q)` | calendar events by title, about ±30 days |
+| `notes_search(q)` | the Scratchpad |
+| `chats_search(q)` | past Hermes conversations — returns a session id |
+| `chat_get(session, last_n=20)` | the last turns of one conversation |
+| `needs_you()` | the now / today / later buckets, with the reason for each |
+| `memory_get()` | the facts Hermes remembers about you |
+| `messages_search(q)` | iMessage rows — **off by default** |
+
+### The allowlist
+
+Scope is decided once, by you, at launch — never negotiated at runtime by a
+model. `~/.hermes/mcp-allow.json` is created on first run, mode `600`:
+
+```json
+{
+  "max_results": 20,
+  "tools": {
+    "hermes_search": true,
+    "calendar_next": true,
+    "calendar_search": true,
+    "notes_search": true,
+    "chats_search": true,
+    "chat_get": true,
+    "needs_you": true,
+    "memory_get": true,
+    "messages_search": false
+  }
+}
+```
+
+A tool set to `false` is **not listed and not callable** — the model is never
+told it exists. The file is read once at startup, so an edit takes effect the
+next time your client starts the server. A corrupt file falls back to these
+defaults, never to "allow everything".
+
+### Privacy posture
+
+- **Loopback only.** Every tool is an HTTP GET against the dashboard on
+  `127.0.0.1:7788`. The server opens no port of its own, reads no store
+  directly, and never touches the network.
+- **Read-only.** There is no tool that writes, sends, drafts, snoozes or
+  approves anything, and nothing here can wake a model.
+- **Messages stay off until you say otherwise** — and while they are off,
+  message rows are filtered out of `hermes_search` as well, so turning the tool
+  off is not a hiding place.
+- **Conversations are scrubbed on the way out**: tool calls, approval prompts
+  and status rows are dropped, and tokens, `Bearer` headers and `~/.hermes`
+  paths are redacted with the same rules the conversation export uses.
+- **Bounded plain text.** Any single result is capped at 8 KB, and a non-JSON
+  answer from the dashboard is discarded rather than forwarded — no HTML ever
+  reaches the model.
+
+`needs_you()` reads the inbox with `mark=0`, so asking Claude Code what needs you
+never counts as a sighting for the "now precision" trust metric — only what a person
+actually saw in the Hub feeds it.
+
 ## Privacy
 
 - **All inference is local.** Prompts, replies, memory and your calendar and

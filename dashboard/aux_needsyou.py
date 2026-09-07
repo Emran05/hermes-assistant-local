@@ -1441,8 +1441,13 @@ def expand_needsyou():
 # GET /api/needsyou
 # --------------------------------------------------------------------------
 def _ny_get_handler(ctx=None):
+    # ?mark=0 → a read that must NOT count as a sighting (the MCP server, scripts,
+    # health checks). The Hub and the pop-out omit it, so they still feed
+    # now_precision's denominator — only things a person actually saw count.
     try:
-        return _ny_payload()
+        q = (getattr(ctx, "query", None) or {}) if ctx is not None else {}
+        mark = str(q.get("mark", "1")).strip().lower() not in ("0", "false", "no")
+        return _ny_payload(mark=mark)
     except Exception as e:
         return {"ok": False, "error": "internal: " + type(e).__name__,
                 "now": [], "today": [], "later": [], "never_count": 0,

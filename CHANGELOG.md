@@ -6,6 +6,18 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [1.1.4] - 2026-09-07
+
+### Added
+- **Personal context MCP server** (`dashboard/hermes_mcp.py`): a read-only Model Context
+  Protocol server over stdio that other agents on this Mac (Claude Code, for example) can
+  attach to. One tool per source — search across the local index, calendar next/search,
+  notes, chats, Needs-you, memory — each enabled by a static allowlist in
+  `~/.hermes/mcp-allow.json` (messages and files are off by default). It talks only to the
+  dashboard on loopback; nothing is written, nothing leaves the Mac. README has the one-line
+  Claude Code configuration.
+
+
 ## [1.1.3] - 2026-09-07
 
 Trust made visible.

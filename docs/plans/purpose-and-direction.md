@@ -81,9 +81,25 @@ Ordered by leverage; each is a small release or two.
    subjects/snippets, messages — one `/api/search` and one search box; the agent gets the
    same as a tool. Embeddings later if FTS is not enough (a small MLX embedding model on
    the background lane; measured before adoption).
-3. **Personal context MCP server (read-only first).** Loopback MCP exposing the sources
-   above with the permission tiers Hermes already has; token-guarded like
-   `/api/messages/ingest`. Lets Claude Code use Hermes's context; makes shape 3 real.
+3. **Personal context MCP server (read-only first).** — **SHIPPED 1.1.4.**
+   `dashboard/hermes_mcp.py`: a stdio MCP server (JSON-RPC 2.0, newline-delimited,
+   protocol negotiated per spec) that Claude Code launches with
+   `claude mcp add hermes-assistant -- python3 <repo>/dashboard/hermes_mcp.py`. Nine
+   tools, one per source — `hermes_search`, `calendar_next`, `calendar_search`,
+   `notes_search`, `chats_search`, `chat_get`, `needs_you`, `memory_get`, and
+   `messages_search` (off by default). It holds no store of its own: every tool is a
+   loopback GET against the dashboard on `127.0.0.1:7788` with no `Origin` header, so
+   the same-origin guard allows it and the dashboard remains the single reader with the
+   store invariants. Scope is the static launch-time allowlist `~/.hermes/mcp-allow.json`
+   (0600) — a disabled tool is not even listed — never negotiated at runtime by the model.
+   Read-only: no tool writes, sends, drafts or wakes anything. Results are bounded
+   plain text (≤ 8 KB), chats are stripped of tool/approval rows and scrubbed with the
+   export's redaction rules. Deviations from the §4b sketch below: **no separate token
+   guard** — the transport is a subprocess pipe the owner's own client spawns, not a
+   socket, so a token would guard nothing the process boundary does not; and
+   **`files.search(folder)` is omitted** because granted folders have no search route to
+   proxy (adding one is the natural 1.1.5 follow-on, together with the write-capable
+   `mail.draft`-style tools §4b parks behind their own flag).
 4. **Voice, on demand — parked.** See §4b: the microphone must be owned by the signed
    app, which is frozen; ships with the next deliberate app rebuild.
 5. **Routines.** A Settings › Routines panel over hermes cron: see, edit, dry-run, run now,
@@ -145,7 +161,8 @@ manual reclassification rate (drift → refresh the examples). Gmail is not conn
 this Mac (OAuth pending), so v1 runs on iMessage, calendar, watchtower, approvals,
 reminders and degrades per available source.
 
-**Personal context MCP server (1.1.3).** One tool per source, never one blob tool:
+**Personal context MCP server (shipped 1.1.4 — 1.1.3 went to "trust made visible").**
+One tool per source, never one blob tool:
 `calendar.search/next`, `messages.search`, `notes.search`, `files.search(folder)`,
 `chats.search`, `memory.get`; write-capable tools (`mail.draft`) are separate tools with
 their own flag. Scope is a static launch-time allowlist (which folders, chats, calendars),
