@@ -750,3 +750,104 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
   Settings row, and that the sheet does NOT appear when done:true.
   **`/api/models/download` was stubbed to fail loudly in both harnesses: no model
   was ever woken or downloaded.**
+
+- `<1.1.2>` **Needs-you inbox (attention router v1)** — `dashboard/aux_needsyou.py`
+  (1,674L) + `dashboard/aux_needsyou.js` (538L) + 2 index.html lines (one
+  `<script>` tag, one `.w[data-cat="assistant"]` accent) + a 10-line rhythm hook
+  in aux_watchtower.py. Closes the §2 "Attention" verdict in
+  `docs/plans/purpose-and-direction.md` — *"Delivery exists; triage does not …
+  nothing says 'these three things need you now'"* — and implements §4 item 1
+  and §4b in full. **The Hub finally leads with what needs you, not with feeds.**
+  **Consume, never duplicate.** Six collectors, each reading a store somebody
+  else already owns and returning `[]` (never raising) when it is absent:
+  `message` (Message Center rows unread or incoming inside 48 h), `calendar`
+  (`macos_calendar()`; next event <2 h, overlaps flagged), `watchtower`
+  (breaking rows from the fire log where `suppressed == ""` — **that field IS
+  "it passed the masters"**, so `_master_on`, the signature dedupe, the class
+  cooldown, quiet hours and the daily cap are honoured by construction and never
+  re-implemented — plus intel.json `curated`), `approval` (live `CHAT_JOBS` with
+  `state == "approval"`), `reminder` (a richer osascript than `w_reminders`,
+  which returns names only and therefore cannot be triaged; it falls back to it),
+  and `email` — **absent by design**, because aux_google holds read-only OAuth
+  and no message reader, and faking a source is worse than reporting it missing.
+  `sources{}` says present/absent per source, so the inbox degrades one source
+  at a time exactly as §4b requires.
+  **Rules first, and the rules are the product.** `_ny_classify(item)` is the
+  §4b decision tree as a pure function: `now` = VIP (two-way history <=30 days
+  or a resolved contact) AND a concrete time-bound ask (question / deadline
+  <=24 h / event <2 h / an approval waiting); `today` = wants a reply with no
+  hard deadline, a thread you have replied in, or an event later today; `never`
+  = automated sender, no history, no deadline language. **Confidence <0.6
+  collapses to `today`, never to `now`** — false urgency is the trust killer
+  every product in the §6 sweep is criticised for, and a low-confidence `never`
+  is a silent miss, so both ends fall to the bucket that costs least to be wrong
+  about. `now` is capped at five; the overflow falls to `today` rather than
+  vanishing. **Tag, never move**: snooze/done/reclassify write ONLY to this
+  module's own store, so nothing upstream is marked read, archived or deleted
+  and every decision is reversible.
+  **The model is optional, off, and never woken.** `settings.json
+  needs_you.model_pass` defaults to false and is checked BEFORE `bg_online()`,
+  so a disabled pass does not even probe the lane. Enabled + a genuinely online
+  background lane sends the **`today` bucket only** (never `now` — the model's
+  job is to find what the rules under-rated, not to manufacture urgency) as a
+  4-shot JSON prompt to `bg_lane()["chat_url"]`, 20 s hard timeout. It may
+  promote to `now` **only** at confidence >=0.8 AND with a concrete deadline;
+  any failure, fence, malformed row or unknown id leaves the rule result
+  standing. Nothing in the module calls `agent_wake()` or starts a model.
+  **Trust is measured, not asserted.** `~/.hermes/dashboard/needsyou.json`
+  (0600 — it holds message previews) keeps per-item state, a `history` map
+  (ident → the last time you replied; remembered because the Message Center
+  stores only the LAST message per conversation, so `from_me` alone would lose
+  the VIP signal tomorrow) and `shown`/`acts` rows pruned to a rolling 7 days.
+  `now_precision` = acted (done|open|draft) within 24 h / shown-as-now,
+  `now_snooze_rate`, `reclass_rate` — **a snooze counts against precision**, per
+  §5. `shown` is recorded when a payload is handed to a CLIENT, not when it is
+  built: an item nobody ever saw must not count against precision (and that is
+  why the brief hook calls `_ny_payload(mark=False)`).
+  Routes: `GET /api/needsyou` (60 s cache, rebuilt on a background thread,
+  **never blocks** — the build shells out to osascript/icalBuddy, so a cold call
+  answers `{building:true}` and kicks the thread), `POST /api/needsyou/act
+  {id,action,until?,to?}`, `GET /api/needsyou/metrics`. `draft` starts a real
+  chat job on the primary with a prepared "do NOT send" prompt **only when
+  `model_online()` is already true**; otherwise `{ok:false,error:"model asleep",
+  wakeable:true}` and the UI offers a wake button rather than spending 30 s of
+  the user's time without asking.
+  UI: a stream, not a grid — "Now" (<=5; source glyph, sender/title, one-line
+  reason in `--muted`, countdown, Done · Snooze (1 h / this evening / tomorrow)
+  · Open, and Draft reply only on message/email rows), a collapsed "Today (n)",
+  a "Later n · Never n" footer, one quiet trust line, and an empty state that
+  names the next scheduled brief. The pop-out adds every bucket, reclassify
+  buttons and a "Why?" toggle that shows the RULE reason even when the model
+  moved a row. Flat rows (no cards inside cards), >=40 px targets, explicit
+  `transition-property`, `text-wrap: pretty`, bucket colours straight off
+  `--bad`/`--warn`/`--muted`, zero emoji, bespoke SVG per source. The widget is
+  **inserted at the FRONT of the layout when its id is missing** (§4 item 6, Hub
+  re-centering) and an existing user order is never reordered.
+  Rhythm (§4b): `_wt_needsyou_line()` appends one counts line to the morning
+  brief, the midday pulse and the evening wrap — for the brief **after**
+  `_brief_compose` runs synthesis, so the model rewrite can neither drop it nor
+  reword it, and it never counts against the 3,200-token budget or the
+  link-retention guard.
+  **Load order:** aux files exec SORTED, so this module runs AFTER aux_messages
+  (MSG_STORE exists) but BEFORE aux_watchtower — `INTEL_FILE`, `WT_LOG`,
+  `_wt_log_read` and `_wt_load` are resolved BY NAME AT CALL TIME with local
+  literals as the fallback (the discipline aux_index.py documents).
+  **Verified.** `py_compile` + `node --check`; **156/156** backend checks on a
+  throwaway HOME exec-loading server.py with fixtures for every source — an
+  18-case rule table (VIP+deadline→now, VIP question→now, automated→never,
+  unknown-with-nothing-due→never, ambiguous→today at <0.6, approval→now,
+  event <2 h→now, event +5 h→today, overlap flagged, overdue reminder→now,
+  breaking→today, curated→later, and that the classifier does not mutate its
+  input), sender-tier derivation including the 30-day window on both sides,
+  snoozed hidden until due then back, done hidden, reclassify recorded and
+  honoured, the metrics arithmetic (0.5 precision / 0.25 snooze rate /
+  1-of-6 reclass, `None` rather than 0 with no data), one sighting per item per
+  day, layout inserted at the front only when missing, the 0600 store, the
+  cold-call contract, and the rhythm hook; **26/26** Playwright against the real
+  index.html with `/api/needsyou` on fixtures — populated stream, Today
+  expansion, snooze options, pop-out with every bucket and the Why? toggle,
+  empty state, both themes, `--muted`/`--bad` read off the live tokens, >=40 px
+  targets, no emoji, **0 console errors**.
+  **The model pass was proven skipped twice (disabled, and lane offline with
+  `bg_online` stubbed False) and `bg_lane` was asserted never called: no model
+  was woken or contacted in any harness.**

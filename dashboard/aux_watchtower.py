@@ -1387,6 +1387,22 @@ def _brief_is_sane(text):
     return hits >= 3
 
 
+# --- Needs-you counts in the rhythm (1.1.2) -------------------------------
+# §4b: "morning brief = full now+today; midday = delta; evening = deferred."
+# One line, appended AFTER _brief_synthesize so the model rewrite can never
+# drop or reword it. mark=False is load-bearing: marking would record a `now`
+# sighting for a brief nobody has read yet and skew now_precision. aux_needsyou
+# execs BEFORE this module, so its payload is resolved by name at call time.
+def _wt_needsyou_line():
+    try:
+        f = globals().get("_ny_payload")
+        d = (f(mark=False) if callable(f) else {}) or {}
+        n, t = len(d.get("now") or []), len(d.get("today") or [])
+    except Exception:
+        return ""                              # a brief never fails on this
+    return ("\nNeeds you: %d now, %d today.\n" % (n, t)) if (n or t) else ""
+
+
 def _brief_compose(run_synthesis):
     """Full compose. Returns dict with text/synthesized/sections/degraded/meta."""
     sections, degraded = _brief_build_sections()
@@ -1397,7 +1413,8 @@ def _brief_compose(run_synthesis):
         if prose:
             text, synthesized = prose, True
     mk_meta = (sections.get("markets", {}).get("meta") or {})
-    return {"text": _strip_emoji(text), "synthesized": synthesized,
+    return {"text": _strip_emoji(text) + _wt_needsyou_line(),
+            "synthesized": synthesized,
             "sections": sections, "degraded": degraded,
             "asof": mk_meta.get("asof"), "markets_state": mk_meta.get("state")}
 
@@ -2149,7 +2166,8 @@ def _midday_compose(cfg):
 
     noteworthy = items_count >= int(md.get("min_items", 2))
     return {"noteworthy": noteworthy, "items": items_count,
-            "text": _strip_emoji("\n".join(lines)), "since": cutoff}
+            "text": _strip_emoji("\n".join(lines)) + _wt_needsyou_line(),
+            "since": cutoff}
 
 
 def _midday_tick(cfg, state, now_ts):
@@ -2248,7 +2266,7 @@ def _evening_compose(cfg):
 
     noteworthy = items >= int(ev.get("min_items", 1))
     return {"noteworthy": noteworthy, "items": items,
-            "text": _strip_emoji("\n".join(lines))}
+            "text": _strip_emoji("\n".join(lines)) + _wt_needsyou_line()}
 
 
 def _evening_tick(cfg, state, now_ts):

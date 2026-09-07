@@ -58,8 +58,8 @@
     host.innerHTML = css() +
       '<span class="topchip" id="tc-weather" hidden title="">' + ICON.weather +
         '<b class="tc-temp">--</b><span class="mut tc-city"></span></span>' +
-      '<span class="topchip" id="tc-claude" hidden title="">' + ICON.claude +
-        '<span class="tc-lbl mut">Claude</span><b class="tc-pct">--</b></span>' +
+      '<span class="topchip" id="tc-claude" hidden title="Claude Code usage on this Mac (~/.claude/projects) — not Hermes escalations; those show as Claude dialogues in the Agent view">' + ICON.claude +
+        '<span class="tc-lbl mut">Claude Code</span><b class="tc-pct">--</b></span>' +
       '<span class="topchip" id="tc-date" title="">' + ICON.date + '<b class="tc-date">--</b></span>';
     var anchor = header.querySelector(".modelwrap") || header.querySelector("#model-pill");
     if (anchor && anchor.parentNode === header) header.insertBefore(host, anchor);

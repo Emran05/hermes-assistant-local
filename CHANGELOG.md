@@ -6,6 +6,26 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-09-05
+
+### Added
+- **Needs you.** A triage stream at the top of the Hub: messages that look like they want a
+  reply, the next calendar event or conflict, watchtower alerts that passed your masters,
+  approvals waiting on you, and due reminders, each tagged *now* / *today* / *later* /
+  *never* by a fixed rule set (a VIP sender plus a concrete, time-bound ask is *now*;
+  anything ambiguous is *today*, never *now*; nothing is moved or archived). One-tap
+  Done, Snooze (1 h / this evening / tomorrow), Open, and Draft reply with the agent.
+  A trust line shows how precise *now* has been. Sources degrade when absent (Gmail only
+  when connected). An optional pass on the background model can refine the *today* bucket
+  (`needs_you.model_pass`, off by default; never runs while the model is asleep).
+  `GET /api/needsyou`, `POST /api/needsyou/act`, `GET /api/needsyou/metrics`.
+
+### Changed
+- The header chip that counts Claude Code sessions on this Mac now says "Claude Code"
+  (with a tooltip); it was easy to read as Hermes escalations. Hermes-side Claude use
+  remains visible as "Claude dialogues" in the Agent view.
+
+
 ## [1.1.1] - 2026-09-05
 
 ### Added

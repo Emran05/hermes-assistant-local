@@ -100,6 +100,16 @@ list).
 
 - "Needs you" precision: of items marked *now*, the share acted on within the day (target
   ≥ 70% after two weeks; snoozes and dismissals count against it).
+  **Source (shipped 1.1.2): `GET /api/needsyou/metrics` → `now_precision`**, computed by
+  `_ny_metrics()` in `dashboard/aux_needsyou.py` over a rolling 7 days from the `shown`
+  and `acts` rows in `~/.hermes/dashboard/needsyou.json`. Acting = done | open | draft
+  within 24 h of the item first being *shown* as *now*; a snooze is counted separately as
+  `now_snooze_rate` and does **not** count as acting, exactly as the target above states.
+  A sighting is recorded when a payload is handed to a client, not when it is built, so
+  items nobody ever saw never enter the denominator. Manual re-filing is `reclass_rate` —
+  the drift signal §4b asks for. All three are on the Hub in one quiet line ("now
+  precision 78% · 12 snoozed"), which is the point: the counter is visible to the person
+  whose trust it is measuring.
 - Time-to-first-answer stays warm (prewarm holds it under ~2 s after wake).
 - Context reach: number of sources answerable in one question (today: 1 — chats).
 - Battery: on-demand sidecars leave no resident process after idle.
@@ -116,7 +126,8 @@ search). Vectors only if FTS proves insufficient: `sqlite-vec` (single loadable 
 with Reciprocal Rank Fusion, embeddings from `nomic-embed-text-v2` (137M, MIT, 8k context)
 on the background lane, or `all-MiniLM-L6-v2` on CPU — measured before adoption.
 
-**Needs-you inbox (1.1.1).** One record per inbound unit:
+**Needs-you inbox (shipped 1.1.2 — 1.1.1 went to first-run onboarding).** One record per
+inbound unit:
 `{id, source: imessage|calendar|news|approval|reminder|email, sender, summary, received_at,
 requires_reply, deadline_ts, sender_tier: vip|known|unknown|automated, bucket: now|today|
 later|never, confidence, reason, suggested_action: reply_draft|snooze|delegate|done|none}`.

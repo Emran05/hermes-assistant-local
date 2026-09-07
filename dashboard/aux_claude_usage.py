@@ -435,7 +435,7 @@ def _cu_config_post(ctx):
 register_get("/api/claude_usage/config", _cu_config_get)
 register_post("/api/claude_usage/config", _cu_config_post)
 
-WIDGETS["claude_usage"] = {"title": "Claude Usage", "icon": "activity",
+WIDGETS["claude_usage"] = {"title": "Claude Code Usage", "icon": "activity",
                            "size": "card", "cat": "agent",
                            "provider": w_claude_usage}
 EXPANDERS["claude_usage"] = expand_claude_usage

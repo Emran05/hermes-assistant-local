@@ -165,6 +165,80 @@ and explicit agent tool calls (web search etc.) touch the internet.
   SORTED, so aux_index runs BEFORE aux_messages/aux_watchtower — it must not
   read their `MSG_STORE`/`INTEL_FILE` at module load (it resolves them by name
   at sweep time, with its own literals as the fallback).
+- **Needs-you inbox (1.1.2)** — `dashboard/aux_needsyou.py` + `aux_needsyou.js`
+  (one `<script>` tag in index.html after aux_onboarding.js, plus one CSS line
+  `.w[data-cat="assistant"]{--wac:var(--iris)}`). Closes the §2 "Attention"
+  gap in `docs/plans/purpose-and-direction.md` — delivery existed, triage did
+  not — and implements §4 item 1 / §4b "Needs-you inbox" (attention router v1).
+  **Six collectors, each CONSUMING a store nothing else owns**: `message`
+  (Message Center rows unread or incoming in the last 48 h), `calendar`
+  (`macos_calendar()`; next event <2 h, overlaps flagged), `watchtower`
+  (breaking rows from `watchtower-log.jsonl` **filtered on `suppressed == ""`**
+  — that field IS "it passed the masters", `_master_on` is never re-evaluated
+  here — plus intel.json `curated`), `approval` (live `CHAT_JOBS` entries with
+  `state == "approval"`), `reminder` (a richer osascript than `w_reminders`,
+  because names without due dates cannot be triaged; falls back to it),
+  `email` (**absent by design** — aux_google holds read-only OAuth but ships no
+  message reader; a future provider only has to appear under one of
+  `_NY_MAIL_PROVIDERS`). A collector returns `[]` when its store is absent and
+  never raises; `sources{}` reports present/absent per source, so the inbox
+  degrades one source at a time. **Nothing fetches, polls a feed, or duplicates
+  a store.**
+  **`_ny_classify(item)` is the §4b decision tree, pure and rules-first**:
+  `now` = VIP (two-way history ≤30 days OR a resolved contact) AND a concrete
+  time-bound ask (question / deadline ≤24 h / event <2 h / an approval
+  waiting); `today` = wants a reply with no hard deadline, a thread you have
+  replied in, or an event later today; `never` = automated sender, no history,
+  no deadline; **confidence <0.6 collapses to `today`, never to `now`** (a
+  low-confidence `never` is a silent miss, so both ends fall to the bucket that
+  costs least to be wrong about). `now` is capped at five and the overflow
+  falls to `today` rather than vanishing. **TAG, NEVER MOVE**: snooze/done/
+  reclassify write only to this module's store, so no upstream row is read,
+  archived or deleted and every decision is reversible.
+  **The model pass is off by default and never wakes anything.** settings.json
+  `needs_you.model_pass` (default false) is checked BEFORE `bg_online()`, so a
+  disabled pass does not even probe the lane; enabled + a genuinely online lane
+  sends the **`today` bucket only** (never `now` — the model must not
+  manufacture urgency) as a 4-shot JSON prompt to `bg_lane()["chat_url"]` with
+  a 20 s timeout. It may promote to `now` **only** at confidence ≥0.8 AND with
+  a concrete deadline; any failure, malformed answer or unknown id leaves the
+  rule result standing.
+  Store `~/.hermes/dashboard/needsyou.json` (**0600**, it holds message
+  previews): per-item `bucket/reason/confidence/snoozed_until/done_at/
+  reclassified_to`, a `history` map (ident → last time you replied — the VIP
+  signal, remembered because the Message Center keeps only the LAST message per
+  conversation), and `shown`/`acts` rows pruned to a rolling 7 days.
+  **Metrics (§5 now has a source)**: `now_precision` = acted (done|open|draft)
+  within 24 h ÷ shown-as-now, `now_snooze_rate`, `reclass_rate`. A snooze
+  counts AGAINST precision, per §5. **`shown` is recorded when a payload is
+  handed to a client, not when it is built** — an item nobody saw must not
+  count against precision, which is also why the brief hook calls
+  `_ny_payload(mark=False)`.
+  Routes: `GET /api/needsyou` (60 s cache, rebuilt on a background thread,
+  **never blocks** — a cold call answers `{building:true}` and kicks the
+  thread), `POST /api/needsyou/act {id,action:done|snooze|open|reclassify|
+  draft,until?,to?}`, `GET /api/needsyou/metrics`. `draft` starts a real chat
+  job on the PRIMARY lane with a prepared "do not send" prompt **only when
+  `model_online()` is already true** — otherwise `{ok:false,error:"model
+  asleep",wakeable:true}` and the UI offers the wake button instead of forcing
+  a 30 s cold start.
+  Widget `needsyou` (title "Needs you", size wide, cat **assistant** — a new
+  category, hence the new `--wac` line) is **inserted at the FRONT of the
+  layout when the id is missing** (§4 item 6, Hub re-centering) and an existing
+  user order is never reordered. UI: "Now" group (≤5), collapsed "Today (n)",
+  a "Later n · Never n" footer, one quiet trust line ("now precision 78% · 12
+  snoozed"); pop-out adds every bucket, reclassify buttons and a "Why?" toggle
+  showing the RULE reason even when the model moved a row. Flat rows (no cards
+  inside cards), ≥40 px targets, explicit `transition-property`, bucket colours
+  straight off `--bad`/`--warn`/`--muted`.
+  Rhythm: `_wt_needsyou_line()` in aux_watchtower.py appends one counts line to
+  the morning brief (**after** `_brief_compose`'s synthesis, so the LLM rewrite
+  cannot drop or reword it), the midday pulse and the evening wrap.
+  **Load order:** aux files exec SORTED, so this module runs AFTER aux_messages
+  (MSG_STORE exists) but BEFORE aux_watchtower — every watchtower global
+  (`INTEL_FILE`, `WT_LOG`, `_wt_log_read`, `_wt_load`) is resolved BY NAME AT
+  CALL TIME with local literals as the fallback, the discipline aux_index
+  documents.
 - **Model toggle** — header pill is a switcher (`/api/models`, `/api/models/switch|download|add`). `mlx-server.sh` reads the chosen repo id from `~/.hermes/dashboard/active-model` (falls back to Qwen3.8-27B). Switch = write that file + `hermes config set model.default` + `launchctl kickstart com.hermes.mlx-server`, then poll `/api/health` until the new model loads. Roster seeded (`_SEED_MODELS`) with Qwen3.8-27B (primary/default) + Qwen3.5-9B (background lane) — see roster policy; user-extendable via models.json (`_model_registry()` merges NEW seed entries into an existing models.json by id). Per-model `template_args` (roster field) → written on switch to `~/.hermes/dashboard/chat-template-args` → mlx-server.sh passes it as `--chat-template-args`; Qwen3.8 defaults `{enable_thinking:false}` (its template thinks at xhigh by default, ~22k tokens on trivial prompts). `POST /api/models/thinking {enabled}` flips it (on = low effort) and restarts the server; the model menu shows a Thinking on/off row when `/api/models`.thinking.supported. Qwen3.8-27B is `model_type qwen3_5` (drill 6/6 on both backends).
 - **Model-server backends (`mlx-server.sh`)** — roster entries may set `backend: "mlx_vlm"` (+ `draft_model`/`draft_kind`/`draft_block_size`); the switcher writes `~/.hermes/dashboard/server-backend` (JSON) and mlx-server.sh execs `~/.hermes/mlx-vlm-venv/bin/python mlx-vlm-launch.py` (mlx_vlm.server, OpenAI-compatible, uvicorn) instead of `python3 -m mlx_lm server`; missing venv → silently falls back to mlx-lm. The venv is ISOLATED (`install-mlx-vlm-venv.sh`: mlx-vlm 0.6.14 + mlx 0.32.1 + transformers 5 — never into the framework Python, it breaks mlx-lm). Qwen3.8-27B runs there with its NATIVE MTP drafter `mlx-community/Qwen3.8-27B-MTP-bf16` (0.9GB; the `-MTP-4bit` drafter ships NaN weights, mlx-vlm #1931) → speculative decoding: M5 Max 31 → 63 tok/s code / 47 prose (block 3; block 6 is SLOWER than AR; ~88%/55% acceptance), Hermes drill cases ~1.4-1.8x faster. `APC_ENABLED=1` (+`APC_EXACT_CACHE_ENTRIES=6`) = exact prefix cache — hybrid SSM models use "exact" whole-prefix snapshots, ~64KB/token; the ~18k-token Hermes system prompt goes 26s cold → 0.4s cached. Prefill is compute-bound at ~630-690 tok/s regardless of `--prefill-step-size` — first turn of a fresh session pays ~25s, nothing else does. `mlx-vlm-launch.py` shims: (1) mlx≥0.32 made `mx.random.state` read-only → mlx-vlm 0.6.14 crashed on every temperature>0 speculative request (`_restore_rng_state`); the launcher no-ops the restore (only RNG-stream separation, sampling stays correct); (2) `MLX_VLM_DEFAULT_REASONING_EFFORT` env → default `reasoning_effort` when thinking is on (template default xhigh); (3) atexit `os._exit(0)` because mlx 0.32 segfaults in the CompileCache destructor at teardown (that's the "Python quit unexpectedly" dialog — harmless but noisy). Thinking toggle on this backend = `--enable-thinking --thinking-budget 8192` + effort low. `_mlx_footprint_gb` pgrep matches both backends. mlx_vlm's `/v1/models` also lists every cached model; Hermes must send the exact model id (both backends load whatever id the request names). Downloads run in a bg thread via `huggingface_hub.snapshot_download`. Rationale: 30B MoE resident ~18GB; a dense 8B (~5GB) is plenty for tool-calling since Claude does the coding.
   **DO NOT UPGRADE mlx-vlm past 0.6.14 (measured 2026-09-04, backlog #23/#25).** 0.6.16 and 0.6.17 CORRUPT OUTPUT when two requests overlap while the native MTP drafter is loaded — exactly this configuration. Two-concurrent-stream probe: 0.6.14 **6/6 rounds correct**; 0.6.17 **2/6** (token-0 floods of `!`, semantic collapse, early `finish_reason=stop`); 0.6.16 **1/3** plus a hard GPU fault (`kIOGPUCommandBufferCallbackErrorPageFault`). Confounders ruled out: reproduced with the RNG shim disabled, and with 0.6.17 forced back onto mlx 0.32.1 — the regression is in mlx-vlm, 0.6.15-0.6.16. Failures are NON-DETERMINISTIC (a clean round follows a corrupt one on the same process), so in production it is occasional garbage whenever a Telegram turn overlaps a dashboard turn, with nothing in the log. Single-stream the upgrade buys nothing (TTFT/prefill/code decode within noise, prose −8%, footprint −2GB). Re-test before ever bumping: a `baseline.py`-style concurrency probe (two 200-token streams, different prompts) must be **6/6 clean**; `install-mlx-vlm-venv.sh` now pins mlx/mlx-metal/transformers/huggingface_hub too (it let mlx float, so a re-run silently built against 0.32.2) and its header carries the rename-aside rollback plan.
