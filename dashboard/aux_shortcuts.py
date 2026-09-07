@@ -624,8 +624,11 @@ except NameError:
         _sb_prev_access_preamble = None
 
 if _sb_prev_access_preamble is not None:
-    def access_preamble():
-        base = _sb_prev_access_preamble()
+    # The signature must MIRROR server.py's — access_preamble(user_text="")
+    # since 1.2.2 (the memory layer retrieves against the message being sent).
+    # A wrapper that swallowed the argument would silently disable that.
+    def access_preamble(user_text=""):
+        base = _sb_prev_access_preamble(user_text)
         try:
             return base + _sb_preamble_extra()
         except Exception:

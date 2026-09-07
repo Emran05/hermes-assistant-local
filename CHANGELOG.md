@@ -6,6 +6,11 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-09-07
+
+The assistant starts remembering on purpose: a small, inspectable facts store injected as one
+short block per message, never the whole history.
+
 ### Added
 - **Memory layer v1** — a small facts store (`~/.hermes/dashboard/memory.db`, 0600,
   SQLite FTS5) searched for each outgoing message and injected as one short block at the

@@ -148,20 +148,39 @@ def scan_skills():
 
 
 def read_memory():
-    """Facts the agent has stored about the user (built-in USER.md memory)."""
+    """Facts the agent has stored about the user (built-in USER.md memory).
+
+    USER.md is NOT a bullet list — it is entries joined by memory_tool.py's
+    ENTRY_DELIMITER, "\\n§\\n" (mirrored in aux_memory.ENTRY_DELIM), and one
+    entry is routinely a whole wrapped paragraph.  Splitting on "\\n" therefore
+    used to shred a single fact into one bogus "fact" per physical line and
+    emit the bare "§" separator as a fact of its own.  Split on the delimiter
+    the writers actually use.
+
+    Behaviour is preserved for the one shape the old reader got right: a
+    hand-written entry that is nothing but markdown bullets still yields one
+    fact per bullet.  Anything else stays whole.
+    """
     facts, updated = [], None
     try:
         updated = os.path.getmtime(USER_MEM)
         with open(USER_MEM, encoding="utf-8") as f:
-            for line in f:
-                s = line.strip()
-                if not s or s.startswith("#") or s.startswith("<!--"):
-                    continue
-                s = s.lstrip("-*• ").strip()
-                if s:
-                    facts.append(s)
+            raw = f.read()
     except OSError:
-        pass
+        return {"facts": facts, "count": 0, "updated": updated}
+    for entry in raw.split("\n§\n"):
+        entry = entry.strip()
+        if not entry or entry.startswith("<!--"):
+            continue
+        rows = [ln.strip() for ln in entry.split("\n") if ln.strip()]
+        rows = [ln for ln in rows if not ln.startswith("#")]
+        if not rows:
+            continue
+        if all(ln[:1] in "-*•" for ln in rows):
+            facts.extend(x for x in (ln.lstrip("-*• ").strip()
+                                     for ln in rows) if x)
+        else:
+            facts.append(" ".join(rows))
     return {"facts": facts, "count": len(facts), "updated": updated}
 
 
@@ -1045,7 +1064,14 @@ def get_access():
     return read_json(ACCESS_FILE, {"dirs": []})
 
 
-def access_preamble():
+def access_preamble(user_text=""):
+    """The [context] block prepended to an outbound prompt.
+
+    `user_text` is the message this turn is about; it is used only to retrieve
+    the memory-layer block (aux_memlayer.py) and is never echoed.  Callers with
+    no user message (the briefing, a needs-you draft) pass nothing and get the
+    pinned facts only.
+    """
     dirs = get_access()["dirs"]
     now = time.strftime("%A %Y-%m-%d %H:%M %Z")
     # Prefix-stability (P3.B3): the mlx prompt cache reuses the longest common
@@ -1104,6 +1130,20 @@ def access_preamble():
         lines.append("[context] Today's events from the user's macOS Calendar: "
                      + "; ".join(f"{e['time']} {e['title']}".strip()
                                  for e in cal["events"]))
+    # Memory layer v1 (1.2.2, aux_memlayer.py). Retrieved per message, so it is
+    # the most volatile thing here except the clock — which is why it goes
+    # LAST but one, after every stable line and after tasks/calendar, per the
+    # prefix-cache rule this function is ordered around. Resolved by name at
+    # call time (aux modules exec after this file) and fail-open: the module
+    # already swallows its own errors, this guard covers its absence.
+    try:
+        _memfn = globals().get("memlayer_lines")
+        if callable(_memfn):
+            _memblock = _memfn(user_text)
+            if _memblock:
+                lines.append(_memblock)
+    except Exception:
+        pass
     lines.append(f"[context] Local time: {now}.")
     return "\n".join(lines) + "\n\n"
 
@@ -3686,7 +3726,9 @@ class Handler(BaseHTTPRequestHandler):
                             "approval": job["approval"], "done": job["done"],
                             "reply": job["reply"], "err": not job["ok"],
                             # aux_autoroute: Claude auto-escalation for this turn
-                            "deep": job.get("deep")})
+                            "deep": job.get("deep"),
+                            # aux_memlayer: chars of memory injected this turn
+                            "memory_chars": job.get("memory_chars")})
         elif path == "/api/status":
             self._json(system_status())
         elif path == "/api/widgets":
@@ -4063,7 +4105,7 @@ class Handler(BaseHTTPRequestHandler):
                 chat["title"] = message[:48]
             save_chat(session, chat)
 
-            prompt = access_preamble()
+            prompt = access_preamble(message)
             if attachments:
                 prompt += ("[context] The user attached these files (read them "
                            "with your terminal tools): " + ", ".join(attachments) + "\n\n")
@@ -4071,6 +4113,17 @@ class Handler(BaseHTTPRequestHandler):
 
             note_user_activity()   # genuine user turn — resets the idle clock
             job = _new_job(session)
+            # What the memory layer spent on this turn, for the context meter.
+            # Read off a thread-local the preamble just set on THIS thread, so
+            # the block is built once, not twice.
+            try:
+                _mlc = globals().get("memlayer_last_chars")
+                if callable(_mlc):
+                    _n = _mlc()
+                    if _n:
+                        job["memory_chars"] = _n
+            except Exception:
+                pass
             threading.Thread(target=_chat_worker, args=(job, session, prompt),
                              daemon=True).start()
             self._json({"ok": True, "job": job["id"]})

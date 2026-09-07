@@ -456,6 +456,55 @@ respected.
 
 ## Troubleshooting
 
+### Memory: what I know about you
+
+The agent already keeps two memory files — `MEMORY.md` and `USER.md` under
+`~/.hermes/memories` — but it reads them **once per session** and replays that
+snapshot verbatim on every turn, deliberately, so the prompt's token prefix
+stays byte-stable. That is the right design for things that are always true and
+the wrong one for "what is relevant to *this* message".
+
+**Memory layer v1** is the other half. A small store of durable facts
+(`~/.hermes/dashboard/memory.db`, 0600) is searched with SQLite FTS5 for the
+message you are about to send, and the best few are appended to the end of the
+prompt as one short block:
+
+```
+[memory] Jane K — knows the NYC AI scene
+[memory] earlier: "planning the atlas launch" (Sep 2)
+```
+
+Ranking is `relevance × recency`: BM25 against your message, multiplied by a
+half-life of 30 days since the fact was last actually used, so something you
+referred to yesterday outranks something equally on-topic from last spring.
+Pinned facts always come first. Up to two **episodic** lines name past
+conversations whose *title* matches, by name and date — enough for the model to
+go and search for one instead of guessing at what you discussed.
+
+It is deliberately tiny. The default budget is **600 characters, about 170
+tokens** (off / 300 / 600 / 1,200 are the choices), because every character
+here is prefilled again on every single turn, and prefill on a local model is
+compute-bound. Facts imported from `MEMORY.md`/`USER.md` are listed but
+**never injected** — the system prompt already carries them, and paying twice
+is exactly what a 65k window cannot afford.
+
+**Settings › Memory & You-Model › What I know about you** shows every fact with
+its kind, where it came from and when it was last used; you can add, edit, pin
+and archive inline (nothing is ever deleted), and a **Preview** box shows the
+exact block a given message would inject and what it costs in tokens. Import
+pulls in your memory files, the You-Model (Goals / Now / Looking for /
+Interests / Preferences) and your people cards — idempotently, so pressing it
+twice changes nothing.
+
+No embeddings, no vector database, no second model summarising your life in the
+background: retrieval is the same FTS5 engine as "Search everything", it runs
+in about a millisecond, and nothing leaves the Mac. Anything shaped like a
+credential is refused rather than stored, because a fact is replayed into every
+matching turn. `GET /api/memory/facts`, `POST /api/memory/facts`,
+`POST /api/memory/facts/update`, `POST /api/memory/facts/import`,
+`GET /api/memory/preview?text=` and `GET/POST /api/memory/layer` for scripts.
+
+
 ### Doctor
 
 One command, one screen. Before you go log-diving, ask it what is wrong:
