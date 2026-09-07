@@ -344,9 +344,16 @@ def _cb_set_escalation(enabled):
     partial write would take unrelated widget config down with it."""
     s = read_json(SETTINGS_FILE, {}) or {}
     cfg = s.get("claude_escalation") if isinstance(s.get("claude_escalation"), dict) else {}
+    prev = cfg.get("enabled")
     cfg["enabled"] = bool(enabled)
     s["claude_escalation"] = cfg
     write_json(SETTINGS_FILE, s)
+    # Always leave a trace: the owner turned this off once and later found it
+    # back on with nothing in the log to say who did it.
+    try:
+        print("[aux_claudebridge] escalation switch %s -> %s" % (prev, bool(enabled)), flush=True)
+    except Exception:
+        pass
     return bool(enabled)
 
 

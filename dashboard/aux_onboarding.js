@@ -1045,6 +1045,13 @@
       if ((S.data || {}).detect && S.data.detect.claude_cli) {
         body.claude_escalation = p.claude_escalation !== false;
       }
+      // A NEW install starts on the lean prompt budget: the tool schemas are
+      // the biggest item in the prefix every fresh conversation prefills, and
+      // a personal assistant does not use browser automation, speech, or
+      // image/video generation. Sent ONLY on a genuine first run — a re-run
+      // must never silently rewrite a budget its owner has already chosen in
+      // Settings > Agent & Models, where Full is one click away.
+      if (!S.rerun) body.prompt_budget = "lean";
     }
     if (!body) return;
     S.busy = "save"; paint();

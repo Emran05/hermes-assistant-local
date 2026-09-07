@@ -98,6 +98,61 @@ flowchart LR
   capability*, not by promise), and a same-origin guard in front of the whole
   local API.
 
+### Prompt budget
+
+Every **new** conversation starts by prefilling the same fixed prompt: the
+system prompt, the skills index, and a JSON schema for every tool the agent can
+call. Prefill is compute-bound, so those tokens are seconds of waiting — and
+they are paid once per conversation, not once per message (every later turn in
+the same conversation is ~0.2 s off the prefix cache).
+
+Measured on this Mac with `hermes prompt-size --platform tui --json` plus the
+agent's own tool registry:
+
+| Profile | Tools | Tool schemas | Whole prefix | First token | Saved |
+|---|---|---|---|---|---|
+| **Full** (default) | 33 | 53.8 KB | ~21,142 tokens | ~28.2 s | — |
+| **Balanced** | 22 | 46.7 KB | ~19,127 tokens | ~25.5 s | ~10 % |
+| **Focused** | 19 | 30.5 KB | ~14,521 tokens | ~19.4 s | ~31 % |
+
+The tool schemas are the single largest item — bigger than the system prompt and
+the skills index put together.
+
+- **Balanced** keeps everything a personal assistant on a Mac normally uses (web
+  search, terminal, files, code execution, skills, todo, memory, session search,
+  clarify, delegation, vision, screen control) and drops browser automation —
+  twelve schemas, the largest toolset — along with text-to-speech, image and
+  video generation, X search, cron jobs, Home Assistant, Spotify, Discord and
+  the context engine. This is what a new install starts on.
+- **Focused** is Balanced minus the three remaining heavyweight schemas:
+  `session_search` (5.9 KB), `delegate_task` (5.5 KB) and `computer_use`
+  (5.2 KB). It still reads and writes files, runs commands and code, searches
+  the web, sees images and uses its skills — it gives up **screen control,
+  sub-agents, and searching past conversations from inside a chat**. The
+  dashboard's own conversation list, Settings search and local index are
+  unaffected: none of them goes through an agent tool.
+
+Change it in **Settings › Agent & Models › Prompt budget**: pick a profile, or
+open *Advanced* and tick the toolsets yourself, with the schema size shown
+next to each one. Applying writes `platform_toolsets.cli` in
+`~/.hermes/config.yaml` after making a timestamped backup, and the next new
+conversation picks it up with no restart. Full is always one click away.
+(Balanced is written under the config name `lean`, which is what it shipped as.)
+
+Two honest caveats, both visible in the card:
+
+- The key is `platform_toolsets.cli`, not `.tui`. `hermes serve` resolves a new
+  session's tools through `_load_enabled_toolsets`, whose config fallback reads
+  the `cli` platform key — there is no `tui` entry in the agent's platform
+  table, so a `platform_toolsets.tui` block would be read by nothing. The same
+  key therefore also applies to background runs (briefings, the watchtower) and
+  to `hermes` in a terminal; they load the same tools and pay the same prefill.
+- `hermes prompt-size` reports the tool **ceiling**, not your platform's set —
+  it builds an inspection agent with no toolset filter, so its tool figure does
+  not move when you change this. The card measures the real set the same way
+  (`json.dumps(defs, ensure_ascii=False)`), which is why the two agree on Full
+  and differ on Lean.
+
 ## Requirements
 
 - A Mac with **Apple Silicon** (M-series). There is no Intel path — MLX runs on

@@ -1097,3 +1097,125 @@ Staged locally, unpushed — awaiting go-ahead for a batched push.
 ## 1.1.6 (2026-09-07)
 - aux_md.js shared Markdown renderer (popover self-loads it via document.write; shell frozen in main.swift). Unit test: scratch md_test.js 46/46; Playwright md_ui_test.py green.
 - aux_agent.js toolFromStatus only classifies `using <name>`; claude-bridge suppressed when escEnabled===false; index.html caches hermes_claude_esc in localStorage.
+
+# 1.2.0 dense notes (agent-written, moved out of CHANGELOG.md)
+
+## [1.2.0] - 2026-09-07
+
+The harness line begins: measure the fixed prompt, put the user in charge of it, and ship a
+doctor. Cold first token on the 27B is prefill of a ~20.6k-token prefix (25–28 s); the
+Prompt budget card cuts that by 10% (Balanced) or 31% (Focused) with no runtime changes.
+
+### Added
+- **Prompt budget — the cold-start tax, measured, with the switch next to it.**
+  Every fresh conversation prefills the same fixed prompt before the model
+  writes a word, and prefill is compute-bound, so those tokens are seconds:
+  ground truth from `mlx-server.log` is 20,468–20,622 tokens at 735–809 tok/s,
+  i.e. **25–28 s to the first token, once per new conversation**. `hermes
+  prompt-size` says where they go — 20,721 chars of system prompt (8,988 of it
+  the skills index) and **55,855 bytes of tool-schema JSON, the single largest
+  item in the prefix**. New `dashboard/aux_promptbudget.py` +
+  `aux_promptbudget.js` add a **Prompt budget** card to Settings › Agent &
+  Models: the measured prefix (tokens, first-token seconds, tool count, schema
+  KB, skills-index KB), a two-way **Lean / Full** choice, and an *Advanced*
+  disclosure with one checkbox per configurable toolset and its schema size.
+  `GET /api/prompt/budget` (5-min cache, `?fresh=1`) runs `hermes prompt-size
+  --platform tui --json` from `~` and pairs it with a read-only probe of the
+  agent's own tool registry; `POST` takes `{"toolsets":[…]}` or
+  `{"profile":"full"|"lean"|"focused"}` (plus optional `{"restart":true}`) and
+  answers with before → after. **Three profiles, all measured** (prefix =
+  system prompt + tool schemas at 3.6 B/token, seconds at the logged 750
+  tok/s):
+
+  | Profile | Tools | Schemas | Prefix | First token | Saved |
+  |---|---|---|---|---|---|
+  | Full (default) | 33 | 53.8 KB | ~21,142 tok | ~28.2 s | — |
+  | Balanced (config name `lean`) | 22 | 46.7 KB | ~19,127 tok | ~25.5 s | 9.5 % |
+  | Focused | 19 | 30.5 KB | ~14,521 tok | ~19.4 s | **31.3 %** |
+
+  Balanced drops browser automation, speech and image/video generation;
+  **Focused** additionally drops `session_search`, `delegate_task` and
+  `computer_use` — three single-tool schemas that together outweigh the whole
+  twelve-tool browser toolset — i.e. no screen control, no sub-agents, and no
+  past-conversation search from chat (the dashboard's own conversation list,
+  Settings search and local index are unaffected; none goes through an agent
+  tool). The `lean` config key is kept for the Balanced profile so a config
+  written by an earlier build still resolves. Two findings the card states
+  plainly rather than papering over: **the key is `platform_toolsets.cli`, not
+  `.tui`** — `tui_gateway/server.py::_load_enabled_toolsets`'s config fallback
+  calls `_get_platform_tools(cfg, "cli", …)` with the platform hardcoded and
+  there is no `tui` entry in `PLATFORMS`, so a `platform_toolsets.tui` block
+  would be read by nothing (verified A/B against a sandbox `HERMES_HOME`: 33
+  tools → 22); and **`hermes prompt-size` reports the tool ceiling, not the
+  platform's set**, because it builds its inspection agent with no toolset
+  filter, so the card measures the real set itself with the identical
+  expression (`json.dumps(defs, ensure_ascii=False)`) and the two agree on
+  Full. **No restart is required** — `_load_enabled_toolsets` is uncached and
+  runs per new session, and `load_config()` is memoised on the file's
+  `(mtime_ns, size)` — so the next new conversation has it; open ones keep the
+  agent they were built with. Writing is a surgical line-based edit of the
+  `platform_toolsets` block (the `hermes config set` route was tried and
+  rejected: it writes a list as a quoted *string*, which
+  `_get_platform_tools`'s `isinstance(…, list)` guard then ignores), with a
+  timestamped 0600 backup, an atomic replace that preserves the file mode, and
+  a genuine no-op on a no-op — a write that changes nothing touches neither the
+  config nor a backup. Verified against `dashboard/*.py` and `dashboard/*.js`:
+  nothing in the dashboard asks the agent for any dropped tool (the Flight
+  Recorder merely *labels* `browser_*`/`cronjob` if they appear, and falls
+  through to `"other"` when they do not). New installs start on Balanced —
+  `aux_onboarding.py`'s apply handler gained a `prompt_budget` field and the
+  first-run sheet sends `"lean"` on a genuine first run only, never on a
+  re-run. `docs/plans/1.2-baseline.md` records the before picture, the
+  end-to-end cold wake it is meant to shorten (`tools/bench/ttft_after_wake.sh
+  --tag before-diet`: wake→online 7.3 s, **prewarm 25.8 s**, first token after
+  prewarm 1.9 s — i.e. 25.8 of ~33 s is prefilling an identical prompt), an
+  after-table to fill in from the log, and the honest ceiling: config-only cuts
+  stop at ~31 % because ten of the thirteen toolsets Balanced drops were
+  already 0 bytes (unmet `check_fn`s), so anything deeper needs lazy tool
+  loading or compact schemas in the agent runtime.
+- **Doctor — one command, one screen of health checks.** `python3
+  dashboard/doctor.py` runs eighteen checks in about a quarter of a second
+  (dashboard, launchd services, model lanes, Hermes Agent version, the mlx-vlm
+  venv and its 0.6.14 pin, the interpreter that does model downloads, every
+  roster model's weights/drafter/RAM fit, disk, hardware, Full Disk Access, the
+  three config files, the Claude bridge and its master switch, the search index,
+  Needs-you, first-run setup, the cached update check, logs and recent errors)
+  and prints each as PASS/WARN/FAIL with a one-line detail and, where it can be
+  acted on, a concrete fix. `--json`, `--quiet`, `--only`, `--list`; exit 0 when
+  nothing failed and 1 otherwise. Every check is read-only and **none of them can
+  start or wake a model server** — launchd is only ever `list`ed, the lanes are
+  HTTP probes (no plist carries a `Sockets` key, so nothing is socket-activated),
+  and nothing is written; safe on battery. A crash inside one check becomes a
+  FAIL carrying the exception rather than taking the report down. Served by
+  `dashboard/aux_doctor.py` at `GET /api/doctor` (`?format=text` for the plain
+  report, `?fresh=1` to skip the 10 s cache) and rendered by
+  `dashboard/aux_doctor.js` as the **Health** card in Settings › System & Data,
+  with Run checks, three summary chips and Copy report. `doctor.py` is
+  standalone by design — it must run when the dashboard is DOWN, which is when
+  someone reaches for it — and inside the server it is handed the live globals,
+  so the served answer is computed by the dashboard's own helpers.
+- Bench scripts promoted into `tools/bench` — the ad-hoc drivers behind
+  `docs/plans/post-v1-baseline.md` are now four maintained tools with `--help`,
+  `--dry-run` and results appended to `~/.hermes/bench/results.jsonl`:
+  `decode_bench.py` (decode tok/s + cold/warm TTFT for a lane, and the AC-only
+  `--restart-with none,2,3,4` MTP block sweep), `ttft_after_wake.sh` (first-token
+  latency after an idle-suspend wake, prewarm barrier included),
+  `concurrency_probe.py` (the two-stream probe that parked the mlx-vlm upgrade —
+  6/6 clean rounds is the gate) and `prompt_size.py`, which reports the current
+  per-turn prompt/cached/completion token sizes straight from the MLX server log
+  and loads no model at all. The README carries the battery rule (AC only, the
+  exact `launchctl bootout` unload command, autostart stays off) and a table of
+  every reference number already on record with its date, so a future run is a
+  comparison instead of a fresh derivation.
+
+### Fixed
+- The "Escalate to Claude" master switch stayed off. A scratch regression harness used
+  during 1.0–1.1 verification forced the switch back on at the end of every run, which
+  is why it kept "turning itself on"; the harness now restores whatever it found, and
+  every switch change is logged (`[aux_claudebridge] escalation switch a -> b`).
+- Flight Recorder init raised on every call (`row["v"]` on a plain sqlite tuple), spamming
+  the log; found by the new doctor. Fixed.
+
+### Changed
+- `docs/plans/harness-research.md` (research behind this line) and
+  `docs/plans/1.2-baseline.md` (measured prefix, cold-wake numbers, profile table).

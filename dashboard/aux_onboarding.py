@@ -410,6 +410,9 @@ def _onb_prefs():
         "idle_enabled": _call("idle_suspend_enabled", True),
         "prewarm": _call("prewarm_enabled", True),
         "claude_escalation": _call("claude_escalation_enabled", True),
+        # "lean" | "full" | "custom"; read straight off config.yaml, no
+        # subprocess (aux_promptbudget.py, resolved by name at call time)
+        "prompt_budget": _call("prompt_budget_profile", "full"),
         "briefings": bool(master.get("briefings", True)),
         "news": bool(master.get("news", True)),
         "quiet_hours": {"start": quiet.get("start", "22:00"),
@@ -566,6 +569,29 @@ def _onb_apply_handler(ctx):
                 applied["prewarm"] = b["prewarm"]
             except Exception as e:
                 errors.append("prewarm: %s: %s" % (type(e).__name__, e))
+
+    # --- prompt budget (toolset diet) ---------------------------------------
+    # A NEW install should start lean: every fresh conversation prefills the
+    # tool schemas, and on the recommended models that is ~2k tokens and ~3
+    # seconds of first-token wait for tools a personal assistant does not use
+    # (browser automation, speech, image/video generation, the chat-platform
+    # tools).  Full is one click away in Settings > Agent & Models.  The setter
+    # lives in aux_promptbudget.py, which sorts AFTER this file, so it is
+    # resolved by name at request time like every other cross-module call here;
+    # a no-op value writes nothing at all.
+    if "prompt_budget" in b:
+        fn = _onb_g("set_prompt_budget_profile")
+        if not callable(fn):
+            errors.append("prompt_budget: aux_promptbudget.py is not loaded")
+        elif b["prompt_budget"] not in ("lean", "focused", "full"):
+            errors.append("prompt_budget must be \"lean\" (Balanced), "
+                          "\"focused\" or \"full\"")
+        else:
+            try:
+                applied["prompt_budget"] = b["prompt_budget"]
+                applied["prompt_budget_changed"] = bool(fn(b["prompt_budget"]))
+            except Exception as e:
+                errors.append("prompt_budget: %s: %s" % (type(e).__name__, e))
 
     # --- Claude escalation master switch ------------------------------------
     if "claude_escalation" in b:
