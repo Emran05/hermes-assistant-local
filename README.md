@@ -272,6 +272,111 @@ the plugin re-reads `settings.json` on the next tool call. `GET/POST
 figure comes from.
 
 
+### Traces
+
+The three stores that already describe a turn were never joined: the per-turn
+metrics log (`~/.hermes/metrics/metrics-*.jsonl` — job, TTFT, duration, model),
+the flight recorder (`recorder.db` — one row per tool call from every surface),
+and the model server's own log (prompt / cached / new tokens, prefill seconds).
+**Traces** joins them and hands the result out as a file.
+
+A trace is **one conversation on one local day**. Under it, one **turn span**
+per chat turn — model, input and output tokens, TTFT, prefill seconds, how much
+of the prompt came off the prefix cache, what share of the context window it
+used, whether compaction ran, and the characters the memory layer injected —
+and under that a **child span per tool call**, with its kind, target, status,
+duration, whether it is reversible and whether it was undone. Tool results the
+tool-output budget truncated appear as **events** on the turn they happened in.
+
+There is no shared id between those stores — the metrics record carries the
+dashboard job id, the recorder's `session` means Hermes-agent's own session id
+on most rows, and there is no `job_id` column anywhere — so **the join is by
+timestamp window**: a turn is `[end - duration, end]`, and a recorder row
+belongs to the turn whose window contains it. Rows that fall in no turn window
+are still exported under a synthetic parent, because a Telegram or CLI turn
+writes recorder rows and no metrics row at all.
+
+Two formats, from **Settings › System & Data › Traces** (today / 7 days /
+30 days / custom, at most 31 days per export) or from `GET
+/api/trace/export?since=&until=&format=jsonl|otel`:
+
+- **`jsonl`** — one flat JSON object per line, attributes as dotted top-level
+  keys, so `jq 'select(.["hermes.window_pct"] > 50)'` works with no unwrapping.
+- **`otel`** — OTLP/JSON (`resourceSpans` → `scopeSpans` → `spans`, hex ids,
+  nanosecond timestamps as strings). Load it straight into Jaeger, Tempo or
+  OpenObserve. Attributes use the OpenTelemetry GenAI names where they fit
+  (`gen_ai.request.model`, `gen_ai.usage.input_tokens`,
+  `gen_ai.usage.output_tokens`, `gen_ai.operation.name`, `gen_ai.tool.name`);
+  everything specific to this Mac is under `hermes.*`.
+
+`GET /api/trace/summary?since=&until=` returns the same counts the card shows
+without building the file.
+
+**Raw tool arguments never leave this Mac.** The export carries a tool's
+`target` and `summary` and no `args` field in any shape, and both of those go
+through the same secret scrubber the conversation export uses — Hermes paths,
+labelled `token=`/`api_key=` values, `Bearer` headers, and unlabelled shapes
+(PEM blocks, JWTs, `sk-ant-…`, GitHub PATs, AWS key ids, Slack and Telegram
+tokens). If that scrubber is somehow unavailable the export refuses rather than
+shipping unscrubbed text. Nothing is collected that was not already on disk,
+and nothing is sent anywhere: the route returns a file.
+
+
+### Evals
+
+The model menu has always had a **Drill**: six canned tool-calling cases run
+straight against the model server at temperature 0 — call a simple function,
+nest the arguments correctly, *don't* call a tool for "what is 2+2", chain a
+second call off a tool result, refuse an impossible ask gracefully, and
+actually run a command instead of predicting its output. It answers "can this
+model be an agent at all", once, per model. It has no history and it will
+restart the model server to drill a model that is not loaded.
+
+**Evals** is the other half. It reuses those same six cases — the same
+functions, not a copy — and adds three format contracts, because what actually
+breaks downstream is rarely tool-calling and usually formatting:
+
+| Case | Passes when |
+|---|---|
+| `json_strict` | the answer parses as one JSON object with exactly the three named keys |
+| `table_format` | there is a GFM header row, a `---` separator, and at least three data rows under the requested column names |
+| `one_sentence` | the answer is one sentence, at most 30 words, with no list markers |
+
+Nine cases, all deterministic, all sent to `/v1/chat/completions` with the
+drill's synthetic three-tool schema. **No tool is ever executed** — the schema
+names tools that exist nowhere in the agent — no approval surface is involved,
+and **no model is ever switched**: the suite runs against whatever is loaded,
+or it does not run.
+
+Each run appends to `~/.hermes/dashboard/evals.db` (0600, SQLite, never leaves
+this Mac): one `runs` row with the score, the total and the median case
+latency, and one `results` row per case with its detail string. That is the
+history the card charts — pass rate as bars, median latency as a line, over 14,
+30 or 60 days — next to the per-case table of the last run, failures first.
+
+**The schedule is built for a laptop.** It is on by default, set to 1:00 PM,
+and it still costs nothing until you are plugged in: the gate is *on AC power*
+**and** *the model is already loaded* — that is, you were using it anyway. On
+battery it logs a skip and keeps checking for the rest of the day; it does not
+mark the day done, so the first moment the conditions are met is the moment it
+runs. It also holds during your quiet hours, skips while the agent is paused or
+a chat turn is in flight, and gives up for the day only after 23:00 (a 1 PM
+suite at 11 PM is a stale catch-up, not a late run). Waking a sleeping model
+for a scheduled run is a separate opt-in switch, and it is refused on battery
+whatever that switch says — the same rule the rest of the dashboard follows:
+background work never wakes the model. **Run now** is refused on battery too,
+with the reason on the button.
+
+The Drill and its `N/6` badge are untouched. A 9-case score cannot be written
+into a 6-case record without changing what the badge means, so the two keep
+separate stores: `promotion.json` stays the Drill's, `evals.db` is this
+suite's, and a scheduled run can never overwrite a drill result.
+
+`GET /api/evals` (settings, last run, the last 60 runs, the last run's cases),
+`POST /api/evals/run`, `POST /api/evals/settings`. Settings › Agent & Models ›
+Evals.
+
+
 ## Requirements
 
 - A Mac with **Apple Silicon** (M-series). There is no Intel path — MLX runs on

@@ -6,6 +6,34 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [1.2.3] - 2026-09-07
+
+The suite runs itself and the run leaves a trace: a scheduled local eval with history, and an
+export of every turn and tool action as JSONL or OpenTelemetry spans.
+
+### Added
+- **Tracing export** — the per-turn metrics log, the flight recorder and the model
+  server's log joined into traces (one per conversation per local day: a turn span with
+  tokens/prefill/cache/window share, a child span per tool call, tool-budget truncations
+  as events) and downloadable as `jsonl` or OTLP/JSON for Jaeger, Tempo or OpenObserve.
+  There is no shared id between those stores, so the join is by timestamp window; tool
+  rows no turn explains get a synthetic parent. `GET /api/trace/export` and
+  `/api/trace/summary`, at most 31 days per export; Settings › System & Data › Traces.
+  Raw tool arguments are never exported and every string is scrubbed for secrets.
+- **Eval suite with history** — the six-case model Drill extended into a scheduled,
+  nine-case suite: the same tool-calling cases (reused, not copied) plus three format
+  contracts — strict JSON, a Markdown table, one sentence — all at temperature 0,
+  model-direct, with no tool ever executed and no model ever switched. Runs are appended
+  to `~/.hermes/dashboard/evals.db` (0600) and charted as pass rate and median latency
+  over 14/30/60 days. Scheduled daily at 1:00 PM, but only on AC power and only when the
+  model is already loaded, so on a laptop it costs nothing until you are plugged in;
+  waking is opt-in and never happens on battery. Settings › Agent & Models › Evals.
+
+### Changed
+- Routing v2 (cheap turns to the 9B lane) is deferred with reasons in
+  `docs/plans/routing-v2-deferred.md`: agent turns cannot be steered per turn, the only path is a
+  tools-free bypass, and the bg lane has no auto-wake; prerequisites are listed there.
+
 ## [1.2.2] - 2026-09-07
 
 The assistant starts remembering on purpose: a small, inspectable facts store injected as one
