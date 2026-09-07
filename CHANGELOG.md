@@ -6,6 +6,42 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+- **Doctor — one command, one screen of health checks.** `python3
+  dashboard/doctor.py` runs eighteen checks in about a quarter of a second
+  (dashboard, launchd services, model lanes, Hermes Agent version, the mlx-vlm
+  venv and its 0.6.14 pin, the interpreter that does model downloads, every
+  roster model's weights/drafter/RAM fit, disk, hardware, Full Disk Access, the
+  three config files, the Claude bridge and its master switch, the search index,
+  Needs-you, first-run setup, the cached update check, logs and recent errors)
+  and prints each as PASS/WARN/FAIL with a one-line detail and, where it can be
+  acted on, a concrete fix. `--json`, `--quiet`, `--only`, `--list`; exit 0 when
+  nothing failed and 1 otherwise. Every check is read-only and **none of them can
+  start or wake a model server** — launchd is only ever `list`ed, the lanes are
+  HTTP probes (no plist carries a `Sockets` key, so nothing is socket-activated),
+  and nothing is written; safe on battery. A crash inside one check becomes a
+  FAIL carrying the exception rather than taking the report down. Served by
+  `dashboard/aux_doctor.py` at `GET /api/doctor` (`?format=text` for the plain
+  report, `?fresh=1` to skip the 10 s cache) and rendered by
+  `dashboard/aux_doctor.js` as the **Health** card in Settings › System & Data,
+  with Run checks, three summary chips and Copy report. `doctor.py` is
+  standalone by design — it must run when the dashboard is DOWN, which is when
+  someone reaches for it — and inside the server it is handed the live globals,
+  so the served answer is computed by the dashboard's own helpers.
+- Bench scripts promoted into `tools/bench` — the ad-hoc drivers behind
+  `docs/plans/post-v1-baseline.md` are now four maintained tools with `--help`,
+  `--dry-run` and results appended to `~/.hermes/bench/results.jsonl`:
+  `decode_bench.py` (decode tok/s + cold/warm TTFT for a lane, and the AC-only
+  `--restart-with none,2,3,4` MTP block sweep), `ttft_after_wake.sh` (first-token
+  latency after an idle-suspend wake, prewarm barrier included),
+  `concurrency_probe.py` (the two-stream probe that parked the mlx-vlm upgrade —
+  6/6 clean rounds is the gate) and `prompt_size.py`, which reports the current
+  per-turn prompt/cached/completion token sizes straight from the MLX server log
+  and loads no model at all. The README carries the battery rule (AC only, the
+  exact `launchctl bootout` unload command, autostart stays off) and a table of
+  every reference number already on record with its date, so a future run is a
+  comparison instead of a fresh derivation.
+
 ## [1.1.6] - 2026-09-07
 
 ### Fixed

@@ -282,6 +282,42 @@ respected.
 
 ## Troubleshooting
 
+### Doctor
+
+One command, one screen. Before you go log-diving, ask it what is wrong:
+
+```bash
+python3 dashboard/doctor.py            # the report
+python3 dashboard/doctor.py --quiet    # only what needs attention
+python3 dashboard/doctor.py --json     # the same run, machine-readable
+```
+
+Eighteen checks in about a quarter of a second: the dashboard and the launchd
+services, the Hermes Agent and its version, the mlx-vlm venv and its pin, the
+Python that does model downloads, every model in the roster (weights complete,
+drafter ready, fits this Mac's RAM), free disk, RAM, macOS, Apple Silicon, Full
+Disk Access, `config.yaml` / `settings.json` / `~/.hermes/config.yaml`, the
+Claude bridge and its master switch, the search index, the Needs-you store,
+first-run setup, the cached update check, and the log directory plus a count of
+recent errors.
+
+| Status | Means |
+| --- | --- |
+| `PASS` | Nothing to do. |
+| `WARN` | It works, but something is degraded or unset — the line under it is the fix. |
+| `FAIL` | Something is broken now. The line under it is the fix. |
+
+Exit code is **0** when nothing failed and **1** otherwise, so it drops into a
+shell `&&` chain or CI. The same run is served at
+`GET /api/doctor` (`?format=text` for the report) and rendered as the **Health**
+card in Settings › System & Data, which also has a "Copy report" button.
+
+Every check is read-only and **none of them can start or wake a model server** —
+launchd is only ever `list`ed, the model lanes are HTTP probes, and nothing is
+written. It is safe to run on battery.
+
+### Quick ones
+
 Start with **[RUNBOOK.md](RUNBOOK.md)** — setup, integrations, and the "if
 something breaks" section. Quick ones:
 

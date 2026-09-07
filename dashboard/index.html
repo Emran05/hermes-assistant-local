@@ -3198,6 +3198,9 @@ try{
 <script src="/aux_topbar.js"></script>
 <script src="/aux_newsdesk.js"></script>
 <script src="/aux_update.js"></script>
+<!-- Health card (doctor). After aux_settings_shell.js so #sec-system exists,
+     and after aux_update.js so it reuses that card's 12-hour formatter. -->
+<script src="/aux_doctor.js"></script>
 <script src="/aux_onboarding.js"></script>
 <!-- Data & Network card (1.1.3). MUST load after aux_onboarding.js: it renders
      that module's NETWORK_FACTS through its networkTableHTML/netCSS. -->

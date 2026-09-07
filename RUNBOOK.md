@@ -120,6 +120,8 @@ Tune the time / prompt to taste, then `hermes gateway restart`.
 
 ## If something breaks
 ```bash
+python3 dashboard/doctor.py   # START HERE — 18 read-only checks, one screen,
+                              # exit 1 if anything FAILed. Never wakes the model.
 hermes doctor          # diagnoses common issues
 hermes gateway status  # is the service up?
 hermes dump            # paste into a GitHub issue for support

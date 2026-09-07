@@ -166,7 +166,7 @@ def _rec_init():
             # an "irreversible" badge on a screenshot.  Bump _REV_MIGRATION
             # whenever TOOL_KIND / REVERSIBLE_POLICY change again.
             row = con.execute("SELECT v FROM meta WHERE k='rev_policy_migration'").fetchone()
-            done = int(row["v"]) if row and str(row["v"]).isdigit() else 0
+            done = int(row[0]) if row and str(row[0]).isdigit() else 0   # plain tuple: no row_factory here
             if done < _REV_MIGRATION:
                 for _t in _RECLASSIFIED:            # re-home the browser tools
                     con.execute("UPDATE actions SET kind=? WHERE tool=? AND kind='other'",
