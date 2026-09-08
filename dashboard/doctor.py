@@ -67,6 +67,7 @@ DATA = os.path.join(HOME, ".hermes", "dashboard")
 LOGS = os.path.join(HOME, ".hermes", "logs")
 DASH_LOG = os.path.join(LOGS, "dashboard.log")
 ERR_LOG = os.path.join(LOGS, "errors.log")
+MLX_LOG = os.path.join(LOGS, "mlx-server.log")     # the plist's Standard*Path
 
 DASH_PORT = int(os.environ.get("DASH_PORT", "7788") or "7788")
 DASH_BASE = "http://127.0.0.1:%d" % DASH_PORT
@@ -132,13 +133,29 @@ def _host(name):
 # tiny primitives
 # --------------------------------------------------------------------------
 def _run(argv, timeout=6):
-    """stdout of a short command, or "" — never raises, never inherits stdin."""
+    """(returncode, output) for a short command — never raises, never inherits
+    stdin.  `rc` is -1 when the command could not be run at all (missing,
+    timed out) and `output` is then the reason.
+
+    THE RETURN CODE IS PART OF THE ANSWER.  This used to hand back stdout-or-
+    stderr and nothing else, so a `hermes --version` that printed a traceback
+    and exited 1 read as a healthy PASS with the traceback as its detail.  Every
+    caller must look at `rc` before believing the text."""
     try:
         p = subprocess.run(argv, capture_output=True, text=True,
                            timeout=timeout, stdin=subprocess.DEVNULL)
-    except Exception:
-        return ""
-    return (p.stdout or "").strip() or (p.stderr or "")
+    except Exception as e:
+        return -1, "%s: %s" % (type(e).__name__, e)
+    return p.returncode, ((p.stdout or "").strip() or (p.stderr or "").strip())
+
+
+def _cmd_note(argv, rc, out):
+    """One clause naming a command that did not exit 0, for a check detail."""
+    what = os.path.basename((argv or [""])[0]) or "command"
+    if rc < 0:
+        return "%s could not run (%s)" % (what, _sample(out, cap=80, hard=60))
+    tail = _sample(out, cap=80, hard=60)
+    return "%s exited %d%s" % (what, rc, (" — " + tail) if tail else "")
 
 
 def _read_json(path, default=None):
@@ -147,6 +164,75 @@ def _read_json(path, default=None):
             return json.load(f)
     except Exception:
         return default
+
+
+def _json_state(path):
+    """("absent"|"ok"|"bad", value) for a JSON file.
+
+    `_read_json` hands back the default for a MISSING file and for a corrupt
+    one alike, and on a fresh install that difference is the whole answer — an
+    absent settings.json is normal (the dashboard writes defaults on the first
+    change), a corrupt one is a real failure."""
+    try:
+        with open(path) as f:
+            return "ok", json.load(f)
+    except FileNotFoundError:
+        return "absent", None
+    except Exception:
+        return "bad", None
+
+
+# The report is meant to be pasted into an issue, so an absolute path under the
+# home directory would ship the owner's account name with it.  Not anchored, so
+# a path quoted mid-sentence is caught too; the lookahead stops
+# /Users/<name> from matching a DIFFERENT user whose name merely starts the
+# same way.
+_HOME_RE = re.compile(re.escape(HOME) + r"(?![A-Za-z0-9._\-])") if HOME not in ("", "/") else None
+
+
+def _display_path(s):
+    """Every path this module emits, with the home directory collapsed to `~`.
+
+    Applied centrally in `run_checks()` to each detail and fix, so a check
+    added later gets it for free — and applied to the JSON payload as well as
+    the text report.  There is deliberately no second, raw copy: nothing
+    downstream (aux_doctor.js, the MCP `doctor` tool) reads a path back out of
+    a detail, the fixes are shell commands where `~` expands to the same place,
+    and a payload that still carried the absolute path would defeat the point."""
+    s = "" if s is None else str(s)
+    if not s or _HOME_RE is None:
+        return s
+    return _HOME_RE.sub("~", s)
+
+
+def _plain(text):
+    """Control characters out (a log line can carry ANSI escapes), whitespace
+    squeezed.  NOT a redactor — `_sample` is the only thing that scrubs."""
+    s = "".join(" " if (ord(c) < 0x20 or ord(c) == 0x7F) else c
+                for c in str("" if text is None else text))
+    return " ".join(s.split())
+
+
+def _sample(text, cap=60, hard=36):
+    """Raw text from a log or a subprocess, made safe to print in a report.
+
+    Inside the dashboard the scrubber is aux_convos.py's `_cv_redact`, resolved
+    BY NAME at call time through the host bridge (the discipline aux_trace.py
+    uses) — it collapses labelled secrets, Bearer tokens, the unlabeled vendor
+    shapes and any `~/.hermes/...` path.  On the CLI there is no scrubber in
+    this process, so the line is truncated harder instead: a shorter quote is a
+    smaller leak, and the count and the shape still identify the failure."""
+    s = _display_path(_plain(text))
+    if not s:
+        return ""
+    fn = _host("_cv_redact")
+    if fn:
+        try:
+            s = _display_path(_plain(fn(s)))
+        except Exception:
+            fn = None
+    lim = cap if fn else hard
+    return (s[:max(1, lim - 3)] + "...") if len(s) > lim else s
 
 
 def _http(url, timeout=3):
@@ -248,9 +334,11 @@ def _machine_ram_gb():
             return fn()
         except Exception:
             pass
-    out = _run(["/usr/sbin/sysctl", "-n", "hw.memsize"], timeout=3).strip()
+    rc, out = _run(["/usr/sbin/sysctl", "-n", "hw.memsize"], timeout=3)
+    if rc != 0:
+        return None
     try:
-        b = int(out)
+        b = int(out.strip())
         return b / (1024 ** 3) if b > 0 else None
     except Exception:
         return None
@@ -514,24 +602,38 @@ def _chk_services():
 
 @check("model_server", "Model lanes")
 def _chk_model_server():
-    """INFORMATIONAL — a sleeping model is the design, never a failure.  This
-    probes; it does not wake.  (`agent_wake()` is the only thing that may.)"""
+    """A sleeping model is the design, never a failure — but a sleeping model
+    with NOTHING that explains why is a crash, and saying PASS to that was the
+    one thing this check could get wrong.  It probes; it does not wake.
+    (`agent_wake()` is the only thing that may.)"""
     primary = _lane_up(MODEL_URL)
     bgup = _lane_up(BG_MODEL_URL)
+    paused = os.path.exists(PAUSE_FILE)
+    idle = os.path.exists(IDLE_SUSPEND_FILE)
+    autostart_off = os.path.exists(AUTOSTART_OFF)
     bits = ["primary " + ("up on :8080" if primary else "asleep")]
     if not primary:
-        if os.path.exists(PAUSE_FILE):
+        if paused:
             bits[-1] += " (paused)"
-        elif os.path.exists(IDLE_SUSPEND_FILE):
+        elif idle:
             try:
                 bits[-1] += " (idle-suspended %s)" % _fmt_when(
                     float(open(IDLE_SUSPEND_FILE).read().strip() or 0))
             except Exception:
                 bits[-1] += " (idle-suspended)"
     bits.append("background " + ("up on :8081" if bgup else "down"))
-    if os.path.exists(AUTOSTART_OFF):
+    if autostart_off:
         bits.append("autostart off (on-demand)")
-    return ok(" · ".join(bits) + " — probe only, nothing was started")
+    detail = " · ".join(bits) + " — probe only, nothing was started"
+    if not primary and not paused and not idle and not autostart_off:
+        # No pause marker, no idle-suspend marker and no on-demand gate: this
+        # lane is meant to be running and is not.  The three explained shapes
+        # all leave one of those files behind, so this combination is a crash,
+        # an external bootout or a start that never came up.
+        return warn(detail + " — nothing explains the down primary "
+                    "(no pause, no idle-suspend marker, autostart on)",
+                    "tail -n 50 %s" % MLX_LOG)
+    return ok(detail)
 
 
 @check("hermes_agent", "Hermes Agent")
@@ -542,8 +644,14 @@ def _chk_hermes():
                    "install it, then re-run ./install-services.sh")
     if not os.access(b, os.X_OK):
         return bad("%s is not executable" % b, "chmod +x %s" % b)
-    out = _run([b, "--version"], timeout=15)
+    argv = [b, "--version"]
+    rc, out = _run(argv, timeout=15)
     line = (out.strip().splitlines() or [""])[0].strip()
+    if rc != 0:
+        # A broken install prints a traceback and exits non-zero; the old check
+        # read only stdout-or-stderr and PASSed with the traceback as detail.
+        return bad("%s  (%s)" % (_cmd_note(argv, rc, line), b),
+                   "%s --version   # then reinstall the agent" % b)
     if not line:
         return warn("%s ran but printed no version" % b, "%s --version" % b)
     return ok("%s  (%s)" % (line, b))
@@ -677,19 +785,31 @@ def _chk_disk():
 @check("hardware", "Hardware")
 def _chk_hardware():
     ram = _machine_ram_gb()
-    macos = _run(["/usr/bin/sw_vers", "-productVersion"], timeout=4).strip().splitlines()
-    macos = macos[0] if macos else "?"
-    chip = _run(["/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"],
-                timeout=4).strip().splitlines()
-    chip = chip[0] if chip else platform.processor() or "?"
+    notes = []
+    argv = ["/usr/bin/sw_vers", "-productVersion"]
+    rc, out = _run(argv, timeout=4)
+    macos = (out.strip().splitlines() or [""])[0] if rc == 0 else ""
+    if rc != 0:
+        notes.append(_cmd_note(argv, rc, out))
+    argv = ["/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"]
+    rc, out = _run(argv, timeout=4)
+    chip = (out.strip().splitlines() or [""])[0] if rc == 0 else ""
+    if rc != 0:
+        notes.append(_cmd_note(argv, rc, out))
+    chip = chip or platform.processor() or "?"
     arm = platform.machine() == "arm64"
-    detail = "%s · %s RAM · macOS %s" % (chip, _gb(ram) if ram else "?", macos)
+    detail = "%s · %s RAM · macOS %s" % (chip, _gb(ram) if ram else "?", macos or "?")
     if not arm:
         return bad(detail + " · NOT Apple Silicon — MLX needs arm64",
                    "Hermes Assistant requires an Apple Silicon Mac")
     if ram and ram < 16:
         return warn(detail + " · under 16 GB, only the smallest model is usable",
                     "Settings > Agent & Models — pick the 2B model")
+    if notes:
+        # An unreadable machine is not a healthy machine: the numbers this
+        # report is built on came from somewhere else, or nowhere.
+        return warn(detail + " · Apple Silicon · " + " · ".join(notes),
+                    "run the command by hand to see why it failed")
     return ok(detail + " · Apple Silicon")
 
 
@@ -714,13 +834,17 @@ def _chk_config():
     bits.append("config.yaml " + ("ok" if r_ok else "BAD (%s)" % r_note))
     if not r_ok:
         worst, fix = FAIL, "fix %s — %s" % (REPO_CONFIG, r_note)
-    s = _read_json(SETTINGS_FILE, "__err__")
-    if s == "__err__":
+    # Absent and corrupt had the same answer here, because `_read_json` returns
+    # the default for BOTH — so a fresh install, where the file legitimately
+    # does not exist yet, FAILed the whole run and exited 1.
+    st, _s = _json_state(SETTINGS_FILE)
+    if st == "absent":
+        bits.append("settings.json absent (defaults)")
+    elif st == "bad":
         bits.append("settings.json UNREADABLE")
         worst = FAIL
-        fix = fix or ("repair or delete %s (the dashboard rewrites defaults)" % SETTINGS_FILE)
-    elif s is None or not os.path.exists(SETTINGS_FILE):
-        bits.append("settings.json absent (defaults)")
+        fix = fix or ("repair or delete %s (the dashboard rewrites defaults)"
+                      % SETTINGS_FILE)
     else:
         bits.append("settings.json ok")
     if not os.path.exists(HERMES_CONFIG):
@@ -873,6 +997,53 @@ _ERR_RE = re.compile(
 _ERR_SKIP_RE = re.compile(r"^\[guard\] refused ")
 _LOG_TAIL = 200 * 1024        # bytes of dashboard.log to scan
 
+# server.py's main() prints this once the socket is bound, so the LAST one in
+# the tail is where the running process's output begins.  launchd never rotates
+# dashboard.log, so without this scope a failure that was fixed weeks ago keeps
+# a healthy Mac at WARN forever — the count has to describe the process that is
+# running now.
+_DASH_BOOT_RE = re.compile(r"^Hermes Assistant dashboard: https?://")
+# A process that died before main() never prints the banner.  aux_recorder's
+# line comes from an aux module at IMPORT, so it survives that — but a launchd
+# restart storm writes several with nothing between them, and each one is a
+# separate short-lived process.  The EARLIEST of such a run is taken, which
+# over-counts rather than hiding lines the reader needs.
+_DASH_BOOT_FALLBACK_RE = re.compile(r"^\[aux_recorder\] reconciler started\s*$")
+
+
+def _last_boot_index(lines):
+    """Index of the last dashboard-start marker in `lines`, or None."""
+    idx = [i for i, ln in enumerate(lines) if _DASH_BOOT_RE.match(ln)]
+    if idx:
+        return idx[-1]
+    idx = [i for i, ln in enumerate(lines) if _DASH_BOOT_FALLBACK_RE.match(ln)]
+    if not idx:
+        return None
+    i = len(idx) - 1
+    while i > 0 and (idx[i] - idx[i - 1]) <= 3:     # one restart storm
+        i -= 1
+    return idx[i]
+
+
+def _dash_started_when():
+    """"4:57 PM" for the RUNNING dashboard, or "" when it is not up.
+
+    dashboard.log carries no timestamps (it is raw stdout), so the clock cannot
+    come from the file — it comes from the process launchd is running.  Read-
+    only: `launchctl list` plus a `ps`, no interpretation of either beyond the
+    pid and its start time."""
+    pid = _launchctl(LABEL_DASH).get("pid")
+    if not pid:
+        return ""
+    rc, out = _run(["/bin/ps", "-p", str(pid), "-o", "lstart="], timeout=4)
+    if rc != 0 or not out.strip():
+        return ""
+    try:
+        return _fmt_when(time.mktime(time.strptime(out.strip(),
+                                                   "%a %b %d %H:%M:%S %Y")))
+    except Exception:
+        return ""
+
 
 @check("log_errors", "Recent errors")
 def _chk_log_errors():
@@ -885,6 +1056,10 @@ def _chk_log_errors():
     timestamped, so that half is a real 24-hour count."""
     bits, status, fix = [], PASS, ""
     if os.path.exists(DASH_LOG):
+        # A log we could not read yields NO count.  Printing "0 error lines"
+        # for a file we never opened is the most dangerous shape a health
+        # report can take: it is indistinguishable from a healthy machine.
+        tail = None
         try:
             sz = os.path.getsize(DASH_LOG)
             with open(DASH_LOG, "rb") as f:
@@ -893,31 +1068,48 @@ def _chk_log_errors():
                     f.readline()          # drop the half line we landed in
                 tail = f.read().decode("utf-8", "replace")
         except OSError as e:
-            tail = ""
-            bits.append("dashboard.log unreadable (%s)" % type(e).__name__)
-        lines = [ln for ln in tail.splitlines()
-                 if ln.strip() and _ERR_RE.search(ln) and not _ERR_SKIP_RE.match(ln)]
-        bits.append("%d error lines in the last %d KB of dashboard.log"
-                    % (len(lines), _LOG_TAIL // 1024))
-        if lines:
-            # The most REPEATED shape, not the newest line: a log full of one
-            # failure looping is the thing a reader has to see, and the last
-            # line to land is usually incidental.  Normalised on its first 60
-            # characters so a varying tail (a path, a count) still groups.
-            tally = {}
-            for ln in lines:
-                tally[ln.strip()[:60]] = tally.get(ln.strip()[:60], 0) + 1
-            key, n = max(tally.items(), key=lambda kv: kv[1])
-            bits.append("most common (%dx): %s%s" % (n, key, "..." if n else ""))
-        if len(lines) >= 10:
+            bits.append("could not read %s (%s)" % (DASH_LOG, type(e).__name__))
             status = WARN
-            fix = "tail -n 200 %s" % DASH_LOG
+            fix = "ls -l %s" % DASH_LOG
+        if tail is not None:
+            scanned = tail.splitlines()
+            boot = _last_boot_index(scanned)
+            if boot is not None:
+                scanned = scanned[boot + 1:]
+            lines = [ln for ln in scanned
+                     if ln.strip() and _ERR_RE.search(ln) and not _ERR_SKIP_RE.match(ln)]
+            if boot is None:
+                # no start marker in the tail: the running process has already
+                # written more than _LOG_TAIL, so the window is all we can say.
+                bits.append("%d error lines in the last %d KB of dashboard.log"
+                            % (len(lines), _LOG_TAIL // 1024))
+            else:
+                when = _dash_started_when()
+                bits.append("%d error lines in dashboard.log since the last start%s"
+                            % (len(lines), (" (%s)" % when) if when else ""))
+            if lines:
+                # The most REPEATED shape, not the newest line: a log full of one
+                # failure looping is the thing a reader has to see, and the last
+                # line to land is usually incidental.  Normalised on its first 60
+                # characters so a varying tail (a path, a count) still groups.
+                # The sample is raw log text in a report someone pastes into an
+                # issue, so it goes through `_sample` (scrubber, then `~`).
+                tally = {}
+                for ln in lines:
+                    k = _plain(ln)[:60]
+                    tally[k] = tally.get(k, 0) + 1
+                key, n = max(tally.items(), key=lambda kv: kv[1])
+                bits.append("most common (%dx): %s" % (n, _sample(key)))
+            if len(lines) >= 10:
+                status = WARN
+                fix = "tail -n 200 %s" % DASH_LOG
     else:
         bits.append("no dashboard.log")
 
     if os.path.exists(ERR_LOG):
         cutoff = time.time() - 24 * 3600
         n = 0
+        readable = True
         try:
             sz = os.path.getsize(ERR_LOG)
             with open(ERR_LOG, "rb") as f:
@@ -935,12 +1127,18 @@ def _chk_log_errors():
                         continue
                     if ts >= cutoff:
                         n += 1
-        except OSError:
-            n = 0
-        bits.append("%d agent ERROR lines in the last 24h" % n)
-        if n >= 20 and status == PASS:
-            status = WARN
-            fix = "tail -n 200 %s" % ERR_LOG
+        except OSError as e:
+            # Same rule as the dashboard half: no count, and never a silent 0.
+            readable = False
+            bits.append("could not read %s (%s)" % (ERR_LOG, type(e).__name__))
+            if status == PASS:
+                status = WARN
+            fix = fix or "ls -l %s" % ERR_LOG
+        if readable:
+            bits.append("%d agent ERROR lines in the last 24h" % n)
+            if n >= 20 and status == PASS:
+                status = WARN
+                fix = "tail -n 200 %s" % ERR_LOG
     return {"status": status, "detail": " · ".join(bits), "fix": fix}
 
 
@@ -967,6 +1165,10 @@ def run_checks(only=None):
             status = FAIL
             detail = "check crashed — %s: %s" % (type(e).__name__, e)
             fix = "this is a doctor bug — see dashboard/doctor.py"
+        # ONE place collapses the home directory, so a check added later cannot
+        # forget to — and the JSON payload is scrubbed exactly like the text.
+        detail = _display_path(detail)
+        fix = _display_path(fix)
         out.append({"id": cid, "label": label, "status": status,
                     "detail": detail, "fix": fix,
                     "ms": int((time.time() - t0) * 1000)})

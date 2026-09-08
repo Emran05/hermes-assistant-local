@@ -256,13 +256,24 @@
   async function copyReport() {
     // the TEXT format, so what lands in the clipboard is the same report the
     // CLI prints — that is what someone pastes into an issue.
-    var txt = "";
+    var txt = "", err = "";
     try {
       var r = await fetch("/api/doctor?format=text");
-      txt = await r.text();
-    } catch (e) { txt = ""; }
-    if (!txt) {
-      S.err = "Could not fetch the text report.";
+      var body = await r.text();
+      // A FAILED run also answers text/plain (aux_doctor.py returns a
+      // RawResponse with status 500 carrying the reason), so the body is
+      // always truthy — without the ok check a 500 got copied to the
+      // clipboard and toasted as "Health report copied", which is how a
+      // broken doctor ends up pasted into an issue as a health report.
+      if (!r.ok) {
+        err = "The report failed (HTTP " + r.status + ")" +
+              (body ? ": " + String(body).trim().split("\n")[0].slice(0, 200) : ".");
+      } else {
+        txt = body;
+      }
+    } catch (e) { err = "Could not fetch the text report."; }
+    if (err || !txt.trim()) {
+      S.err = err || "Could not fetch the text report.";
       paint();
       return;
     }

@@ -271,9 +271,36 @@
     var est = estimate(d, state.picked || {});
     var live = est || cur;
 
+    // A measurement that half failed still answers ok:true — the config and the
+    // profile table are real — but the numbers are then NOT what the labels
+    // say, so both failures are stated at the TOP of the body, never folded
+    // into the collapsed Advanced section.
+    //   prompt_size failed -> the system prompt was counted as zero, so the
+    //     prefix/first-token figures are the tool schemas alone. Say so on the
+    //     labels, not only in the notice.
+    //   probe failed -> the toolset list and every per-toolset size are this
+    //     module's fallback constants, not the agent's own answer.
+    var psBad = !!d.prompt_size_error;
+    var probeBad = !!d.probe_error;
+    var notices = "";
+    if (psBad) {
+      notices += '<p class="pberr">The system prompt could not be measured, so ' +
+        "the prefix and first-token figures below count the tool schemas only " +
+        "— the real prefix is larger. <span class=\"pbcode\">hermes " +
+        "prompt-size</span> said: " + E(d.prompt_size_error) + "</p>";
+    }
+    if (probeBad) {
+      notices += '<p class="pberr">The agent’s tool registry could not be read, ' +
+        "so the toolset list and its sizes are this dashboard’s built-in " +
+        "fallback, not what your agent would load. The probe said: " +
+        E(d.probe_error) + "</p>";
+    }
+
+    var tokLabel = psBad ? "tool schemas only" : "prefix tokens";
+    var secLabel = psBad ? "schemas only" : "first token";
     var stats = '<div class="pbstats">' +
-      stat(num(live.est_tokens), "prefix tokens", !!est) +
-      stat(secs(live.est_seconds), "first token", !!est) +
+      stat(num(live.est_tokens), tokLabel, !!est || psBad) +
+      stat(secs(live.est_seconds), secLabel, !!est || psBad) +
       stat(num(live.tool_count), "tools", !!est) +
       stat(kb(live.tools_json_bytes), "tool schemas", !!est) +
       stat(kb(skIdx.bytes), "skills index") +
@@ -311,12 +338,18 @@
         (r.detail ? '<span class="pbdet">' + E(r.detail) + "</span>" : "") +
         "</label></li>";
     }).join("");
+    // The rows are ALWAYS non-empty (the server falls back to a static key
+    // list when the probe dies), so `rows.length` could never surface a probe
+    // failure — `probe_ok` is what says whether these sizes were measured.
     var adv = '<details class="pbadv"' + (state.open ? " open" : "") + ">" +
       "<summary>Advanced — choose the toolsets yourself</summary>" +
+      (probeBad
+        ? '<p class="pberr">' + E(d.probe_error ||
+            "The toolset list could not be read.") + "</p>"
+        : "") +
       (rows.length
         ? '<ul class="pbts">' + list + "</ul>"
-        : '<p class="pberr">' + E(d.probe_error ||
-            "The toolset list could not be read.") + "</p>") +
+        : '<p class="pberr">The toolset list could not be read.</p>') +
       "</details>";
 
     // actions
@@ -361,7 +394,7 @@
       "compute-bound, so those tokens are seconds you wait, once per " +
       "conversation. The tool schemas are the largest part, and they are the " +
       "part you can turn off.</p>" +
-      stats + pick + adv + bar + out +
+      notices + stats + pick + adv + bar + out +
       (state.err ? '<p class="pberr">' + E(state.err) + "</p>" : "") +
       '<p class="pbfoot">Measured with <span class="pbcode">hermes prompt-size ' +
       '--platform tui --json</span> plus the agent’s own tool registry. ' +

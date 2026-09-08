@@ -192,6 +192,9 @@
       "border-color:color-mix(in srgb,var(--warn) 45%,transparent)}" +
       "#" + CHIP_ID + ".is-bad{color:var(--bad);" +
       "border-color:color-mix(in srgb,var(--bad) 55%,transparent)}" +
+      // a number nobody re-measured is dimmed, never left looking fresh
+      "#" + CHIP_ID + ".is-stale{opacity:.5;color:var(--muted);" +
+      "border-color:var(--hairline)}" +
       "@media (max-width:1100px){#" + CHIP_ID + "{display:none}}" +
       ".ctx-note{align-self:center;max-width:88%;margin:2px 0;padding:5px 12px;" +
       "border-radius:99px;border:1px solid var(--hairline);background:var(--glass-2);" +
@@ -238,6 +241,39 @@
     return el;
   }
 
+  // The chip asserts a number about the turn that just ended. When a turn
+  // cannot be measured, the ONE thing it must not do is keep showing the
+  // previous turn's numbers as if they were this turn's — that is a wrong
+  // answer, not a missing one. So:
+  //   * found === false -> the server looked and there were no rows: say "not
+  //     measured" and hand its own `note` over as the tooltip;
+  //   * ok === false, or no answer at all -> dim what is there and say the
+  //     measurement failed, or stay hidden if there was never a number.
+  // Either way the next successful renderChip() clears the state.
+  function renderNotMeasured(m) {
+    var el = chipEl();
+    if (!el) return null;
+    LAST = null;
+    el.textContent = "ctx not measured";
+    el.title = (m && m.note) ? String(m.note)
+                             : "No model request is logged for this turn.";
+    el.className = "pill is-stale";
+    el.hidden = false;
+    return el;
+  }
+
+  function markStale(why) {
+    var el = chipEl();
+    if (!el) return null;
+    if (!LAST || el.hidden) return el;      // nothing to mislead anyone with
+    el.title = (why || "measurement failed") + "\n\nLast measured turn:\n" +
+               chipTitle(LAST);
+    if (el.className.indexOf("is-stale") < 0) {
+      el.className = "pill is-stale";
+    }
+    return el;
+  }
+
   function renderNote(m) {
     var d = D(); if (!d) return null;
     var msgs = d.getElementById("msgs");
@@ -278,7 +314,16 @@
     var url = "/api/context/turn?job=" + encodeURIComponent(turn.job) +
               (turn.compacting ? "&compacting=1" : "");
     var m = await jget(url);
-    if (!m || m.ok === false || m.found === false) return;
+    if (!m || m.ok === false) {
+      try {
+        markStale(m && m.error ? String(m.error) : "measurement failed");
+      } catch (e) {}
+      return;
+    }
+    if (m.found === false) {
+      try { renderNotMeasured(m); } catch (e) {}
+      return;
+    }
     try { renderChip(m); } catch (e) {}
     if (m.compacted) { try { renderNote(m); } catch (e) {} }
     // the card's table is now one turn out of date
@@ -681,6 +726,7 @@
     chipText: chipText, chipTitle: chipTitle, noteText: noteText, level: level,
     tok: tok, full: full, pct: pct, secs: secs, clock: clock,
     renderChip: renderChip, renderNote: renderNote, measure: measure,
+    renderNotMeasured: renderNotMeasured, markStale: markStale,
     install: install, mount: mount, paint: paint, apply: apply, state: S,
     last: function () { return LAST; },
     refresh: async function () { S.loaded = false; S.recent = null; await mount(); }

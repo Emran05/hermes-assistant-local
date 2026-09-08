@@ -420,6 +420,10 @@ else
     else
       say "WARNING: could not enable tool-budget: $tb_out"
     fi
+  else
+    # install.sh says this out loud; here it used to be a silent skip, which
+    # left the plugin linked but switched on nowhere and nothing in the log.
+    say "WARNING: no ~/.hermes/config.yaml — tool-budget was linked but NOT enabled"
   fi
 fi
 

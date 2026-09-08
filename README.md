@@ -455,7 +455,8 @@ would be dropped.
 
 Hermes can act as a **personal context MCP server**: another agent on this Mac —
 Claude Code, primarily — asks Hermes what it already knows instead of re-reading
-your calendar, notes and conversations for itself.
+your calendar, notes and conversations for itself, and can also ask how the
+assistant itself is doing.
 
 ```bash
 claude mcp add hermes-assistant -- python3 /path/to/HermesAssistant/dashboard/hermes_mcp.py
@@ -469,6 +470,8 @@ isn't, every tool says so and tells you how to start it.
 
 ### The tools that appear
 
+Your context:
+
 | Tool | What it answers |
 |---|---|
 | `hermes_search(q, source?, limit?)` | one search across chats, notes, calendar and saved news |
@@ -479,7 +482,24 @@ isn't, every tool says so and tells you how to start it.
 | `chat_get(session, last_n=20)` | the last turns of one conversation |
 | `needs_you()` | the now / today / later buckets, with the reason for each |
 | `memory_get()` | the facts Hermes remembers about you |
-| `messages_search(q)` | iMessage rows — **off by default** |
+| `messages_search(q)` | iMessage rows — **allowlist** (off by default) |
+
+How the assistant itself is doing:
+
+| Tool | What it answers |
+|---|---|
+| `doctor(format?)` | the health checks: counts, then every warning and failure with its fix |
+| `prompt_budget(profile?)` | what a fresh conversation costs before you type, and the three profiles — `profile` is a **write** |
+| `context_recent(n=10)` | the last turns' prompt / cached / new tokens, prefill seconds, decode rate |
+| `tool_budget(max_chars?, enabled?, spill?)` | the cap on one tool result and what it saved today — the three knobs are **writes** |
+| `memory_facts(q?, preview?, limit?, add?)` | the per-message facts store, or the exact block a message would inject — `add` is a **write** |
+| `evals(run?)` | the local eval suite: last run, pass rate of the last ten, schedule — `run` is a **write** |
+| `trace_summary(days=7)` | turns, tool spans, tokens, prefill and cache hit over a window |
+
+A tool marked **write** still reads by default. The write argument only exists
+when you enable it, and none of them ever restarts a service or wakes a model:
+the upstream flags that would (`restart`, `install`, eval `force`) are never
+sent, whatever the model asks for.
 
 ### The allowlist
 
@@ -498,23 +518,43 @@ model. `~/.hermes/mcp-allow.json` is created on first run, mode `600`:
     "chat_get": true,
     "needs_you": true,
     "memory_get": true,
-    "messages_search": false
+    "messages_search": false,
+    "doctor": true,
+    "prompt_budget": true,
+    "context_recent": true,
+    "tool_budget": true,
+    "memory_facts": true,
+    "evals": true,
+    "trace_summary": true
+  },
+  "writes": {
+    "prompt_budget": false,
+    "tool_budget": false,
+    "memory_facts": false,
+    "evals": false
   }
 }
 ```
 
 A tool set to `false` is **not listed and not callable** — the model is never
-told it exists. The file is read once at startup, so an edit takes effect the
-next time your client starts the server. A corrupt file falls back to these
-defaults, never to "allow everything".
+told it exists. The same is true of a write: with its `writes` entry off, the
+argument is absent from the tool's schema *and* refused by the tool, and the
+refusal names the entry you would have to set. Every write defaults to `false`,
+including in a file written before they existed. The file is read once at
+startup, so an edit takes effect the next time your client starts the server; a
+corrupt file falls back to these defaults, never to "allow everything".
+`HERMES_MCP_ALLOW` points the server at a different allowlist file, for a second
+client with a different scope.
 
 ### Privacy posture
 
 - **Loopback only.** Every tool is an HTTP GET against the dashboard on
   `127.0.0.1:7788`. The server opens no port of its own, reads no store
   directly, and never touches the network.
-- **Read-only.** There is no tool that writes, sends, drafts, snoozes or
-  approves anything, and nothing here can wake a model.
+- **Read-only by default.** Nothing sends, drafts, snoozes or approves
+  anything, and nothing here can wake a model — not even the eval run, which
+  refuses on battery and when the model is asleep. The four settings a tool can
+  write are each off until you turn them on.
 - **Messages stay off until you say otherwise** — and while they are off,
   message rows are filtered out of `hermes_search` as well, so turning the tool
   off is not a hiding place.
@@ -523,7 +563,8 @@ defaults, never to "allow everything".
   paths are redacted with the same rules the conversation export uses.
 - **Bounded plain text.** Any single result is capped at 8 KB, and a non-JSON
   answer from the dashboard is discarded rather than forwarded — no HTML ever
-  reaches the model.
+  reaches the model. (`doctor(format="text")` is the one route that answers
+  `text/plain`, and only that content type is accepted there.)
 
 `needs_you()` reads the inbox with `mark=0`, so asking Claude Code what needs you
 never counts as a sighting for the "now precision" trust metric — only what a person

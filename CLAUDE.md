@@ -750,6 +750,25 @@ and explicit agent tool calls (web search etc.) touch the internet.
   Read-only in practice too: `GET /api/needsyou?mark=0` (1.1.4) skips the sighting
   bookkeeping and the MCP `needs_you()` uses it, so only the Hub/pop-out (real eyes)
   feed `now_precision`.
+  **+ seven harness tools (1.2.4)** — `doctor` (`/api/doctor`, plus
+  `format:"text"` through the one `text/plain` front door `dash_get_text`
+  accepts), `prompt_budget`, `context_recent`, `tool_budget`, `memory_facts`
+  (`/api/memory/facts` + `/api/memory/preview`), `evals` and `trace_summary`
+  (`days` convenience window, ≤31). Reads stay GETs. **Four of them take ONE
+  write argument**, each gated by its own key in a new `writes` block in
+  mcp-allow.json — `prompt_budget` (profile), `tool_budget` (max_chars/enabled/
+  spill), `memory_facts` (add), `evals` (run) — **all default false**, including
+  in an allowlist written before they existed. Rule 4 now applies to arguments
+  too: with the key off the argument is **absent from the tool's schema** AND
+  refused by the handler (a client may send an off-schema key), and the refusal
+  names `writes.<entry>`. **The upstream flags that would restart a service or
+  wake a model are never forwarded** — prompt-budget `restart`, tool-budget
+  `install`/`restart`, evals `force` — whatever the caller sends; each payload
+  is rebuilt key by key. `memory_facts(add=)` re-runs aux_memlayer's own
+  `_ml_looks_secret` test (the mirrored block again) BEFORE the round trip, so a
+  key never reaches the store's process. `HERMES_MCP_ALLOW` overrides the
+  allowlist path — that is how the harness tests a different scope without
+  touching the owner's file. Harness: `scratchpad/t_mcp.py`, 293 checks.
 - **DeepSeek Harness (`dsh`) spike — 2026-08-18, NOT integrated** — installed
   locally (not global) at `~/.hermes/dsh` (`@deepseek-ai/dsh@0.1.0-rc.7`, MIT,
   Node 22 via nvm, 306MB); `DSH_HOME=~/.hermes/dsh/home` holds `settings.yaml`

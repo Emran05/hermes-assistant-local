@@ -44,16 +44,36 @@
 # is owned by this module, and the Drill button's badge cannot drift.
 #
 # STORE.  ~/.hermes/dashboard/evals.db (0600, WAL sidecars too):
-#   runs(id, ts, model_id, trigger, total, passed, latency_ms_total,
+#   runs(id, ts, model_id, trigger, total, passed, errors, latency_ms_total,
 #        median_latency_ms, error)
-#   results(run_id, "case", passed, latency_ms, detail)     -- "case" is quoted
-#                                                              (SQL keyword)
+#   results(run_id, "case", passed, error, latency_ms, detail)   -- "case" is
+#                                                       quoted (SQL keyword)
 #   meta(k, v)   -- the scheduler's once-per-N-days guard lives here, so the
 #                   whole feature is one file to delete.
+#   `_ev_migrate` ADDs the two `error` columns to a db written before them, so
+#   an existing history survives the upgrade meaning exactly what it meant.
+#
+# PASS / FAIL / ERROR — three states, not two.  A case that raises a CONNECTION
+# error (refused, timed out, a body that is not JSON) never got an answer to
+# judge, so it is not a failure: nine infrastructure errors used to be stored
+# as 0/9 and charted as a quality collapse.  `errors` counts them per run, a
+# run in which EVERY case errored is stored with `error` set and charted as a
+# GAP rather than a zero, and the card's per-case table says "error".
+#
+# A DEAD STORE MUST NEVER BECOME A LOOP.  `_ev_init` keeps why it failed in
+# `_ev_store_error` and `_ev_tick` refuses to run while it is set: with no db
+# there is no `last_sched_date`, the once-per-N-days guard reads as "never
+# ran", and the 60s loop would fire all nine completions every minute from the
+# scheduled time until quiet hours, store nothing, and still show "never" on
+# the card.  `_EV_MEM_GUARD` is the belt-and-braces half — the same YYYY-MM-DD
+# the meta row holds, consulted only when the persisted one is empty — so a
+# store that opens and then loses its writes still cannot buy more than one run
+# per `days`.
 #
 # SCHEDULE (settings.json `evals`).  A straight port of aux_watchtower's
 # `_brief_tick` gate ladder plus one AC-power gate and one model-state gate:
-#   enabled -> quiet hours -> at/after HH:MM -> once-per-N-days guard ->
+#   store available -> enabled -> quiet hours -> at/after HH:MM ->
+#   once-per-N-days guard ->
 #   slept-through -> agent not paused -> on AC (if require_ac) ->
 #   model already online (or wake_if_ac AND on AC) -> no chat turn in flight.
 # Defaults are ON but cost nothing on a laptop: `require_ac: true` and
@@ -67,7 +87,7 @@
 # ROUTES
 #   GET  /api/evals            settings + last run + 60-run history + cases
 #   POST /api/evals/run        manual run (refuses on battery, always)
-#   POST /api/evals/settings   schedule write-back
+#   POST /api/evals/settings   schedule write-back (clamped, 400 on garbage)
 
 import os
 import re
@@ -76,6 +96,7 @@ import json
 import time
 import sqlite3
 import threading
+import http.client as _ev_httpclient      # named, so `http` is not rebound
 import subprocess
 import urllib.request
 
@@ -93,6 +114,19 @@ EV_SLEPT_GRACE = 120             # minutes past the slot before "stale" applies
 
 EV_DEFAULTS = {"enabled": True, "at_hour": 13, "at_minute": 0,
                "require_ac": True, "wake_if_ac": False, "days": 1}
+
+# ONE table of bounds for the three numeric settings, so the read path
+# (evals_settings) and the write path (evals_set_settings) cannot drift.  The
+# route used to persist whatever JSON it was handed and clamp only on read, so
+# settings.json could sit on at_hour 99 for ever and every other reader of
+# the file — a backup, an import, a human — saw a value it would never use.
+EV_INT_BOUNDS = {"at_hour": (0, 23), "at_minute": (0, 59), "days": (1, 30)}
+
+# Exceptions that mean "the model server did not answer", never "the model got
+# it wrong": urllib.error.URLError and socket.timeout are OSError subclasses,
+# http.client raises HTTPException, and a truncated body raises JSONDecodeError
+# out of json.loads.
+_EV_INFRA_EXC = (OSError, _ev_httpclient.HTTPException, json.JSONDecodeError)
 
 
 def _ev_log(msg):
@@ -124,6 +158,25 @@ def _ev_int(v, lo, hi, dflt):
     return lo if n < lo else (hi if n > hi else n)
 
 
+def _ev_clamp_key(k, v):
+    """Clamp one numeric setting into its bounds, falling back to the default."""
+    lo, hi = EV_INT_BOUNDS[k]
+    return _ev_int(v, lo, hi, EV_DEFAULTS[k])
+
+
+def _ev_is_num(v):
+    """True when `v` is a number this module will accept.  A JSON `true` is
+    NOT hour 1 — it is a typo, and the route answers 400 rather than storing
+    it."""
+    if isinstance(v, bool):
+        return False
+    try:
+        int(v)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def evals_settings():
     try:
         raw = (get_settings() or {}).get("evals")            # noqa: F821
@@ -132,19 +185,20 @@ def evals_settings():
     if not isinstance(raw, dict):
         raw = {}
     return {"enabled": bool(raw.get("enabled", EV_DEFAULTS["enabled"])),
-            "at_hour": _ev_int(raw.get("at_hour"), 0, 23,
-                               EV_DEFAULTS["at_hour"]),
-            "at_minute": _ev_int(raw.get("at_minute"), 0, 59,
-                                 EV_DEFAULTS["at_minute"]),
+            "at_hour": _ev_clamp_key("at_hour", raw.get("at_hour")),
+            "at_minute": _ev_clamp_key("at_minute", raw.get("at_minute")),
             "require_ac": bool(raw.get("require_ac",
                                        EV_DEFAULTS["require_ac"])),
             "wake_if_ac": bool(raw.get("wake_if_ac",
                                        EV_DEFAULTS["wake_if_ac"])),
-            "days": _ev_int(raw.get("days"), 1, 30, EV_DEFAULTS["days"])}
+            "days": _ev_clamp_key("days", raw.get("days"))}
 
 
 def evals_set_settings(patch):
-    """Merge + clamp + persist.  Fresh read-modify-write under _state_lock."""
+    """Merge + clamp + persist.  Fresh read-modify-write under _state_lock.
+
+    The clamp happens HERE, before write_json — clamping only on read left
+    settings.json holding values the module would never honour."""
     patch = patch if isinstance(patch, dict) else {}
     with _state_lock:                                        # noqa: F821
         s = get_settings() or {}                             # noqa: F821
@@ -152,7 +206,8 @@ def evals_set_settings(patch):
         cur = dict(cur) if isinstance(cur, dict) else {}
         for k in EV_DEFAULTS:
             if k in patch:
-                cur[k] = patch[k]
+                cur[k] = (_ev_clamp_key(k, patch[k]) if k in EV_INT_BOUNDS
+                          else bool(patch[k]))
         s["evals"] = cur
         write_json(SETTINGS_FILE, s)                         # noqa: F821
     return evals_settings()
@@ -217,6 +272,7 @@ CREATE TABLE IF NOT EXISTS runs(
   trigger           TEXT NOT NULL DEFAULT 'manual',
   total             INTEGER NOT NULL DEFAULT 0,
   passed            INTEGER NOT NULL DEFAULT 0,
+  errors            INTEGER NOT NULL DEFAULT 0,
   latency_ms_total  INTEGER NOT NULL DEFAULT 0,
   median_latency_ms INTEGER NOT NULL DEFAULT 0,
   error             TEXT
@@ -226,6 +282,7 @@ CREATE TABLE IF NOT EXISTS results(
   run_id     INTEGER NOT NULL,
   "case"     TEXT NOT NULL,
   passed     INTEGER NOT NULL DEFAULT 0,
+  error      INTEGER NOT NULL DEFAULT 0,
   latency_ms INTEGER NOT NULL DEFAULT 0,
   detail     TEXT
 );
@@ -234,6 +291,7 @@ CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 """
 
 _ev_inited = False
+_ev_store_error = ""       # why the db could not be opened; "" when it is fine
 
 
 def _ev_secure():
@@ -269,8 +327,22 @@ def _ev_conn():
     return con
 
 
+def _ev_migrate(con):
+    """Add the two `error` columns to a db written before they existed.
+
+    CREATE TABLE IF NOT EXISTS never alters a table that is already there, so
+    an evals.db from 1.2.3 would keep answering "no such column: errors" on
+    every read.  Rows written before the migration mean 0 errors, which is
+    exactly what they meant."""
+    for table, col, decl in (("runs", "errors", "INTEGER NOT NULL DEFAULT 0"),
+                             ("results", "error", "INTEGER NOT NULL DEFAULT 0")):
+        cols = [r[1] for r in con.execute("PRAGMA table_info(%s)" % table)]
+        if cols and col not in cols:
+            con.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, col, decl))
+
+
 def _ev_init():
-    global _ev_inited
+    global _ev_inited, _ev_store_error
     if _ev_inited:
         return True
     try:
@@ -278,12 +350,17 @@ def _ev_init():
         try:
             con.execute("PRAGMA journal_mode=WAL")
             con.executescript(_EV_SCHEMA)
+            _ev_migrate(con)
             con.commit()
         finally:
             con.close()
         _ev_secure()
         _ev_inited = True
+        _ev_store_error = ""
     except Exception as e:
+        # Kept, not just logged: `_ev_tick` refuses to run while it is set and
+        # GET /api/evals shows it instead of a card that says "never".
+        _ev_store_error = type(e).__name__ + ": " + str(e)[:200]
         _ev_log("db init failed: %r" % e)
     return _ev_inited
 
@@ -573,18 +650,31 @@ def evals_cases():
 
 
 def _ev_run_case(cid, label, fn, mid):
-    """-> {case, passed, latency_ms, detail}.  Never raises."""
+    """-> {case, passed, error, latency_ms, detail}.  Never raises.
+
+    THREE states.  `passed` is the model's answer.  `error` means there was no
+    answer to judge — the model server refused the connection, timed out, or
+    sent something that is not JSON — and such a case is NOT a quality
+    failure; charting it as one turned "the server was down" into "the model
+    got nine cases wrong".  A case that is simply missing (aux_promotion did
+    not load) stays a FAILURE on purpose: a suite that quietly shrank from
+    nine cases to three would otherwise score a perfect run.
+    """
     t0 = time.time()
     if not callable(fn):
-        return {"case": cid, "label": label, "passed": False,
+        return {"case": cid, "label": label, "passed": False, "error": False,
                 "latency_ms": 0,
                 "detail": "case unavailable — aux_promotion.py did not load"}
+    infra = False
     try:
         passed, detail = fn(mid)
     except Exception as e:
         passed = False
-        detail = "case error: " + type(e).__name__ + ": " + str(e)[:160]
+        infra = isinstance(e, _EV_INFRA_EXC)
+        detail = ("infrastructure error: " if infra else "case error: ") + \
+            type(e).__name__ + ": " + str(e)[:160]
     return {"case": cid, "label": label, "passed": bool(passed),
+            "error": bool(infra),
             "latency_ms": int(round((time.time() - t0) * 1000)),
             "detail": str(detail)[:600]}
 
@@ -614,26 +704,38 @@ def _ev_busy_jobs():
 
 
 def _ev_store_run(mid, trigger, cases, err, ts=None):
-    """Append one run + its per-case rows.  Returns the run id (0 on failure)."""
+    """Append one run + its per-case rows.  Returns the run id (0 on failure).
+
+    `cases` may be EMPTY, and that is how a day the scheduler skipped is
+    recorded: total 0 with the reason in `error`.  Without the row the card
+    kept showing the run before it as though it were the latest, and the one
+    thing that actually happened — the window was slept through — was written
+    nowhere at all.
+    """
     if not _ev_init():
         return 0
     lat = [c.get("latency_ms", 0) for c in cases]
+    errors = sum(1 for c in cases if c.get("error"))
+    if cases and errors == len(cases) and not err:
+        err = ("no case reached the model server — "
+               + str(cases[0].get("detail", ""))[:240])
     row = (float(ts if ts is not None else time.time()), str(mid or ""),
            str(trigger or "manual"), len(cases),
-           sum(1 for c in cases if c.get("passed")),
+           sum(1 for c in cases if c.get("passed")), errors,
            int(sum(lat)), _ev_median(lat), (str(err)[:400] if err else None))
     try:
         con = _ev_conn()
         try:
             cur = con.execute(
-                "INSERT INTO runs(ts,model_id,trigger,total,passed,"
+                "INSERT INTO runs(ts,model_id,trigger,total,passed,errors,"
                 "latency_ms_total,median_latency_ms,error) "
-                "VALUES(?,?,?,?,?,?,?,?)", row)
+                "VALUES(?,?,?,?,?,?,?,?,?)", row)
             rid = int(cur.lastrowid or 0)
             con.executemany(
-                'INSERT INTO results(run_id,"case",passed,latency_ms,detail) '
-                "VALUES(?,?,?,?,?)",
+                'INSERT INTO results(run_id,"case",passed,error,latency_ms,'
+                'detail) VALUES(?,?,?,?,?,?)',
                 [(rid, c.get("case", ""), 1 if c.get("passed") else 0,
+                  1 if c.get("error") else 0,
                   int(c.get("latency_ms", 0)), str(c.get("detail", ""))[:600])
                  for c in cases])
             con.commit()
@@ -705,21 +807,24 @@ def evals_run(model_id=None, trigger="manual", allow_wake=False):
         return {"ok": False, "reason": err or "no cases ran", "model": mid}
     rid = _ev_store_run(mid, trigger, cases, err)
     passed = sum(1 for c in cases if c.get("passed"))
+    errors = sum(1 for c in cases if c.get("error"))
     med = _ev_median([c.get("latency_ms", 0) for c in cases])
     # metrics breadcrumb, same shape the drill emits (never raises)
     try:
         rec = _ev_g("metrics_record")
         if callable(rec):
             rec("evals", model=mid, passed=passed, of=len(cases),
-                trigger=str(trigger or "manual"), median_ms=med,
-                ok=(err is None))
+                errors=errors, trigger=str(trigger or "manual"),
+                median_ms=med, ok=(err is None))
     except Exception:
         pass
-    _ev_log("run trigger=%s model=%s %d/%d median=%dms%s"
-            % (trigger, mid, passed, len(cases), med,
+    _ev_log("run trigger=%s model=%s %d/%d%s median=%dms%s"
+            % (trigger, mid, passed, len(cases),
+               (" errors=%d" % errors) if errors else "", med,
                (" error=" + str(err)) if err else ""))
     return {"ok": True, "run_id": rid, "model": mid, "trigger": trigger,
-            "total": len(cases), "passed": passed, "median_latency_ms": med,
+            "total": len(cases), "passed": passed, "errors": errors,
+            "median_latency_ms": med,
             "latency_ms_total": sum(c.get("latency_ms", 0) for c in cases),
             "error": err, "cases": cases}
 
@@ -735,7 +840,7 @@ def _ev_history(limit=EV_HISTORY_LIMIT):
         con = _ev_conn()
         try:
             rows = con.execute(
-                "SELECT id,ts,model_id,trigger,total,passed,"
+                "SELECT id,ts,model_id,trigger,total,passed,errors,"
                 "median_latency_ms,latency_ms_total,error "
                 "FROM runs ORDER BY ts DESC, id DESC LIMIT ?",
                 (int(limit),)).fetchall()
@@ -746,7 +851,7 @@ def _ev_history(limit=EV_HISTORY_LIMIT):
         return []
     out = [{"id": r["id"], "ts": r["ts"], "model": r["model_id"],
             "trigger": r["trigger"], "total": r["total"],
-            "passed": r["passed"],
+            "passed": r["passed"], "errors": r["errors"],
             "median_latency_ms": r["median_latency_ms"],
             "latency_ms_total": r["latency_ms_total"],
             "error": r["error"]} for r in rows]
@@ -761,13 +866,13 @@ def _ev_last_run():
         con = _ev_conn()
         try:
             r = con.execute(
-                "SELECT id,ts,model_id,trigger,total,passed,"
+                "SELECT id,ts,model_id,trigger,total,passed,errors,"
                 "median_latency_ms,latency_ms_total,error "
                 "FROM runs ORDER BY ts DESC, id DESC LIMIT 1").fetchone()
             if not r:
                 return None, []
             cs = con.execute(
-                'SELECT "case" AS case_id,passed,latency_ms,detail '
+                'SELECT "case" AS case_id,passed,error,latency_ms,detail '
                 "FROM results WHERE run_id=? ORDER BY rowid",
                 (r["id"],)).fetchall()
         finally:
@@ -777,12 +882,13 @@ def _ev_last_run():
         return None, []
     last = {"id": r["id"], "ts": r["ts"], "model": r["model_id"],
             "trigger": r["trigger"], "total": r["total"],
-            "passed": r["passed"],
+            "passed": r["passed"], "errors": r["errors"],
             "median_latency_ms": r["median_latency_ms"],
             "latency_ms_total": r["latency_ms_total"], "error": r["error"]}
     labels = {cid: lab for cid, lab, _fn in evals_cases()}
     cases = [{"case": c["case_id"], "label": labels.get(c["case_id"], ""),
-              "passed": bool(c["passed"]), "latency_ms": c["latency_ms"],
+              "passed": bool(c["passed"]), "error": bool(c["error"]),
+              "latency_ms": c["latency_ms"],
               "detail": c["detail"] or ""} for c in cs]
     return last, cases
 
@@ -906,6 +1012,16 @@ def _ev_env(cfg):
 
 
 _ev_last_reason = ""
+_EV_MEM_GUARD = ""        # the guard date in memory, for a store that loses it
+
+
+def _ev_mark_done(now_ts):
+    """Flip BOTH guards for today: the durable meta row and the in-memory copy
+    that survives a store which accepts a connection and then loses the
+    write."""
+    global _EV_MEM_GUARD
+    _EV_MEM_GUARD = _ev_today(now_ts)
+    _ev_meta_set("last_sched_date", _EV_MEM_GUARD)
 
 
 def _ev_tick(now_ts=None):
@@ -914,7 +1030,22 @@ def _ev_tick(now_ts=None):
     global _ev_last_reason
     now_ts = time.time() if now_ts is None else now_ts
     cfg = evals_settings()
-    guard = _ev_meta_get("last_sched_date", "")
+    if not _ev_init():
+        # No store means no once-per-N-days guard: `_ev_meta_get` answers "",
+        # `_ev_days_since` reads that as "never ran", and this loop would fire
+        # nine completions EVERY MINUTE from the scheduled time until quiet
+        # hours while storing nothing.  A model-burning loop is a far worse
+        # failure than a missed day, so a suite it cannot record does not run.
+        g = {"run": False, "wake": False, "mark_done": False,
+             "reason": "store unavailable"}
+        if g["reason"] != _ev_last_reason:
+            _ev_last_reason = g["reason"]
+            _ev_log("schedule: store unavailable (%s)"
+                    % (_ev_store_error or "unknown"))
+        return g
+    # The in-memory guard is consulted ONLY when the persisted one is empty, so
+    # a healthy store behaves exactly as before.
+    guard = _ev_meta_get("last_sched_date", "") or _EV_MEM_GUARD
     env = _ev_env(cfg)
     g = evals_gate(cfg, guard, now_ts, env)
     if g["reason"] != _ev_last_reason:
@@ -923,7 +1054,16 @@ def _ev_tick(now_ts=None):
                 % (g["reason"], env["ac"], env["online"], env["quiet"],
                    guard or "-"))
     if g["mark_done"] and not g["run"]:
-        _ev_meta_set("last_sched_date", _ev_today(now_ts))
+        # A day marked done WITHOUT running left no trace anywhere: the card
+        # went on showing the previous run as if it were the latest, and the
+        # only thing that had happened was invisible.  One row, total 0, the
+        # reason in `error` — charted as a gap, shown as "skipped: …".
+        try:
+            mid = active_model()                             # noqa: F821
+        except Exception:
+            mid = ""
+        _ev_store_run(mid, "skipped", [], g["reason"], ts=now_ts)
+        _ev_mark_done(now_ts)
         return g
     if not g["run"]:
         return g
@@ -931,7 +1071,7 @@ def _ev_tick(now_ts=None):
     if res.get("ok"):
         # The guard flips only after a completed run, so a crash mid-suite
         # retries on the next tick instead of skipping the day.
-        _ev_meta_set("last_sched_date", _ev_today(now_ts))
+        _ev_mark_done(now_ts)
         _ev_last_reason = ""
     else:
         _ev_log("scheduled run did not start: %s" % res.get("reason"))
@@ -995,7 +1135,11 @@ def _ev_get(ctx):
             "power": {"ac": bool(pw.get("ac")), "battery": pw.get("battery"),
                       "pct": pw.get("pct")},
             "can_run": ok, "reason": reason, "wakeable": wakeable,
-            "next_guard": _ev_meta_get("last_sched_date", "")}
+            # "" when the db is healthy; the card renders it in place of the
+            # "never" that a store which cannot be written would otherwise
+            # show for ever.
+            "store_error": _ev_store_error,
+            "next_guard": _ev_meta_get("last_sched_date", "") or _EV_MEM_GUARD}
 
 
 def _ev_run_post(ctx):
@@ -1035,7 +1179,11 @@ def _ev_settings_post(ctx):
             patch[k] = bool(body.get(k))
     for k in ("at_hour", "at_minute", "days"):
         if k in body:
-            patch[k] = body.get(k)
+            v = body.get(k)
+            if not _ev_is_num(v):
+                return ({"ok": False,
+                         "error": "%s must be a number" % k}, 400)
+            patch[k] = v
     if not patch:
         return ({"ok": False, "error": "nothing to set"}, 400)
     cfg = evals_set_settings(patch)

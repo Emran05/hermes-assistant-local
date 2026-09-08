@@ -12,6 +12,11 @@
 // #sec-system, next to Health (aux_doctor.js), which is where the other
 // "what this Mac recorded about itself" surfaces live.
 //
+// A CAPPED EXPORT IS SAID OUT LOUD. The route stops at its span cap and sets
+// X-Hermes-Trace-Truncated (+ -Span-Cap); nothing read those headers, so a
+// silently short file looked like a complete one. download() now reads them,
+// toasts the cap and leaves a line in the card, which a toast cannot do.
+//
 // DOWNLOADING. Copied verbatim from index.html's cvExport(): the Swift shell
 // (app/main.swift, frozen) registers no WKDownloadDelegate, so an <a download>
 // of an attachment is silently dropped inside the app — there we hand the text
@@ -54,7 +59,8 @@
     sum: null,          // the /api/trace/summary payload
     loading: false,
     busy: "",           // "jsonl" | "otel" while a download is in flight
-    err: ""
+    err: "",
+    warn: ""            // last export was capped — a warning, not an error
   };
 
   // ---- glyph (two-tone: accent fill + currentColor stroke; zero emoji) ------
@@ -172,6 +178,8 @@
         "border:1px solid var(--hairline)}" +
       SEL + " button.trb:disabled{opacity:.45;cursor:default}" +
       SEL + " .trerr{margin:10px 0 0;font-size:11.5px;line-height:1.5;color:var(--bad)}" +
+      SEL + " .trwarn{margin:10px 0 0;font-size:11.5px;line-height:1.5;" +
+        "color:var(--warn);text-wrap:pretty}" +
       SEL + " .trfoot{margin:14px 0 0;padding-top:12px;border-top:1px solid var(--hairline);" +
         "font-size:11px;line-height:1.55;color:var(--faint);text-wrap:pretty}" +
       SEL + " .trcode{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;" +
@@ -204,15 +212,23 @@
       E(state.to) + '"></label></div>';
   }
 
+  // `turns` from the route is the TOTAL; `turns_synthetic` is the subset that
+  // no metrics record explains — Recorder rows clustered on a time gap, i.e.
+  // Telegram and CLI work. Shown apart: one is a measured turn with tokens and
+  // prefill, the other is an inference from tool calls alone, and adding them
+  // up as one number quietly overstates what was actually recorded.
   function statsHTML(state) {
     var s = state.sum;
     if (!s) {
       return '<div class="trstats">' + stat("—", "traces", true) +
-        stat("—", "turns", true) + stat("—", "tool calls", true) +
-        stat("—", "truncations", true) + "</div>";
+        stat("—", "turns", true) + stat("—", "inferred turns", true) +
+        stat("—", "tool calls", true) + stat("—", "truncations", true) + "</div>";
     }
+    var syn = Number(s.turns_synthetic) || 0;
+    var real = Math.max(0, (Number(s.turns) || 0) - syn);
     return '<div class="trstats">' +
-      stat(num(s.traces), "traces") + stat(num(s.turns), "turns") +
+      stat(num(s.traces), "traces") + stat(num(real), "turns") +
+      stat(num(syn), "inferred turns", !syn) +
       stat(num(s.tool_spans), "tool calls") +
       stat(num(s.truncations), "truncations", !s.truncations) +
       stat(num(s.undone), "undone", !s.undone) + "</div>";
@@ -230,6 +246,9 @@
     }
     if (s.mean_prefill_s != null) bits.push("mean prefill " + secs(s.mean_prefill_s));
     if (s.mean_cached_pct != null) bits.push("mean cached " + pct(s.mean_cached_pct));
+    if (Number(s.turns_synthetic)) {
+      bits.push(num(s.turns_synthetic) + " inferred from tool calls alone");
+    }
     if (!bits.length) {
       return '<p class="trline">Nothing was recorded in ' + E(rangeLabel(state)) +
         ".</p>";
@@ -255,6 +274,7 @@
       ">" + E(state.busy === "otel" ? "Preparing…" : "Download OTLP JSON") + "</button>" +
       "</div>" +
       (state.err ? '<p class="trerr">' + E(state.err) + "</p>" : "") +
+      (state.warn ? '<p class="trwarn">' + E(state.warn) + "</p>" : "") +
       '<p class="trfoot">Load the OTLP file into Jaeger, Tempo or OpenObserve, ' +
       'or read the JSONL with <span class="trcode">jq</span>. At most ' +
       MAX_DAYS + " days per export.</p></div>";
@@ -296,7 +316,8 @@
     var mime = (fmt === "otel") ? "application/json" : "application/x-ndjson";
     var fname = "hermes-trace." + (fmt === "otel" ? "otlp.json" : "jsonl");
     var text = "";
-    S.busy = fmt; S.err = ""; paint();
+    var capped = "";
+    S.busy = fmt; S.err = ""; S.warn = ""; paint();
     try {
       var res = await fetch(url);
       if (!res.ok) {
@@ -308,11 +329,23 @@
       var cd = res.headers.get("Content-Disposition") || "";
       var m = cd.match(/filename="([^"]+)"/);
       if (m) fname = m[1];
+      // the export stopped at the span cap: the file is a PREFIX of the range,
+      // and nothing used to say so once it left the browser
+      if (res.headers.get("X-Hermes-Trace-Truncated")) {
+        var cap = Number(res.headers.get("X-Hermes-Trace-Span-Cap"));
+        capped = "This export stopped at the " +
+          (isFinite(cap) && cap > 0 ? num(cap) + "-span" : "span") +
+          " cap, so it covers only the start of " + rangeLabel(S) +
+          " — narrow the range for the rest.";
+      }
     } catch (e) {
       S.busy = ""; S.err = "Could not reach the dashboard."; paint(); return;
     }
-    S.busy = ""; paint();
+    S.busy = ""; S.warn = capped; paint();
     if (!text.length) { T("Nothing recorded in " + rangeLabel(S) + "."); return; }
+    // one toast, and the cap is the headline when there is one — a "saved!"
+    // toast over a half-complete file is the failure this fixes
+    if (capped) T(capped, 6000);
     // The Swift shell (app/main.swift, frozen) registers no WKDownloadDelegate,
     // so an <a download> of an attachment is silently dropped inside the app —
     // copy there, download in a real browser. The endpoint is a plain GET
@@ -320,7 +353,8 @@
     if (clipBridge()) {
       try {
         W.webkit.messageHandlers.hermesClipWrite.postMessage({ action: "write", text: text });
-        T("Copied as " + label); return;
+        if (!capped) T("Copied as " + label);
+        return;
       } catch (e) {}
     }
     try {
@@ -329,11 +363,14 @@
       a.href = URL.createObjectURL(new Blob([text], { type: mime }));
       a.download = fname; d.body.appendChild(a); a.click();
       setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
-      T("Exported as " + fname); return;
+      if (!capped) T("Exported as " + fname);
+      return;
     } catch (e) {}
     try {
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(text); T("Copied as " + label); return;
+        await navigator.clipboard.writeText(text);
+        if (!capped) T("Copied as " + label);
+        return;
       }
     } catch (e) {}
     T("Could not export — open " + url + " to save it.", 5000);
@@ -430,7 +467,10 @@
   W.hermesTrace = {
     cardHTML: cardHTML, CSS: CSS, rangeFor: rangeFor, rangeLabel: rangeLabel,
     midnight: midnight, ymd: ymd, num: num, secs: secs, pct: pct,
-    mount: mount, paint: paint, load: load, download: download, state: S,
-    refresh: async function () { S.sum = null; S.err = ""; await load(); paint(); }
+    mount: mount, paint: paint, load: load, download: download,
+    statsHTML: statsHTML, summaryLine: summaryLine, state: S,
+    refresh: async function () {
+      S.sum = null; S.err = ""; S.warn = ""; await load(); paint();
+    }
   };
 })();

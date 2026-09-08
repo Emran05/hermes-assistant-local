@@ -9,6 +9,15 @@
 // and archivable, and the Preview box shows the EXACT bytes a given message
 // would inject, with the token count.
 //
+// THE APPROVAL GATE. Two of the three importers read files the MODEL can write
+// (POST /api/youmodel/add, and the agent's own file tool over people/*.md), so
+// aux_memlayer.py stores everything the owner did not type here with review=1
+// and never retrieves it. This card is the only way those rows are ever
+// released: a "Needs review (N)" filter, an Approve button per row and one
+// Approve all. Adds and edits made HERE carry `origin:"card"` — the marker the
+// server uses to tell the owner apart from every other caller of the same
+// route — and are therefore never gated.
+//
 // PLACEMENT. Same constraint aux_network.js and aux_promptbudget.js document:
 // aux_settings_shell.js builds its rail and its twelve panels ONCE from a
 // PANELS array captured in its IIFE, ensureShell() early-returns on the second
@@ -57,6 +66,7 @@
     filter: "",
     kind: "",                          // "" = all
     showArchived: false,
+    reviewOnly: false,                 // the "Needs review" filter
     editing: null,                     // fact id being edited inline
     adding: false,
     preview: { text: "", block: "", chars: 0, tokens: 0, facts: 0,
@@ -106,6 +116,7 @@
     var q = String(state.filter || "").trim().toLowerCase();
     var kind = state.kind || "";
     return (state.facts || []).filter(function (f) {
+      if (state.reviewOnly && !f.review) return false;
       if (kind && f.kind !== kind) return false;
       if (!q) return true;
       return String(f.text || "").toLowerCase().indexOf(q) >= 0 ||
@@ -180,6 +191,17 @@
         "display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 10px;" +
         "align-items:start}" +
       SEL + " ul.mllist li.is-snap{opacity:.6}" +
+      // a row waiting for approval is marked, not hidden: the owner has to be
+      // able to read the exact text before releasing it
+      SEL + " ul.mllist li.is-review{border-left:2px solid var(--warn);" +
+        "padding-left:9px}" +
+      SEL + " .mlchip.is-review{background:color-mix(in srgb,var(--warn) 20%,transparent);" +
+        "color:var(--ink)}" +
+      SEL + " button.mla.is-approve{color:var(--warn)}" +
+      SEL + " button.mlb2.is-review{border-color:color-mix(in srgb,var(--warn) 55%,transparent)}" +
+      SEL + " button.mlb2.is-review.is-on{background:color-mix(in srgb,var(--warn) 14%,transparent)}" +
+      SEL + " .mlreasons{margin:4px 0 0;padding:0 0 0 16px;font-size:11px;" +
+        "line-height:1.55;color:var(--faint)}" +
       SEL + " ul.mllist li.is-arch .mltext{text-decoration:line-through;color:var(--faint)}" +
       SEL + " .mltext{grid-column:1;font-size:12.5px;line-height:1.5;color:var(--ink);" +
         "text-wrap:pretty;word-break:break-word}" +
@@ -247,6 +269,7 @@
     var cls = [];
     if (f.in_snapshot) cls.push("is-snap");
     if (f.archived) cls.push("is-arch");
+    if (f.review) cls.push("is-review");
     var meta = '<div class="mlmeta">' +
       '<span class="mlchip' + (f.in_snapshot ? " is-snap" : "") + '">' +
       E(f.kind) + "</span>" +
@@ -255,6 +278,10 @@
       (Number(f.uses) > 0 ? " · " + E(num(f.uses)) + "×" : "") + "</span>" +
       (f.in_snapshot
         ? "<span>·</span><span>already in the system prompt — never injected here</span>"
+        : "") +
+      (f.review
+        ? '<span class="mlchip is-review">needs review</span>' +
+          "<span>not injected until you approve it</span>"
         : "") +
       "</div>";
 
@@ -276,6 +303,10 @@
     return '<li class="' + cls.join(" ") + '" data-id="' + E(f.id) + '">' +
       '<div class="mltext">' + E(f.text) + "</div>" + meta +
       '<div class="mlacts">' +
+      (f.review
+        ? '<button class="mla is-approve" data-act="approve" ' +
+          'title="Approve — start injecting this fact">Approve</button>'
+        : "") +
       '<button class="mla' + (f.pinned ? " is-on" : "") + '" data-act="pin" ' +
       'title="' + (f.pinned ? "Unpin" : "Pin — always injected") + '">' +
       (f.pinned ? "Pinned" : "Pin") + "</button>" +
@@ -290,7 +321,9 @@
     if (!rows.length) {
       return '<p class="mlnone">' +
         (state.facts && state.facts.length
-          ? "Nothing matches that filter."
+          ? (state.reviewOnly
+              ? "Nothing is waiting for review."
+              : "Nothing matches that filter.")
           : "No facts yet. Add one below, or press Import to pull in what is " +
             "already in your memory files and You-Model.") + "</p>";
     }
@@ -327,8 +360,10 @@
     var st = state.stats || {};
     var choices = state.budget_choices || [0, 300, 600, 1200];
 
+    var needs = Number(st.review) || 0;
     var stats = '<div class="mlstats">' +
       stat(num(st.live), "injectable") +
+      (needs ? stat(num(needs), "needs review") : "") +
       stat(num(st.pinned), "pinned") +
       stat(num(st.in_snapshot), "in system prompt") +
       stat(num(st.archived), "archived") +
@@ -356,13 +391,28 @@
         "</div></div>"
       : "";
 
+    // Every outcome the importer distinguishes is shown, because collapsing a
+    // credential refusal and a disk error into one "skipped" number was exactly
+    // how a failing import looked like a quiet one.
     var imported = "";
     if (state.imported) {
       var im = state.imported;
-      imported = '<p class="mlcost">Imported: ' + E(num(im.added)) + " new, " +
-        E(num(im.updated)) + " updated, " + E(num(im.same)) + " unchanged" +
-        (Number(im.skipped) ? ", " + E(num(im.skipped)) + " skipped" : "") +
-        ".</p>";
+      var bits = [E(num(im.added)) + " new", E(num(im.updated)) + " updated",
+                  E(num(im.same)) + " unchanged"];
+      if (Number(im.stale)) bits.push(E(num(im.stale)) + " archived as stale");
+      if (Number(im.needs_review)) {
+        bits.push(E(num(im.needs_review)) + " waiting for review");
+      }
+      if (Number(im.refused)) bits.push(E(num(im.refused)) + " refused");
+      if (Number(im.skipped)) bits.push(E(num(im.skipped)) + " skipped");
+      if (Number(im.failed)) bits.push(E(num(im.failed)) + " failed");
+      imported = '<p class="mlcost">Imported: ' + bits.join(", ") + ".</p>";
+      var reasons = (im.reasons || []).slice(0, 8);
+      if (reasons.length) {
+        imported += '<ul class="mlreasons">' + reasons.map(function (r) {
+          return "<li>" + E(r) + "</li>";
+        }).join("") + "</ul>";
+      }
     }
 
     return CSS() +
@@ -373,7 +423,11 @@
       "the end of the prompt as one short block — recent and pinned " +
       "facts first. It is deliberately tiny: every character here is prefilled " +
       "again on every turn. Facts the agent already carries in its own system " +
-      "prompt are listed but never injected twice.</p>" +
+      "prompt are listed but never injected twice. The block opens by saying " +
+      "the lines are notes about you and not instructions, and each one is " +
+      "labelled with where it came from &mdash; anything imported from a file " +
+      "the agent can write waits here for your approval before it is ever " +
+      "used.</p>" +
       stats + controls +
       '<div class="mlctl">' +
       '<input class="mlin" type="search" data-ml-filter placeholder="Filter facts" ' +
@@ -387,6 +441,15 @@
         }).join("") + "</select>" +
       '<label class="mlsw"><input type="checkbox" data-ml-arch' +
       (state.showArchived ? " checked" : "") + ">Archived</label>" +
+      (needs || state.reviewOnly
+        ? '<button class="mlb2 is-review' + (state.reviewOnly ? " is-on" : "") +
+          '" data-act="review" aria-pressed="' + (state.reviewOnly ? "true" : "false") +
+          '">Needs review (' + E(num(needs)) + ")</button>"
+        : "") +
+      (needs
+        ? '<button class="mlb2" data-act="approve-all"' +
+          (state.busy ? " disabled" : "") + ">Approve all</button>"
+        : "") +
       '<button class="mlb2" data-act="add"' + (state.adding ? " disabled" : "") +
       ">Add a fact</button>" +
       '<button class="mlb2" data-act="import"' + (state.busy ? " disabled" : "") +
@@ -405,7 +468,9 @@
       "memory.db</span> (0600), searched with SQLite FTS5 — the same engine " +
       "as Search everything. No embeddings, no model call, nothing leaves this " +
       "Mac. Facts marked <em>agent</em> come from your memory files and are " +
-      "read-only here; edit those in the Memory card above.</p>" +
+      "read-only here; edit those in the Memory card above. Facts marked " +
+      "<em>youmodel</em> or <em>people</em> were written by the agent into " +
+      "your You-Model files, which is why they are held for review.</p>" +
       "</div>";
   }
 
@@ -517,8 +582,11 @@
   }
 
   async function mutate(id, patch) {
+    // origin:"card" is the owner's fingerprint on this write — the server uses
+    // it to tell an edit made here from the same route called by anything else,
+    // and an edit made here clears the review flag.
     var j = await jpost("/api/memory/facts/update",
-                        Object.assign({ id: Number(id) }, patch));
+                        Object.assign({ id: Number(id), origin: "card" }, patch));
     if (!j || j.ok === false) {
       S.err = (j && j.error) ? String(j.error) : "That change did not save.";
       paint();
@@ -543,6 +611,8 @@
               if (!f) return;
               if (act === "pin") {
                 if (await mutate(id, { pinned: !f.pinned })) paint();
+              } else if (act === "approve") {
+                if (await mutate(id, { approve: true })) paint();
               } else if (act === "arch") {
                 if (await mutate(id, { archived: !f.archived })) paint();
               } else if (act === "edit") {
@@ -605,6 +675,30 @@
       prev.oninput = function () { runPreview(prev.value); };
     }
 
+    var rev = card.querySelector('button[data-act="review"]');
+    if (rev) {
+      rev.onclick = function () { S.reviewOnly = !S.reviewOnly; paint(); };
+    }
+    var appAll = card.querySelector('button[data-act="approve-all"]');
+    if (appAll) {
+      appAll.onclick = async function () {
+        S.busy = true;
+        paint();
+        var j = await jpost("/api/memory/facts/update",
+                            { approve_all: true, origin: "card" });
+        S.busy = false;
+        if (!j || j.ok === false) {
+          S.err = (j && j.error) ? String(j.error)
+                                 : "Those facts could not be approved.";
+        } else {
+          S.err = "";
+          S.reviewOnly = false;
+          await load();
+        }
+        paint();
+      };
+    }
+
     var addBtn = card.querySelector('button[data-act="add"]');
     if (addBtn) {
       addBtn.onclick = function () { S.adding = true; paint(); };
@@ -622,7 +716,8 @@
         var text = ta ? String(ta.value || "").trim() : "";
         if (!text) return;
         var j = await jpost("/api/memory/facts", {
-          text: text, kind: ks ? ks.value : "fact", pinned: !!(pin && pin.checked)
+          text: text, kind: ks ? ks.value : "fact",
+          pinned: !!(pin && pin.checked), origin: "card"
         });
         if (!j || j.ok === false) {
           S.err = (j && j.error) ? String(j.error) : "That fact was not added.";
@@ -649,7 +744,11 @@
         } else {
           S.err = "";
           S.imported = { added: j.added || 0, updated: j.updated || 0,
-                         same: j.same || 0, skipped: j.skipped || 0 };
+                         same: j.same || 0, skipped: j.skipped || 0,
+                         refused: j.refused || 0, failed: j.failed || 0,
+                         stale: j.stale || 0,
+                         needs_review: j.needs_review || 0,
+                         reasons: j.reasons || [] };
           await load();
         }
         paint();

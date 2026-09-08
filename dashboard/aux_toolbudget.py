@@ -135,7 +135,9 @@ except Exception as _tb_e:                                             # noqa: F
 
 
 def _tb_read_enabled(src):
-    return _TB_HELPER.read_enabled(src) if _TB_HELPER else []
+    if not _TB_HELPER:
+        raise RuntimeError(_TB_HELPER_ERR)
+    return _TB_HELPER.read_enabled(src)
 
 
 def _tb_apply_enable(src, name):
@@ -147,18 +149,35 @@ def _tb_apply_enable(src, name):
 def _tb_enable_in_config():
     """Add tool-budget to plugins.enabled exactly once, through the shared
     helper (timestamped 0600 backup, atomic replace, original mode kept).
-    Returns (changed, backup_path); a no-op writes nothing at all."""
+    Returns (changed, backup_path); a no-op writes nothing at all.
+
+    Under server.py's `_state_lock` as well as the helper's own cross-process
+    flock on `config.yaml.lock`: the flock is what stops update.sh racing us,
+    the process lock is what stops two dashboard requests racing each other
+    before either reaches the flock."""
     if not _TB_HELPER:
         raise RuntimeError(_TB_HELPER_ERR)
-    return _TB_HELPER.enable(_TB_CFG, _TB_NAME, tag="toolbudget")
+    with _state_lock:                                                  # noqa: F821
+        return _TB_HELPER.enable(_TB_CFG, _TB_NAME, tag="toolbudget")
 
 
 def _tb_enabled_in_config():
+    """True / False / **None**.
+
+    None means UNKNOWN, and it is not a formality: without the helper this
+    returned [] from `_tb_read_enabled`, which read as "definitely not
+    enabled", so a broken install rendered the card's setup phase — an Install
+    button offered on a state nobody had actually read — and `helper_error`
+    was never shown. Unknown must stay unknown all the way to the UI."""
+    if not _TB_HELPER:
+        return None
     try:
         with open(_TB_CFG, encoding="utf-8") as fh:
             return _TB_NAME in _tb_read_enabled(fh.read())
-    except OSError:
-        return False
+    except FileNotFoundError:
+        return False            # no config at all: it is certainly not on
+    except Exception:
+        return None             # unreadable / unparseable: we do not know
 
 
 def _tb_context_length():
@@ -241,19 +260,41 @@ def _tb_install_plugin():
         return False, "could not install the plugin — %s" % e
 
 
+def _tb_busy_jobs():
+    """Is a chat turn running right now?
+
+    The same predicate aux_evals.py's `_ev_busy_jobs()` uses, reimplemented
+    rather than imported: aux modules exec into one shared globals dict in
+    sorted order, so importing across them would couple this card's routes to
+    another module's load order for three lines of code. `CHAT_JOBS` is
+    server.py's own and is resolved by NAME at call time."""
+    try:
+        return any(not v.get("done")
+                   for v in list(CHAT_JOBS.values()))                  # noqa: F821
+    except Exception:
+        return False
+
+
 def _tb_restart_serve():
     """launchctl kickstart -k on the serve gateway. Only ever from an explicit
-    {"restart": true} — it interrupts any agent turn in flight."""
+    {"restart": true}, and never while a turn is in flight (`_tb_post` refuses
+    first) — it interrupts any agent turn it lands on."""
     try:
         uid = _tb_os.getuid()
         r = _tb_subprocess.run(
             ["launchctl", "kickstart", "-k", "gui/%d/com.hermes.serve" % uid],
             capture_output=True, text=True, timeout=30)
-        if r.returncode == 0:
-            return True, ""
-        return False, (r.stderr or r.stdout or "").strip()[:200]
+        ok = r.returncode == 0
+        err = "" if ok else (r.stderr or r.stdout or "").strip()[:200]
     except Exception as e:
-        return False, "%s: %s" % (type(e).__name__, e)
+        ok, err = False, "%s: %s" % (type(e).__name__, e)
+    try:
+        print("[aux_toolbudget] restart com.hermes.serve -> %s%s"
+              % ("ok" if ok else "FAILED", (": " + err) if err else ""),
+              flush=True)
+    except Exception:
+        pass
+    return ok, err
 
 
 # ---------------------------------------------------------------------------
@@ -397,12 +438,19 @@ def _tb_payload():
     enabled_cfg = _tb_enabled_in_config()
     rows = _tb_log_rows()
     observed = _tb_observed(rows)
+    # enabled_cfg is True / False / None (unknown — see _tb_enabled_in_config).
+    # Every derived flag below has to keep the third state distinct: "we could
+    # not read it" must never collapse into "it is off", which is what made the
+    # card offer an Install button over a state nobody had read.
+    known = enabled_cfg is not None
     return {
         "ok": True,
         "installed": bool(inst.get("present")),
         "install": inst,
         "enabled_in_config": enabled_cfg,
-        "active": bool(inst.get("present")) and enabled_cfg and s["enabled"],
+        "config_state_known": known,
+        "active": bool(inst.get("present")) and enabled_cfg is True
+        and s["enabled"],
         "settings": s,
         "defaults": dict(_TB_DEFAULTS),
         "limits": {"min_chars": _TB_MIN_CHARS, "max_chars": _TB_MAX_CHARS},
@@ -418,7 +466,7 @@ def _tb_payload():
         # Plugins are discovered when the process starts, so turning the plugin
         # ON needs one restart. The three knobs do not — the plugin re-reads
         # settings.json on every over-budget call.
-        "restart_required": bool(inst.get("present") and enabled_cfg
+        "restart_required": bool(inst.get("present") and enabled_cfg is True
                                  and not observed
                                  and not _tb_serve_started_after(_tb_enabled_at())),
         "restart_note": ("Plugins load when the agent service starts, so a "
@@ -541,6 +589,15 @@ def _tb_post(ctx):
                 "error": "send at least one of enabled, max_chars, spill, "
                          "install, restart"}, 400
 
+    # A kickstart -k kills whatever the agent is mid-sentence on. Refuse
+    # BEFORE anything is written, so a refused request changes nothing at all
+    # and the caller can simply retry — the same rule aux_evals.py applies
+    # before it runs the suite.
+    if want_restart and _tb_busy_jobs():
+        return {"ok": False, "busy": True,
+                "error": "a chat turn is running right now — the restart would "
+                         "interrupt it; try again when it finishes"}, 409
+
     install_ok = False
     config_changed = False
     backup = None
@@ -552,9 +609,20 @@ def _tb_post(ctx):
             return {"ok": False, "error": err}, 500
         install_ok = True
         try:
+            print("[aux_toolbudget] installed the plugin at %s (source %s)"
+                  % (_TB_PLUGIN_DST, _TB_PLUGIN_SRC), flush=True)
+        except Exception:
+            pass
+        try:
             config_changed, backup = _tb_enable_in_config()
             if config_changed or not _tb_enabled_at():
                 _tb_mark_enabled()
+            try:
+                print("[aux_toolbudget] plugins.enabled %s %s (backup: %s)"
+                      % ("+= " + _TB_NAME if config_changed else "already had",
+                         _TB_CFG, backup or "none"), flush=True)
+            except Exception:
+                pass
         except (OSError, RuntimeError) as e:
             return {"ok": False,
                     "error": "the plugin is installed but %s could not be "

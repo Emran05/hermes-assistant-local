@@ -22,6 +22,14 @@
 // (runs bucketed by local date, averaged); the line over them is that day's
 // median case latency on its own right-hand scale.
 //
+// A BAR IS A MEASUREMENT, NOT A ROW COUNT. Two run shapes carry no verdict and
+// must never pull a day's bar to the floor: a case that ERRORED never reached
+// the model (so it is out of the denominator, and a run where every case
+// errored contributes nothing at all), and a SKIPPED day — total 0, the reason
+// in `error` — is a row saying the suite did not run. Either way the day is
+// drawn as a GAP, which is what "we did not measure this" looks like; a zero
+// bar would read as "the model failed everything".
+//
 // Design laws (CLAUDE.md): zero emoji, bespoke SVG only, 12-hour clock,
 // tabular numerals on every number, esc() on every interpolation, explicit
 // transition-property, >=40px targets, colours only through tokens all four
@@ -148,6 +156,10 @@
   // PURE: history rows -> one bucket per LOCAL DAY inside the range, oldest
   // first, with an entry for every day so the x-axis is a real calendar and a
   // gap reads as a gap rather than as a shorter bar.
+  //
+  // `total` is the MEASURED case count (total - errors), so a run that never
+  // reached the model neither lowers the rate nor drags the latency line down;
+  // a day with nothing measured gets rate null and is drawn as a gap.
   function bucketByDay(history, days, nowMs) {
     var out = [], by = {}, i;
     var now = new Date(nowMs == null ? Date.now() : nowMs);
@@ -158,22 +170,35 @@
       var r = history[i];
       if (!r || !isFinite(Number(r.ts)) || Number(r.ts) < first) continue;
       var k = dayKey(r.ts);
-      if (!by[k]) by[k] = { d: k, runs: 0, passed: 0, total: 0, lat: 0, last: null };
+      if (!by[k]) {
+        by[k] = { d: k, runs: 0, passed: 0, total: 0, lat: 0, latRuns: 0,
+                  errored: 0, skipped: 0, last: null };
+      }
+      var tot = Number(r.total) || 0;
+      var errs = Number(r.errors) || 0;
+      var measured = Math.max(0, tot - errs);
       by[k].runs += 1;
-      by[k].passed += Number(r.passed) || 0;
-      by[k].total += Number(r.total) || 0;
-      by[k].lat += Number(r.median_latency_ms) || 0;
       by[k].last = r;
+      if (measured > 0) {
+        by[k].passed += Number(r.passed) || 0;
+        by[k].total += measured;
+        by[k].lat += Number(r.median_latency_ms) || 0;
+        by[k].latRuns += 1;
+      } else if (tot > 0) { by[k].errored += 1; }   // every case errored
+      else { by[k].skipped += 1; }                  // the scheduler skipped it
     }
     var cur = new Date(start.getTime());
     for (i = 0; i < days; i++) {
       var key = cur.getFullYear() + "-" + pad2(cur.getMonth() + 1) + "-" + pad2(cur.getDate());
       var b = by[key];
       out.push(b
-        ? { d: key, runs: b.runs, rate: b.total ? b.passed / b.total : 0,
+        ? { d: key, runs: b.runs, rate: b.total ? b.passed / b.total : null,
             passed: b.passed, total: b.total,
-            median: Math.round(b.lat / b.runs), trigger: (b.last || {}).trigger || "" }
-        : { d: key, runs: 0, rate: null, passed: 0, total: 0, median: null, trigger: "" });
+            errored: b.errored, skipped: b.skipped,
+            median: b.latRuns ? Math.round(b.lat / b.latRuns) : null,
+            trigger: (b.last || {}).trigger || "" }
+        : { d: key, runs: 0, rate: null, passed: 0, total: 0, errored: 0,
+            skipped: 0, median: null, trigger: "" });
       cur.setDate(cur.getDate() + 1);
     }
     return out;
@@ -195,10 +220,14 @@
 
   // ---- the history chart (aux_mind_drill.js's idioms) ----------------------
   function chartHTML(buckets) {
-    var withRuns = (buckets || []).filter(function (b) { return b.runs > 0; });
+    var withRuns = (buckets || []).filter(function (b) { return b.rate !== null; });
     if (!withRuns.length) {
-      return '<div class="evhint">No eval runs recorded in the last ' +
-        E(String((buckets || []).length)) + " days.</div>";
+      var gaps = (buckets || []).filter(function (b) { return b.runs > 0; });
+      return '<div class="evhint">' + (gaps.length
+        ? "Nothing was measured in the last " + E(String((buckets || []).length)) +
+          " days — every run was skipped or could not reach the model."
+        : "No eval runs recorded in the last " +
+          E(String((buckets || []).length)) + " days.") + "</div>";
     }
     var Wd = 620, H = 156, padL = 34, padR = 40, padT = 12, padB = 22;
     var plotW = Wd - padL - padR, plotH = H - padT - padB, y0 = padT + plotH;
@@ -241,13 +270,16 @@
         ? '<text x="' + cx + '" y="' + (H - 7) + '" text-anchor="middle" ' +
           'class="evtick num">' + (+p[1]) + "/" + (+p[2]) + "</text>"
         : "";
-      if (b.runs === 0) { svg += xlab; return; }
+      // runs but nothing measured (all-error or skipped) is a GAP, not a zero
+      if (b.runs === 0 || b.rate === null) { svg += xlab; return; }
       var h = Math.max(1.5, (b.rate || 0) * plotH);
       var t = rateTone(b.rate);
       var col = t === "ok" ? "var(--ok)" : (t === "warn" ? "var(--warn)"
         : (t === "bad" ? "var(--bad)" : "var(--iris)"));
       var tip = lab + " · " + b.passed + "/" + b.total + " passed · median " +
-        ms(b.median) + (b.runs > 1 ? " · " + b.runs + " runs" : "");
+        ms(b.median) + (b.runs > 1 ? " · " + b.runs + " runs" : "") +
+        (b.errored ? " · " + b.errored + " could not reach the model" : "") +
+        (b.skipped ? " · " + b.skipped + " skipped" : "");
       svg += '<g class="evgrow"' + (reduce ? "" : ' style="animation-delay:' + (i * dly) + 'ms"') +
         "><title>" + E(tip) + "</title>" +
         roundTop(bx, y0 - h, barW, h, 4) + ' fill="' + col + '"/></g>';
@@ -257,7 +289,7 @@
     // median-latency line on the right-hand scale (only over days with runs)
     var pts = [];
     buckets.forEach(function (b, i) {
-      if (b.runs === 0 || !isFinite(Number(b.median))) return;
+      if (b.rate === null || !isFinite(Number(b.median))) return;
       pts.push([padL + slot * i + slot / 2, y0 - (b.median / latMax) * plotH]);
     });
     if (pts.length > 1) {
@@ -281,7 +313,9 @@
       // a lie — say what the colours mean, once, in words
       '<p class="evcap">A bar is one day. Green means all nine cases passed, ' +
       "amber that fewer than three quarters did. The line is that day's median " +
-      "case latency on the right-hand scale.</p>";
+      "case latency on the right-hand scale. A day the suite skipped, or one " +
+      "where no case could reach the model, is left blank rather than drawn " +
+      "as a zero.</p>";
   }
 
   function segHTML(days) {
@@ -348,6 +382,11 @@
       SEL + " ul.evcases li .evdetail{grid-column:2/span 2;font-size:11px;line-height:1.5;" +
         "color:var(--muted);text-wrap:pretty;overflow-wrap:anywhere}" +
       SEL + " ul.evcases li.is-fail .evdetail{color:var(--bad)}" +
+      SEL + " ul.evcases li.is-error .evdetail{color:var(--warn)}" +
+      SEL + " ul.evcases li .evtag{font-size:9.5px;font-weight:640;line-height:1;" +
+        "letter-spacing:.04em;text-transform:uppercase;color:var(--warn);" +
+        "border:1px solid var(--warn);border-radius:5px;padding:2px 4px;" +
+        "margin-left:6px;vertical-align:1px;white-space:nowrap}" +
       // controls
       SEL + " .evbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:14px 0 0;" +
         "padding-top:12px;border-top:1px solid var(--hairline)}" +
@@ -400,6 +439,12 @@
     '<circle cx="8" cy="8" r="7" fill="none" stroke="var(--bad)" stroke-width="1.5"/>' +
     '<path d="M5.4 5.4l5.2 5.2M10.6 5.4l-5.2 5.2" fill="none" stroke="var(--bad)" ' +
     'stroke-width="1.8" stroke-linecap="round"/></svg>';
+  // the third state: the case never reached the model, so it is neither a tick
+  // nor a cross — an amber "unmeasured", the same colour the bar scale uses.
+  var BANG = '<svg class="evmark" viewBox="0 0 16 16" aria-hidden="true">' +
+    '<circle cx="8" cy="8" r="7" fill="none" stroke="var(--warn)" stroke-width="1.5"/>' +
+    '<path d="M8 4.6v4.2" fill="none" stroke="var(--warn)" stroke-width="1.8" ' +
+    'stroke-linecap="round"/><circle cx="8" cy="11.4" r="1" fill="var(--warn)"/></svg>';
 
   function stat(value, label, tone, text) {
     return '<div class="evstat' + (tone ? " is-" + tone : "") +
@@ -423,17 +468,21 @@
       (sub ? "<span>" + E(sub) + "</span>" : "") + "</div>" + control + "</div>";
   }
 
+  // real failures first, then the cases that could not be measured, then the
+  // passes — the point of the table is what broke, and "we never got an answer"
+  // is a different thing from "the answer was wrong".
+  function caseRank(c) { return c.passed ? 2 : (c.error ? 1 : 0); }
+
   function casesHTML(results) {
     var rows = (results || []).slice();
     if (!rows.length) return "";
-    // fails first, then in run order — the point of the table is what broke
-    rows.sort(function (a, b) {
-      return (a.passed === b.passed) ? 0 : (a.passed ? 1 : -1);
-    });
+    rows.sort(function (a, b) { return caseRank(a) - caseRank(b); });
     return '<ul class="evcases">' + rows.map(function (c) {
-      return '<li class="' + (c.passed ? "is-pass" : "is-fail") + '">' +
-        (c.passed ? TICK : CROSS) +
-        "<b>" + E(c.label || c.case) + "</b>" +
+      var cls = c.passed ? "is-pass" : (c.error ? "is-error" : "is-fail");
+      return '<li class="' + cls + '">' +
+        (c.passed ? TICK : (c.error ? BANG : CROSS)) +
+        "<b>" + E(c.label || c.case) +
+        (c.error && !c.passed ? '<span class="evtag">error</span>' : "") + "</b>" +
         '<span class="evms num">' + E(ms(c.latency_ms)) + "</span>" +
         '<span class="evdetail">' + E(c.detail || "") + "</span></li>";
     }).join("") + "</ul>";
@@ -484,6 +533,11 @@
     var last = d.last;
     var total = last ? (Number(last.total) || 0) : 0;
     var passed = last ? (Number(last.passed) || 0) : 0;
+    var errs = last ? (Number(last.errors) || 0) : 0;
+    // a run with total 0 is the row the scheduler writes when it marked the day
+    // done without running — say so, rather than showing "0/0 passed"
+    var skipped = !!(last && total === 0);
+    var allErr = !!(last && total > 0 && errs >= total);
 
     var head = CSS() + "<h2>" + GLY + "Evals" +
       '<span class="tiny num">' + E(String(d.cases_total || 9)) + " cases</span></h2>";
@@ -493,15 +547,25 @@
       "format contracts (strict JSON, a Markdown table, one sentence). Nothing is ever " +
       "executed, no model is switched, and on battery nothing runs at all.</p>";
 
+    var triggerLabel = !last ? "—"
+      : (skipped ? "Skipped"
+        : (last.trigger === "scheduled" ? "Scheduled" : "Manual"));
+    var passedStat = !last ? ""
+      : (skipped ? stat("skipped", "last outcome", "warn", true)
+        : (allErr ? stat("no answer", "last outcome", "warn", true)
+          : stat(passed + "/" + (total - errs), "passed",
+                 tone(passed, total - errs))));
     var stats = last
-      ? '<div class="evstats">' +
-        stat(passed + "/" + total, "passed", tone(passed, total)) +
-        stat(ms(last.median_latency_ms), "median case") +
+      ? '<div class="evstats">' + passedStat +
+        stat(skipped ? "—" : ms(last.median_latency_ms), "median case") +
         stat(when(last.ts), "last run", "", true) +
-        stat(last.trigger === "scheduled" ? "Scheduled" : "Manual", "trigger", "", true) +
+        stat(triggerLabel, "trigger", "", true) +
         "</div>"
       : '<div class="evstats">' + stat("—", "passed") + stat("—", "median case") +
-        stat("never", "last run", "", true) + stat("—", "trigger", "", true) + "</div>";
+        // a store that cannot be opened has no history to be missing: say that
+        // instead of "never", which reads as "it has simply not run yet"
+        stat(d.store_error ? "unavailable" : "never", "last run", "", true) +
+        stat("—", "trigger", "", true) + "</div>";
 
     var chart = '<div class="evhead"><h3>History</h3>' + segHTML(state.days) + "</div>" +
       chartHTML(bucketByDay(d.history || [], state.days));
@@ -521,8 +585,25 @@
 
     var err = state.err ? '<p class="everr">' + E(state.err) + "</p>" : "";
     var notice = state.notice ? '<p class="evnote">' + E(state.notice) + "</p>" : "";
-    var lastErr = (last && last.error)
-      ? '<p class="everr">Last run reported: ' + E(last.error) + "</p>" : "";
+    var lastErr = "";
+    if (last && last.error && skipped) {
+      lastErr = '<p class="evnote">Skipped: ' + E(last.error) +
+        " — nothing was asked of the model.</p>";
+    } else if (last && last.error) {
+      lastErr = '<p class="everr">Last run reported: ' + E(last.error) + "</p>";
+    } else if (errs > 0) {
+      // a partial infrastructure failure: the score is over what was actually
+      // measured, so say how many cases never got an answer to be scored
+      lastErr = '<p class="evnote">' + E(String(errs)) + " of " +
+        E(String(total)) + " cases could not reach the model and are not " +
+        "counted in the score.</p>";
+    }
+    // the store itself, not a run: while this is set the scheduler holds off
+    // entirely, because a suite it cannot record would repeat every minute
+    var storeErr = d.store_error
+      ? '<p class="everr">The eval store could not be opened: ' +
+        E(d.store_error) + " — scheduled runs are held until it can be " +
+        "written again.</p>" : "";
 
     var foot = '<p class="evfoot">Results live in ' +
       "<span>~/.hermes/dashboard/evals.db</span> (0600) and never leave this Mac. The " +
@@ -530,7 +611,7 @@
       "so a scheduled run can never overwrite a drill result.</p>";
 
     return head + '<div class="body">' + lede + stats + chart + cases + lastErr +
-      bar + scheduleHTML(cfg, d) + notice + err + foot + "</div>";
+      storeErr + bar + scheduleHTML(cfg, d) + notice + err + foot + "</div>";
   }
 
   // ---- data ----------------------------------------------------------------
@@ -719,6 +800,7 @@
   W.hermesEvals = {
     cardHTML: cardHTML, CSS: CSS, chartHTML: chartHTML, casesHTML: casesHTML,
     scheduleHTML: scheduleHTML, bucketByDay: bucketByDay, niceMax: niceMax,
+    caseRank: caseRank,
     num: num, ms: ms, when: when, clock: clock, hhmm12: hhmm12, tone: tone,
     rateTone: rateTone,
     mount: mount, paint: paint, runNow: runNow, state: S,

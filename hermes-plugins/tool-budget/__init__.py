@@ -49,6 +49,19 @@ WHAT IT DOES
   `~/.hermes/dashboard/spill/<YYYY-MM-DD>/<tool>-<8hex>.txt` (dir 0700, file
   0600) and the marker between head and tail names the path, so the model can
   get the rest with `read_file` + an offset or `search_files` over it.
+  Day-directories older than seven days are deleted by `_gc_spill()`, which
+  runs once per day from the first over-budget call AND once from `register()`
+  — a machine that stops going over budget must still shed the last week
+  rather than keeping it forever.  That cache is real on-disk exposure, so it
+  is named in the "What stays local" list of Settings › Connections › Data &
+  Network; if the retention or the path changes, change that row too.
+
+WHEN THE SPILL ITSELF FAILS
+---------------------------
+The marker has THREE branches, not two: saved, "spill is off" (the owner's
+choice), and "could NOT be saved to disk".  Printing the owner's choice when
+the disk actually refused the write told the model — and the log — the one
+comforting thing that was not true.  The JSONL row carries `spill_failed`.
 
 THE MARKER SAYS "TRUNCATED", NOT "BROKEN"
 -----------------------------------------
@@ -82,6 +95,7 @@ import datetime
 import json
 import os
 import shutil
+import sys
 import threading
 
 # ---------------------------------------------------------------------------
@@ -113,6 +127,23 @@ _LOG_MAX_BYTES = 2 * 1024 * 1024      # rotate tool-budget.jsonl at ~2 MB
 
 _lock = threading.Lock()
 _gc_day = [""]                        # last date the spill GC ran (mutable box)
+
+# Fail-open is right; fail-SILENT is not. Both swallowing paths below say so
+# once per process on stderr (which lands in ~/.hermes/logs/serve.log), and
+# never again: this runs on every tool call, so a repeating failure must not
+# become the log.
+_said = {"hook": False, "log": False}
+
+
+def _complain(slot, msg):
+    """One stderr line the FIRST time a swallowed failure happens."""
+    if _said.get(slot):
+        return
+    _said[slot] = True
+    try:
+        print("tool-budget: " + msg, file=sys.stderr, flush=True)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -250,10 +281,24 @@ def _display_path(path):
 # ---------------------------------------------------------------------------
 # the retention function — PURE, and the thing the unit tests drive
 # ---------------------------------------------------------------------------
-def _marker(omitted_lines, omitted_chars, spill_path):
-    where = (" full output saved to %s; use read_file with an offset, or "
-             "search_files on it —" % _display_path(spill_path)) if spill_path \
-        else " the omitted middle was not saved (spill is off) —"
+def _marker(omitted_lines, omitted_chars, spill_path, spill_failed=False):
+    """The note that replaces the middle.
+
+    THREE branches, not two. "(spill is off)" was printed both when the owner
+    had switched spilling off and when the spill WRITE had failed — the model
+    was told the middle was deliberately discarded when in fact the disk had
+    refused it, which is the one case a human needs to know about. `spill_failed`
+    is the caller's intent ("I tried and could not"), so the third branch says
+    exactly that.
+    """
+    if spill_path:
+        where = (" full output saved to %s; use read_file with an offset, or "
+                 "search_files on it —" % _display_path(spill_path))
+    elif spill_failed:
+        where = (" the full output could NOT be saved to disk, so the omitted "
+                 "middle is gone; re-run the tool to see it —")
+    else:
+        where = " the omitted middle was not saved (spill is off) —"
     return ("\n[… %s lines / %s chars omitted by tool-budget —%s the tool "
             "SUCCEEDED and its output was complete; this text was TRUNCATED "
             "to fit the context window, it is not an error and not a partial "
@@ -261,7 +306,7 @@ def _marker(omitted_lines, omitted_chars, spill_path):
                              format(omitted_chars, ","), where))
 
 
-def retain(text, max_chars, tool_name="", spill_path=None):
+def retain(text, max_chars, tool_name="", spill_path=None, spill_failed=False):
     """Return `text` cut down to about `max_chars`, head + marker + tail.
 
     Pure and side-effect free — the spill is written by the caller and its
@@ -279,7 +324,7 @@ def retain(text, max_chars, tool_name="", spill_path=None):
     # Reserve room for the marker using its worst case (both counters at
     # len(text)), so the real marker — whose numbers are smaller — always
     # fits inside what we reserved.  Deterministic, one pass, no iteration.
-    reserve = len(_marker(len(text), len(text), spill_path))
+    reserve = len(_marker(len(text), len(text), spill_path, spill_failed))
     budget = max_chars - reserve
     if budget < 200:
         # A pathologically small budget: keep the head only, still marked.
@@ -305,7 +350,8 @@ def retain(text, max_chars, tool_name="", spill_path=None):
 
     omitted_chars = len(text) - len(head) - len(tail)
     omitted_lines = max(0, text.count("\n") - head.count("\n") - tail.count("\n"))
-    return head + _marker(omitted_lines, omitted_chars, spill_path) + tail
+    return head + _marker(omitted_lines, omitted_chars, spill_path,
+                          spill_failed) + tail
 
 
 def _minified_json(text, max_chars):
@@ -329,11 +375,17 @@ def _minified_json(text, max_chars):
 # accounting
 # ---------------------------------------------------------------------------
 def _append_log(row):
-    """One JSON line per truncation, rotated at ~2 MB. Best effort."""
+    """One JSON line per truncation, rotated at ~2 MB. Best effort — but a
+    best effort that says so once when it fails, because the dashboard card
+    reads this file to decide whether the plugin is running at all: a silently
+    unwritable log reads there as "the plugin never loaded"."""
     path = _log_file()
     try:
         line = json.dumps(row, ensure_ascii=False) + "\n"
-    except Exception:
+    except Exception as e:
+        _complain("log", "the truncation log row could not be encoded, "
+                         "accounting is incomplete — %s: %s"
+                         % (type(e).__name__, e))
         return
     try:
         os.makedirs(_dash_dir(), mode=0o700, exist_ok=True)
@@ -349,8 +401,11 @@ def _append_log(row):
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             with os.fdopen(fd, "a", encoding="utf-8") as fh:
                 fh.write(line)
-        except Exception:
-            pass
+        except Exception as e:
+            _complain("log", "the truncation log could not be written (%s), "
+                             "results are still trimmed but the dashboard will "
+                             "report nothing — %s: %s"
+                             % (path, type(e).__name__, e))
 
 
 # ---------------------------------------------------------------------------
@@ -384,13 +439,21 @@ def transform_tool_result(tool_name="", args=None, result="", session_id="",
         if minified is not None:
             return minified
 
+        # The INTENT has to travel with the outcome: "spill is off" and "the
+        # spill failed" are different sentences to put in front of a model.
         spill_path = None
-        if cfg["spill"]:
+        spill_wanted = bool(cfg["spill"])
+        if spill_wanted:
             _maybe_gc()
             spill_path = _spill_write(tool_name, result)
+        spill_failed = spill_wanted and not spill_path
+        if spill_failed:
+            _complain("spill", "the full output could not be written under %s; "
+                               "results are still trimmed but the omitted "
+                               "middle is not recoverable" % _spill_root())
 
         out = retain(result, max_chars, tool_name=tool_name,
-                     spill_path=spill_path)
+                     spill_path=spill_path, spill_failed=spill_failed)
         if not isinstance(out, str) or out == result:
             return None
 
@@ -403,12 +466,25 @@ def transform_tool_result(tool_name="", args=None, result="", session_id="",
             "omitted_chars": max(0, omitted),
             "est_tokens_saved": int(round(max(0, omitted) / _CHARS_PER_TOKEN)),
             "spill_path": spill_path or "",
+            "spill_failed": spill_failed,
             "session": str(session_id or task_id or turn_id or ""),
         })
         return out
-    except Exception:
+    except Exception as e:
+        # Fail-open, and SAY SO. Before this line a broken hook meant every
+        # tool result silently entered the window untrimmed with nothing
+        # anywhere to explain why the dashboard card had stopped counting.
+        _complain("hook", "hook failed, results pass through untrimmed — "
+                          "%s: %s" % (type(e).__name__, e))
         return None
 
 
 def register(ctx):
+    # Best-effort GC at load, not only inside an over-budget call: a machine
+    # that stops going over budget would otherwise keep the last week of full
+    # tool outputs on disk forever, since nothing else ever visits the tree.
+    try:
+        _maybe_gc()
+    except Exception:
+        pass
     ctx.register_hook("transform_tool_result", transform_tool_result)

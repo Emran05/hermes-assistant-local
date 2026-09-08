@@ -82,6 +82,9 @@
 # foreign global at module load: `HERMES`, `HOME` and `_hermes_env` are
 # server.py's own (defined before any aux exec), and everything else is resolved
 # inside a request.
+import binascii as _pb_binascii
+import contextlib as _pb_contextlib
+import fcntl as _pb_fcntl
 import json as _pb_json
 import os as _pb_os
 import re as _pb_re
@@ -174,6 +177,22 @@ _PB_KEYS_FALLBACK = [
 
 _pb_lock = _pb_threading.Lock()
 _pb_cache = {"at": 0.0, "payload": None}
+
+# Single-flight for the two subprocess-backed measurements. `hermes prompt-size`
+# and the venv probe each start a fresh Python that imports the whole tool
+# registry (seconds of CPU, tens of MB), so N concurrent `?fresh=1` calls must
+# cost ONE pair of interpreters, not N. `_pb_payload` also coalesces: a caller
+# that waited for a build which finished AFTER it asked takes that answer
+# instead of starting its own.
+_pb_build_lock = _pb_threading.Lock()
+
+# The advisory lock every writer of config.yaml takes. Same PATH as
+# hermes-plugins/plugin_enable.py's `config_lock()` — that shared path, not
+# shared code, is what makes the dashboard, install.sh and update.sh serialise
+# against each other (this module must not import the plugin helper: it edits a
+# different key and has to keep working when the helper is missing).
+_PB_LOCK_FILE = _PB_CFG + ".lock"
+_PB_LOCK_TIMEOUT = 20.0
 
 
 # ---------------------------------------------------------------------------
@@ -404,78 +423,127 @@ def _pb_prompt_size():
 # the lines of one platform's block and leaves every other byte of the file
 # alone, comments included.
 
-def _pb_read_toolsets():
+# BLOCK SCOPING.  A key inside `platform_toolsets:` is matched at the block's
+# OWN child indent, captured from its first child line, and blank lines and
+# comments are NEVER a block boundary.  Both matter: a `# note` in column 0 used
+# to read as the end of the block, after which `cli:` was "not found" and a
+# SECOND `cli:` key was written at the top while the real one still sat below
+# the comment — a config with a duplicate key, silently resolved by whichever
+# one PyYAML kept.  Same discipline as hermes-plugins/plugin_enable.py.
+def _pb_skippable(line):
+    s = line.strip()
+    return (not s) or s.startswith("#")
+
+
+def _pb_indent_of(line):
+    return len(line) - len(line.lstrip())
+
+
+def _pb_block_end(lines, start):
+    """Index one past the last line of the block opened at `start`."""
+    for i in range(start + 1, len(lines)):
+        if _pb_skippable(lines[i]):
+            continue
+        if _pb_indent_of(lines[i]) == 0:
+            return i
+    return len(lines)
+
+
+def _pb_child_indent(lines, start, end):
+    """Indent of the block's own children, from its first child line."""
+    for i in range(start + 1, end):
+        if _pb_skippable(lines[i]):
+            continue
+        return _pb_indent_of(lines[i])
+    return None
+
+
+def _pb_find_block(lines):
+    for i, line in enumerate(lines):
+        if _pb_re.match(r"^platform_toolsets:\s*$", line):
+            return i
+    return None
+
+
+def _pb_parse_toolsets(text):
     """{platform: [names]} parsed out of the `platform_toolsets:` block.
 
     A platform present with no list reads as []; a platform absent is absent.
-    Returns {} when the file or the block is missing.
+    Returns {} when the block is missing. PURE, so the harness can drive every
+    shape without a config file.
     """
     out = {}
-    try:
-        with open(_PB_CFG, encoding="utf-8") as fh:
-            lines = fh.read().splitlines()
-    except OSError:
+    lines = text.splitlines()
+    start = _pb_find_block(lines)
+    if start is None:
         return out
-    inblock = False
+    end = _pb_block_end(lines, start)
+    child = _pb_child_indent(lines, start, end)
+    if child is None:
+        return out
     plat = None
-    for line in lines:
-        if _pb_re.match(r"^\S", line):                   # a top-level key
-            inblock = bool(_pb_re.match(r"^platform_toolsets:\s*$", line))
+    for i in range(start + 1, end):
+        line = lines[i]
+        if _pb_skippable(line):
+            continue
+        ind = _pb_indent_of(line)
+        if ind == child:                             # a platform key
+            m = _pb_re.match(r"^\s*([A-Za-z0-9_.-]+):\s*$", line)
+            if m:
+                plat = m.group(1)
+                out.setdefault(plat, [])
+                continue
+            # an inline scalar (`cli: something`) — record that the key exists,
+            # but never as a list we would round-trip
+            m = _pb_re.match(r"^\s*([A-Za-z0-9_.-]+):\s*\S", line)
+            if m:
+                out.setdefault(m.group(1), [])
             plat = None
             continue
-        if not inblock:
-            continue
-        if not line.strip() or line.strip().startswith("#"):
-            continue
-        m = _pb_re.match(r"^\s{2}([A-Za-z0-9_.-]+):\s*$", line)
-        if m:
-            plat = m.group(1)
-            out.setdefault(plat, [])
-            continue
-        m = _pb_re.match(r"^\s{4,}-\s*(.+?)\s*$", line)
-        if m and plat is not None:
-            out[plat].append(m.group(1).strip().strip('"\''))
-            continue
-        # an inline scalar (`cli: something`) — record it so callers can see the
-        # key exists, but never as a list we would round-trip
-        m = _pb_re.match(r"^\s{2}([A-Za-z0-9_.-]+):\s*(\S.*)$", line)
-        if m:
-            plat = None
-            out.setdefault(m.group(1), [])
+        if ind > child and plat is not None:
+            m = _pb_re.match(r"^\s+-\s*(.+?)\s*$", line)
+            if m:
+                out[plat].append(m.group(1).strip().strip('"\''))
     return out
 
 
-def _pb_render(platform, items):
-    return ("  %s:\n" % platform) + "".join("    - %s\n" % t for t in items)
+def _pb_read_toolsets():
+    try:
+        with open(_PB_CFG, encoding="utf-8") as fh:
+            return _pb_parse_toolsets(fh.read())
+    except OSError:
+        return {}
+
+
+def _pb_render(platform, items, indent=2):
+    pad = " " * indent
+    return ("%s%s:\n" % (pad, platform)) + "".join("%s  - %s\n" % (pad, t)
+                                                   for t in items)
 
 
 def _pb_apply_text(src, platform, items):
     """Pure: return `src` with platform_toolsets.<platform> set to `items`
     (None removes the platform). Byte-identical when nothing changes."""
     lines = src.splitlines(True)
-    # locate the platform_toolsets block
-    start = None
-    for i, line in enumerate(lines):
-        if _pb_re.match(r"^platform_toolsets:\s*$", line):
-            start = i
-            break
+    start = _pb_find_block(lines)
     if start is None:
         if items is None:
             return src
         tail = "" if (not src or src.endswith("\n")) else "\n"
         return src + tail + "platform_toolsets:\n" + _pb_render(platform, items)
 
-    end = len(lines)
-    for i in range(start + 1, len(lines)):
-        if lines[i].strip() and _pb_re.match(r"^\S", lines[i]):
-            end = i
-            break
+    end = _pb_block_end(lines, start)
+    child = _pb_child_indent(lines, start, end)
+    ind = 2 if child is None else child
 
-    # locate this platform inside the block
+    # locate this platform at the block's own child indent
     p_at = None
     for i in range(start + 1, end):
-        if _pb_re.match(r"^\s{2}%s:\s*$" % _pb_re.escape(platform), lines[i]) or \
-           _pb_re.match(r"^\s{2}%s:\s*\S" % _pb_re.escape(platform), lines[i]):
+        if _pb_skippable(lines[i]):
+            continue
+        if _pb_indent_of(lines[i]) != ind:
+            continue
+        if _pb_re.match(r"^\s*%s:\s*($|\S)" % _pb_re.escape(platform), lines[i]):
             p_at = i
             break
 
@@ -484,15 +552,22 @@ def _pb_apply_text(src, platform, items):
             return src
         # first key in the block, so the entry a reader is looking for is the
         # one at the top rather than buried under eleven chat platforms
-        out = lines[:start + 1] + [_pb_render(platform, items)] + lines[start + 1:]
+        out = lines[:start + 1] + [_pb_render(platform, items, ind)] + \
+            lines[start + 1:]
         return "".join(out)
 
-    p_end = end
+    # One PAST the last line that genuinely belongs to this platform. Comments
+    # and blanks are not boundaries, but they are not claimed either: a trailing
+    # `# note` after the last item stays outside the replaced range and
+    # survives, while the platform's own items are all rewritten.
+    p_end = p_at + 1
     for i in range(p_at + 1, end):
-        if _pb_re.match(r"^\s{2}\S", lines[i]):
-            p_end = i
-            break
-    repl = [] if items is None else [_pb_render(platform, items)]
+        if _pb_skippable(lines[i]):
+            continue                                 # decide on the next line
+        if _pb_indent_of(lines[i]) <= ind:
+            break                                    # a sibling platform key
+        p_end = i + 1
+    repl = [] if items is None else [_pb_render(platform, items, ind)]
     return "".join(lines[:p_at] + repl + lines[p_end:])
 
 
@@ -508,32 +583,113 @@ def _pb_backup():
     return dst
 
 
+@_pb_contextlib.contextmanager
+def _pb_config_lock(timeout=_PB_LOCK_TIMEOUT):
+    """`flock(LOCK_EX)` on `config.yaml.lock`, the SAME path
+    hermes-plugins/plugin_enable.py locks, so the dashboard's two config
+    editors and update.sh's `plugin_enable.py` run cannot interleave.
+
+    Advisory, and on a separate file: config.yaml itself is replaced by
+    `os.replace`, so a lock on its inode would stop guarding the path the
+    moment the first writer finished.
+    """
+    fd = _pb_os.open(_PB_LOCK_FILE, _pb_os.O_CREAT | _pb_os.O_RDWR, 0o600)
+    try:
+        deadline = _pb_time.time() + max(0.0, float(timeout))
+        while True:
+            try:
+                _pb_fcntl.flock(fd, _pb_fcntl.LOCK_EX | _pb_fcntl.LOCK_NB)
+                break
+            except OSError:
+                if _pb_time.time() >= deadline:
+                    raise TimeoutError(
+                        "another process is still writing %s (waited %gs)"
+                        % (_PB_CFG, timeout))
+                _pb_time.sleep(0.05)
+        try:
+            yield
+        finally:
+            try:
+                _pb_fcntl.flock(fd, _pb_fcntl.LOCK_UN)
+            except OSError:
+                pass
+    finally:
+        try:
+            _pb_os.close(fd)
+        except OSError:
+            pass
+
+
+def _pb_atomic_write(path, text, mode):
+    """Replace `path` through a UNIQUELY named temp file in the same directory.
+
+    The old fixed `.promptbudget.tmp` name was the concurrency bug: two writers
+    either clobbered each other's half-written bytes or raced `os.replace` into
+    a FileNotFoundError. O_EXCL + pid + a random token cannot collide, and the
+    temp file is 0600 from birth.
+    """
+    directory = _pb_os.path.dirname(path) or "."
+    token = _pb_binascii.hexlify(_pb_os.urandom(4)).decode("ascii")
+    tmp = _pb_os.path.join(directory, "%s.tmp-%d-%s"
+                           % (_pb_os.path.basename(path), _pb_os.getpid(), token))
+    fd = _pb_os.open(tmp, _pb_os.O_CREAT | _pb_os.O_EXCL | _pb_os.O_WRONLY, 0o600)
+    try:
+        with _pb_os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            _pb_os.fsync(fh.fileno())
+        try:
+            _pb_os.chmod(tmp, mode)
+        except OSError:
+            pass
+        _pb_os.replace(tmp, path)
+    except BaseException:
+        try:
+            _pb_os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _pb_fmt_sel(sel):
+    """A selection as one short string for the log line."""
+    if sel is None:
+        return "(inherit)"
+    return ",".join(sel) if sel else "(empty)"
+
+
 def _pb_write_toolsets(platform, items):
     """Set (or with items=None remove) platform_toolsets.<platform>.
 
     Returns (changed, backup_path). A no-op write touches nothing at all — not
     the file, not a backup — so the config stays byte-identical.
+
+    The read -> apply -> replace is one critical section under BOTH server.py's
+    `_state_lock` (this process) and the config flock (every process), so a
+    second writer sees this edit rather than the text we started from.
     """
-    with open(_PB_CFG, encoding="utf-8") as fh:
-        src = fh.read()
-    new = _pb_apply_text(src, platform, items)
-    if new == src:
-        return False, None
-    bak = _pb_backup()
+    with _state_lock:                                        # noqa: F821
+        with _pb_config_lock():
+            with open(_PB_CFG, encoding="utf-8") as fh:
+                src = fh.read()
+            new = _pb_apply_text(src, platform, items)
+            if new == src:
+                return False, None
+            before = _pb_parse_toolsets(src).get(platform)   # None when absent
+            bak = _pb_backup()
+            try:
+                mode = _pb_os.stat(_PB_CFG).st_mode & 0o777
+            except OSError:
+                mode = 0o600
+            _pb_atomic_write(_PB_CFG, new, mode)
+    # Always leave a trace, the way _cb_set_escalation does: this rewrites the
+    # tool list of every future conversation, and "why does the agent not have
+    # the browser any more" must be answerable from the log.
     try:
-        mode = _pb_os.stat(_PB_CFG).st_mode & 0o777
-    except OSError:
-        mode = 0o600
-    tmp = _PB_CFG + ".promptbudget.tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(new)
-        fh.flush()
-        _pb_os.fsync(fh.fileno())
-    try:
-        _pb_os.chmod(tmp, mode)
-    except OSError:
+        print("[aux_promptbudget] platform_toolsets.%s %s -> %s"
+              % (platform, _pb_fmt_sel(before), _pb_fmt_sel(items)), flush=True)
+    except Exception:
         pass
-    _pb_os.replace(tmp, _PB_CFG)
     return True, bak
 
 
@@ -582,12 +738,6 @@ def _pb_strip_emoji(label):
 
 
 def _pb_build(fresh=False, selection_override=None):
-    ps, ps_err = None, None
-    try:
-        ps = _pb_prompt_size()
-    except Exception as e:
-        ps_err = "%s: %s" % (type(e).__name__, e)
-
     cfg_ts = _pb_read_toolsets()
     current = cfg_ts.get(_PB_PLATFORM_KEY)
     if _PB_PLATFORM_KEY not in cfg_ts:
@@ -598,11 +748,21 @@ def _pb_build(fresh=False, selection_override=None):
     if selection_override is not None:
         scenarios["preview"] = selection_override
 
+    # SINGLE-FLIGHT. Both measurements start a fresh interpreter that imports
+    # the agent's whole tool registry, so they run one at a time whatever the
+    # caller count (`_pb_payload` additionally coalesces waiters onto the build
+    # that just finished, so N concurrent ?fresh=1 calls cost ONE pair).
+    ps, ps_err = None, None
     probe, probe_err = None, None
-    try:
-        probe = _pb_probe(scenarios)
-    except Exception as e:
-        probe_err = "%s: %s" % (type(e).__name__, e)
+    with _pb_build_lock:
+        try:
+            ps = _pb_prompt_size()
+        except Exception as e:
+            ps_err = "%s: %s" % (type(e).__name__, e)
+        try:
+            probe = _pb_probe(scenarios)
+        except Exception as e:
+            probe_err = "%s: %s" % (type(e).__name__, e)
 
     keys = (probe or {}).get("keys") or list(_PB_KEYS_FALLBACK)
     labels = (probe or {}).get("labels") or {}
@@ -687,6 +847,17 @@ def _pb_build(fresh=False, selection_override=None):
 
     return {
         "ok": True,
+        # A failed probe is NOT a failed request — the card still renders the
+        # config and the profile table — but it must never read as a clean
+        # measurement either. `prompt_size_ok` false means the system-prompt
+        # half was counted as ZERO, so every token/seconds figure below is
+        # tool schemas only; `probe_ok` false means the toolset list and every
+        # per-toolset size are the fallback constants, not this agent's answer.
+        # Both errors are rendered at the top of the card body.
+        "prompt_size_ok": ps is not None,
+        "probe_ok": probe is not None,
+        "degraded": (ps is None) or (probe is None),
+        "tokens_are_tools_only": ps is None,
         "generated": int(_pb_time.time()),
         "prompt_size": ps,
         "prompt_size_error": ps_err,
@@ -740,10 +911,17 @@ def _pb_build(fresh=False, selection_override=None):
 
 
 def _pb_payload(fresh=False):
-    now = _pb_time.time()
+    asked = _pb_time.time()
     with _pb_lock:
         cached = _pb_cache["payload"]
-        if (not fresh) and cached and (now - _pb_cache["at"]) < _PB_CACHE_TTL:
+        if cached and (asked - _pb_cache["at"]) < _PB_CACHE_TTL and not fresh:
+            return cached
+        # COALESCE. We may have queued behind another caller's build; if one
+        # FINISHED after we asked, its answer is at least as fresh as the one
+        # we would produce, so take it rather than spawning a second pair of
+        # interpreters. This is what keeps N concurrent `?fresh=1` calls to one
+        # measurement instead of N.
+        if cached and _pb_cache["at"] >= asked:
             return cached
         p = _pb_build()
         _pb_cache["at"] = _pb_time.time()

@@ -85,6 +85,9 @@
 # Nothing here touches a foreign global at module load: `HOME` is server.py's
 # own, and `CHAT_JOBS` / `active_model` are resolved by name inside a request.
 import os as _cx_os
+import contextlib as _cx_contextlib
+import fcntl as _cx_fcntl
+import math as _cx_math
 import re as _cx_re
 import shutil as _cx_shutil
 import threading as _cx_threading
@@ -102,6 +105,17 @@ _CX_CFG = _cx_os.path.join(HOME, ".hermes", "config.yaml")             # noqa: F
 _CX_TAIL_BYTES = 512 * 1024
 
 _CX_ENDPOINT = "/chat/completions"
+
+# The cross-process lock every config.yaml writer takes. Same PATH and same
+# 20 s timeout as aux_promptbudget.py's `_pb_config_lock` and
+# hermes-plugins/plugin_enable.py's `config_lock` — the helper is COPIED, not
+# imported or looked up in the shared globals, because an flock is only worth
+# anything if all three writers take it, and a name resolved from another aux
+# module would silently stop being taken the day that module fails to load.
+# If the semantics change there, change them here (the same rule aux_index and
+# hermes_mcp follow for the scrubber regexes).
+_CX_LOCK_FILE = _CX_CFG + ".lock"
+_CX_LOCK_TIMEOUT = 20.0
 
 # A finished job whose done moment we never observed: cap how far the search
 # window may stretch past `submitted_ts` so a late call cannot swallow the next
@@ -426,6 +440,17 @@ def _cx_apply_text(src, values):
             end = i
             break
 
+    # The block's OWN child indent, taken from its first child line. Without
+    # this anchor `threshold:` nested under a sub-key of compression (a
+    # deeper indent, a different setting entirely) matched the same regex and
+    # was rewritten as if it were compression.threshold.
+    indent = None
+    for i in range(start + 1, end):
+        m = _cx_re.match(r"^(\s+)\S", lines[i])
+        if m:
+            indent = m.group(1)
+            break
+
     todo = dict(values)
     out = list(lines)
     for i in range(start + 1, end):
@@ -434,6 +459,8 @@ def _cx_apply_text(src, values):
             lines[i])
         if not m:
             continue
+        if indent is not None and m.group(1) != indent:
+            continue                    # a nested key, not one of ours
         key = m.group(2)
         if key not in todo:
             continue
@@ -445,16 +472,46 @@ def _cx_apply_text(src, values):
     if todo:
         # keys the block does not carry yet — append them at its end, in the
         # canonical order, with the indent the block already uses
-        indent = "  "
-        for i in range(start + 1, end):
-            m = _cx_re.match(r"^(\s+)\S", lines[i])
-            if m:
-                indent = m.group(1)
-                break
-        add = ["%s%s: %s\n" % (indent, k, _cx_fmt(k, todo[k]))
+        add = ["%s%s: %s\n" % (indent or "  ", k, _cx_fmt(k, todo[k]))
                for k in _CX_KEYS if k in todo]
         out = out[:end] + add + out[end:]
     return "".join(out)
+
+
+@_cx_contextlib.contextmanager
+def _cx_config_lock(timeout=_CX_LOCK_TIMEOUT):
+    """`flock(LOCK_EX)` on `config.yaml.lock`, released on the way out.
+
+    Advisory, and on a SEPARATE file: config.yaml itself is replaced by
+    `os.replace`, so a lock held on its inode would stop guarding the path the
+    moment the first writer finished. Non-blocking retries so a wedged holder
+    times out with a message instead of hanging the request thread forever.
+    """
+    fd = _cx_os.open(_CX_LOCK_FILE, _cx_os.O_CREAT | _cx_os.O_RDWR, 0o600)
+    try:
+        deadline = _cx_time.time() + max(0.0, float(timeout))
+        while True:
+            try:
+                _cx_fcntl.flock(fd, _cx_fcntl.LOCK_EX | _cx_fcntl.LOCK_NB)
+                break
+            except OSError:
+                if _cx_time.time() >= deadline:
+                    raise TimeoutError(
+                        "another process is still writing %s (waited %gs)"
+                        % (_CX_CFG, timeout))
+                _cx_time.sleep(0.05)
+        try:
+            yield
+        finally:
+            try:
+                _cx_fcntl.flock(fd, _cx_fcntl.LOCK_UN)
+            except OSError:
+                pass
+    finally:
+        try:
+            _cx_os.close(fd)
+        except OSError:
+            pass
 
 
 def _cx_backup():
@@ -473,7 +530,42 @@ def _cx_write(values):
     """Set compression.<key> for each key in `values`.
 
     Returns (changed, backup_path). A no-op write touches nothing at all — not
-    the file, not a backup — so the config stays byte-identical."""
+    the file, not a backup — so the config stays byte-identical.
+
+    The read, the edit and the replace are ONE critical section under BOTH
+    server.py's `_state_lock` (this process — resolved by name at call time,
+    the way every foreign global here is) and `_cx_config_lock()` (every
+    process). config.yaml is a read-modify-write over a whole file the agent,
+    `hermes config set`, the prompt-budget card and `update.sh`'s
+    plugin_enable.py all touch: two concurrent writers each read the same `src`
+    and the second `os.replace` silently threw the first one's key away. Lock
+    ORDER is state lock outside, flock inside — identical to
+    `_pb_write_toolsets`, which is what keeps the two from ever deadlocking.
+
+    The temp file is O_EXCL with the pid and eight random hex digits in its
+    name:
+    the old fixed `config.yaml.context.tmp` was a predictable path in a
+    directory anything on this Mac can write, so a symlink planted there would
+    have been followed, and two writers would have shared one buffer.
+    """
+    lock = globals().get("_state_lock")
+    if lock is None:                                          # pragma: no cover
+        return _cx_write_flocked(values)
+    with lock:
+        return _cx_write_flocked(values)
+
+
+def _cx_write_flocked(values):
+    # A timeout here is a TimeoutError, i.e. an OSError, which
+    # _cx_compression_post already turns into a 500 naming the file — the one
+    # thing it must not do is write anyway, over a copy of the file somebody
+    # else has since replaced.
+    with _cx_config_lock():
+        return _cx_write_locked(values)
+
+
+def _cx_write_locked(values):
+    """The critical section itself — never call this without _cx_write's locks."""
     with open(_CX_CFG, encoding="utf-8") as fh:
         src = fh.read()
     new = _cx_apply_text(src, values)
@@ -484,16 +576,26 @@ def _cx_write(values):
         mode = _cx_os.stat(_CX_CFG).st_mode & 0o777
     except OSError:
         mode = 0o600
-    tmp = _CX_CFG + ".context.tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(new)
-        fh.flush()
-        _cx_os.fsync(fh.fileno())
+    tmp = "%s.tmp-%d-%s" % (_CX_CFG, _cx_os.getpid(),
+                            _cx_os.urandom(4).hex())
+    fd = _cx_os.open(tmp, _cx_os.O_CREAT | _cx_os.O_EXCL | _cx_os.O_WRONLY,
+                     0o600)
     try:
-        _cx_os.chmod(tmp, mode)
-    except OSError:
-        pass
-    _cx_os.replace(tmp, _CX_CFG)
+        with _cx_os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(new)
+            fh.flush()
+            _cx_os.fsync(fh.fileno())
+        try:
+            _cx_os.chmod(tmp, mode)
+        except OSError:
+            pass
+        _cx_os.replace(tmp, _CX_CFG)
+    except Exception:
+        try:
+            _cx_os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     return True, bak
 
 
@@ -778,8 +880,14 @@ def _cx_compression_post(ctx):
             return {"ok": False, "error": "%s must be a number" % k}, 400
         try:
             v = int(raw) if kind == "int" else float(raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return {"ok": False, "error": "%s must be a number" % k}, 400
+        # NaN compares False against everything, so `v < lo or v > hi` waved it
+        # through and `%g` wrote `threshold: nan` into config.yaml — which the
+        # compressor then multiplies the window by. inf fails the range check
+        # already; this makes both explicit.
+        if not _cx_math.isfinite(v):
+            return {"ok": False, "error": "%s must be a real number" % k}, 400
         if v < lo or v > hi:
             return {"ok": False,
                     "error": "%s must be between %s and %s (got %s)" % (k, lo, hi, v)}, 400

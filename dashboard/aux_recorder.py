@@ -143,11 +143,26 @@ def _rec_log(msg):
 # db init / connection
 # --------------------------------------------------------------------------
 _rec_inited = False
+_rec_init_error = ""     # the last init failure, verbatim, for /api/recorder
+
+
+def _rec_chmod():
+    """0600 on the db — recorded args can carry sensitive strings.
+
+    Its OWN function, called outside the try that wraps the schema + the
+    migration, because it used to sit inside it: a migration that raised (as
+    one did for a release) jumped to the handler and skipped the chmod on the
+    way, leaving the database at the umask default with nothing anywhere
+    saying so."""
+    try:
+        os.chmod(REC_DB, 0o600)
+    except OSError:
+        pass
 
 
 def _rec_init():
     """Create dirs + schema; recover a corrupt db by renaming aside.  Idempotent."""
-    global _rec_inited
+    global _rec_inited, _rec_init_error
     if _rec_inited:
         return
     for d in (DATA, UNDO_TRASH):
@@ -157,6 +172,8 @@ def _rec_init():
             pass
     try:
         con = sqlite3.connect(REC_DB, timeout=8.0)
+        _rec_chmod()      # the file exists the moment the connect returns —
+                          # the permissions must not wait on the migration
         try:
             con.execute("PRAGMA journal_mode=WAL")
             con.executescript(_SCHEMA)
@@ -179,12 +196,11 @@ def _rec_init():
             con.commit()
         finally:
             con.close()
-        try:
-            os.chmod(REC_DB, 0o600)      # args can carry sensitive strings
-        except OSError:
-            pass
+        _rec_chmod()                     # and again, now that WAL/-shm exist
         _rec_inited = True
+        _rec_init_error = ""
     except sqlite3.DatabaseError as e:
+        _rec_init_error = "recorder.db corrupt: %r" % e
         _rec_log("recorder.db corrupt, recreating: %r" % e)
         try:
             os.rename(REC_DB, REC_DB + ".corrupt-%d" % int(time.time()))
@@ -192,16 +208,30 @@ def _rec_init():
             pass
         try:
             con = sqlite3.connect(REC_DB, timeout=8.0)
+            _rec_chmod()
             con.execute("PRAGMA journal_mode=WAL")
             con.executescript(_SCHEMA)
             con.commit()
             con.close()
-            os.chmod(REC_DB, 0o600)
+            _rec_chmod()
             _rec_inited = True
+            _rec_init_error = ""         # recovered: the rename-aside worked
         except Exception as e2:                              # pragma: no cover
+            _rec_init_error = "recorder.db recreate failed: %r" % e2
             _rec_log("recorder.db recreate failed: %r" % e2)
     except Exception as e:                                   # pragma: no cover
+        _rec_init_error = "init failed: %r" % e
         _rec_log("init failed: %r" % e)
+
+
+def _rec_init_state():
+    """The two keys every /api/recorder answer carries.
+
+    `_rec_init()` swallows its own failures (a dead recorder must never take
+    the dashboard down), so a broken init used to be visible ONLY as a stderr
+    line in dashboard.log — the API answered with an empty list and
+    `recorder_ok: true`, which reads exactly like "you have done nothing yet"."""
+    return {"inited": bool(_rec_inited), "init_error": _rec_init_error or None}
 
 
 def _rec_conn():
@@ -848,9 +878,11 @@ def recorder_api_handler(ctx):
     try:
         _rec_init()
     except Exception as e:
-        return {"recorder_ok": False, "error": "init: " + str(e), "actions": [],
-                "counts": {"total": 0, "reversible": 0, "undone": 0},
-                "checkpoints_enabled": _checkpoints_enabled()}
+        out = {"recorder_ok": False, "error": "init: " + str(e), "actions": [],
+               "counts": {"total": 0, "reversible": 0, "undone": 0},
+               "checkpoints_enabled": _checkpoints_enabled()}
+        out.update(_rec_init_state())
+        return out
     try:
         aid = ctx.q1("id", "")
         if aid:
@@ -902,14 +934,18 @@ def recorder_api_handler(ctx):
                 "SELECT COUNT(*) FROM actions WHERE status='undone'").fetchone()[0]
         finally:
             con.close()
-        return {"actions": [_row_public(x) for x in rows],
-                "counts": {"total": total, "reversible": reversible, "undone": undone},
-                "checkpoints_enabled": _checkpoints_enabled(),
-                "recorder_ok": True}
+        out = {"actions": [_row_public(x) for x in rows],
+               "counts": {"total": total, "reversible": reversible, "undone": undone},
+               "checkpoints_enabled": _checkpoints_enabled(),
+               "recorder_ok": True}
+        out.update(_rec_init_state())
+        return out
     except Exception as e:
-        return {"recorder_ok": False, "error": "internal: " + str(e), "actions": [],
-                "counts": {"total": 0, "reversible": 0, "undone": 0},
-                "checkpoints_enabled": _checkpoints_enabled()}
+        out = {"recorder_ok": False, "error": "internal: " + str(e), "actions": [],
+               "counts": {"total": 0, "reversible": 0, "undone": 0},
+               "checkpoints_enabled": _checkpoints_enabled()}
+        out.update(_rec_init_state())
+        return out
 
 
 # --------------------------------------------------------------------------

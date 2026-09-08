@@ -98,11 +98,24 @@
 
   // The one sentence the card exists to say. PURE — the harness drives every
   // branch without a DOM.
+  //
+  // THE EMPTY-LOG CLAIM. "Nothing has gone over budget today" was asserted
+  // from an empty log whatever had emptied it — a plugin that never loaded, a
+  // log the agent could not write, a file someone deleted — and the card's
+  // other "is it live" signal is `restart_required`, which goes false on ANY
+  // restart of the service, not on this plugin loading. So the reassuring
+  // sentence is now spoken ONLY with positive evidence: `observed` is the
+  // server's "a truncation was logged at or after the moment we enabled it".
+  // With no evidence the card says what it actually knows.
   function savingsLine(data) {
     var st = (data && data.stats) || {};
     var t = st.today || {};
     var calls = Number(t.calls) || 0;
     if (!calls) {
+      if (!(data && data.observed)) {
+        return "No truncation recorded yet — cannot confirm the plugin is "
+             + "running.";
+      }
       return "Nothing has gone over budget today — tool results have all been "
            + "small enough to pass through untouched.";
     }
@@ -124,11 +137,30 @@
   }
 
   // Which state the card is in. PURE.
+  //
+  // "unknown" is a real state, not a rounding of "off": when the config editor
+  // could not be loaded the server sends enabled_in_config === null, and
+  // offering an Install button over a state nobody has read would write to the
+  // owner's Hermes config on a guess.
   function phase(data) {
     if (!data || data.ok === false) return "error";
+    if (data.helper_error || data.enabled_in_config === null ||
+        data.enabled_in_config === undefined) return "unknown";
     if (!data.installed || !data.enabled_in_config) return "setup";
     if (data.restart_required) return "pending";
     return "live";
+  }
+
+  // The copied-plugin-is-older-than-the-repo case. `install.linked` (a symlink
+  // back into the checkout) can never go stale; a fallback COPY can, and then
+  // the agent runs last release's plugin while this card describes this one.
+  function staleHTML(data) {
+    var inst = (data && data.install) || {};
+    if (!inst.stale) return "";
+    return '<p class="tbwarn">The installed copy of the plugin is older than ' +
+      "the one in this version of Hermes Assistant. It was copied rather than " +
+      "linked, so an update did not reach it — install it again to refresh " +
+      "the copy.</p>";
   }
 
   // ---- styles --------------------------------------------------------------
@@ -262,6 +294,19 @@
       "end are kept, the middle is replaced by a note saying so, and the full " +
       "output is written to disk where the assistant can still read it.</p>";
 
+    // --- unknown: we could not read whether it is switched on --------------
+    // No Install button here. The state was never read, so "install and turn
+    // on" would be a write decided by a failure.
+    if (ph === "unknown") {
+      return head() + '<div class="body">' + lede +
+        '<p class="tberr">' + E(d.helper_error ||
+          "Whether the tool budget is switched on in your Hermes config could " +
+          "not be read, so nothing about it is shown here.") + "</p>" +
+        '<p class="tbok">Nothing has been changed. Once that is fixed this ' +
+        "card will show the real state; until then it will not offer to " +
+        "install anything.</p>" + staleHTML(d) + "</div>";
+    }
+
     // --- setup: the plugin is not installed or not enabled in the config ----
     if (ph === "setup") {
       var why = !d.installed
@@ -269,6 +314,7 @@
           + "installed yet."
         : "The plugin is installed but not switched on in your Hermes config.";
       return head() + '<div class="body">' + lede +
+        staleHTML(d) +
         '<p class="tbok">' + E(why) + "</p>" +
         '<div class="tbbar"><button class="tbb" data-act="install"' +
         (state.busy ? " disabled" : "") + ">" +
@@ -332,7 +378,7 @@
     }
 
     return head() + '<div class="body"' + (on ? "" : ' data-off="1"') + ">" +
-      lede + stats + body + save + pending +
+      lede + staleHTML(d) + stats + body + save + pending +
       (state.err ? '<p class="tberr">' + E(state.err) + "</p>" : "") +
       (state.note ? '<p class="tbok">' + E(state.note) + "</p>" : "") +
       '<p class="tbfoot">Enforced by the <span class="tbcode">tool-budget</span> ' +
@@ -517,7 +563,7 @@
   // headless-harness surface (also handy from the console)
   W.hermesToolBudget = {
     cardHTML: cardHTML, CSS: CSS, savingsLine: savingsLine, phase: phase,
-    num: num, kchars: kchars, pct: pct, bytes: bytes,
+    staleHTML: staleHTML, num: num, kchars: kchars, pct: pct, bytes: bytes,
     mount: mount, paint: paint, state: S,
     refresh: async function () { S.loaded = false; await mount(); }
   };

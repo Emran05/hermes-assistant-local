@@ -56,6 +56,20 @@
 # request time (`_tr_g`) with a local literal as the fallback, the discipline
 # aux_index/aux_needsyou document.
 #
+# THE SPAN CAP CUTS ON A TURN BOUNDARY.  The body is built in memory, so a
+# huge range stops at `_TR_MAX_SPANS`; spans are emitted turn-then-children, so
+# slicing at an arbitrary index exported tool spans whose parent never made it
+# into the file and Jaeger drew them as broken traces.  `_tr_cut_at_turn` walks
+# the cut back to the next turn boundary — the index that starts a root span —
+# and drops the partial turn whole, so a shipped turn always has its children.
+#
+# A CAPPED EXPORT SAYS SO IN BOTH SHAPES.  JSONL gets a trailing
+# {"type":"note","truncated":true} line; OTLP gets the resource attributes
+# `hermes.export.truncated` and `hermes.export.span_cap`, because a header is
+# not part of the file and every OTLP reader on the other end sees only the
+# file.  The `X-Hermes-Trace-Truncated` / `X-Hermes-Trace-Span-Cap` headers
+# stay, and the card reads them to warn the person who pressed the button.
+#
 # Routes:
 #   GET /api/trace/export?since=&until=&format=jsonl|otel  -> file download
 #   GET /api/trace/summary?since=&until=                   -> counts + totals
@@ -733,6 +747,22 @@ def _tr_day_spans(day, lo, hi, index, keys, trunc, live_jobs):
     return spans, list(traces.values())
 
 
+def _tr_cut_at_turn(spans, cut):
+    """`spans[:cut]`, rewound to a TURN BOUNDARY.
+
+    Spans are emitted turn-then-children, so a plain slice can keep a tool span
+    whose parent turn falls the other side of the cut — an orphan child, which
+    a tracing UI renders as a broken trace rather than as a short one, and it
+    can equally keep a turn without the children it made. Walk the cut back to
+    the next TURN BOUNDARY (an index that starts a new root span, or the end)
+    and drop the partial turn whole: half a turn is worse than no turn.
+    """
+    i = min(int(cut), len(spans))
+    while 0 < i < len(spans) and spans[i].get("parent_span_id") is not None:
+        i -= 1
+    return spans[:i]
+
+
 def _tr_build(since, until, on_day):
     """Walk the range one local day at a time, handing each day's spans to
     `on_day(day, spans, traces)`. Nothing but one day is ever in memory here —
@@ -750,7 +780,11 @@ def _tr_build(since, until, on_day):
                                       live_jobs)
         days += 1
         if n_spans + len(spans) > _TR_MAX_SPANS:
-            spans = spans[:max(0, _TR_MAX_SPANS - n_spans)]
+            spans = _tr_cut_at_turn(spans, max(0, _TR_MAX_SPANS - n_spans))
+            # a roll-up for a trace that kept no span describes nothing that is
+            # in the file, so it goes with the spans
+            kept = set(s["trace_id"] for s in spans)
+            traces = [t for t in traces if t["trace_id"] in kept]
             truncated = True
         n_spans += len(spans)
         on_day(day, spans, traces)
@@ -849,6 +883,9 @@ def _tr_otel_span(s):
 
 def _tr_otel(since, until, meta):
     ver = _tr_version()
+    # ONE resource dict, shared by reference across every day's resourceSpans —
+    # which is also how the truncation attributes below reach all of them with
+    # a single append after the walk is done.
     resource = {"attributes": _tr_kv([("service.name", _TR_SERVICE),
                                       ("service.version", ver),
                                       ("telemetry.sdk.name", "hermes-aux-trace"),
@@ -866,6 +903,13 @@ def _tr_otel(since, until, meta):
                                                "spans": [_tr_otel_span(s) for s in spans]}]})
 
     days, n_spans, truncated = _tr_build(since, until, on_day)
+    if truncated:
+        # The JSONL shape carries a note line; OTLP has nowhere to put one, and
+        # a header is not part of the file — so the fact that this export is
+        # INCOMPLETE travels with the spans, where Jaeger/Tempo will show it.
+        resource["attributes"].extend(
+            _tr_kv([("hermes.export.truncated", True),
+                    ("hermes.export.span_cap", _TR_MAX_SPANS)]))
     meta.update({"days": days, "spans": n_spans, "truncated": truncated})
     return _tr_json.dumps({"resourceSpans": resource_spans},
                           separators=(",", ":"), ensure_ascii=False)
@@ -930,6 +974,9 @@ def _tr_export(ctx):
                "X-Hermes-Trace-Ms": str(int((_tr_time.time() - t0) * 1000))}
     if meta.get("truncated"):
         headers["X-Hermes-Trace-Truncated"] = "1"
+        # the cap itself, so the card can name it without hard-coding a number
+        # that would drift the moment _TR_MAX_SPANS changed
+        headers["X-Hermes-Trace-Span-Cap"] = str(_TR_MAX_SPANS)
     return RawResponse(body, ctype, headers)                                  # noqa: F821
 
 
@@ -948,9 +995,10 @@ def _tr_summary(ctx):
     if err:
         return err
     t0 = _tr_time.time()
-    acc = {"traces": set(), "turns": 0, "tool_spans": 0, "truncations": 0,
-           "undone": 0, "errors": 0, "tokens_in": 0, "tokens_out": 0,
-           "estimated": 0, "prefill": [], "cached_pct": [], "models": {}}
+    acc = {"traces": set(), "turns": 0, "synthetic": 0, "tool_spans": 0,
+           "truncations": 0, "undone": 0, "errors": 0, "tokens_in": 0,
+           "tokens_out": 0, "estimated": 0, "prefill": [], "cached_pct": [],
+           "models": {}}
 
     def on_day(_day, spans, traces):
         for t in traces:
@@ -959,6 +1007,12 @@ def _tr_summary(ctx):
             a = dict(s["attrs"])
             if s["kind"] == "turn":
                 acc["turns"] += 1
+                # A synthetic turn is INFERRED — Recorder rows no metrics record
+                # explains, clustered on a time gap. Counting them in with real
+                # turns made "turns" mean two different things at once, so the
+                # subset is reported and the card shows the two apart.
+                if a.get("hermes.turn.synthetic"):
+                    acc["synthetic"] += 1
                 acc["tokens_in"] += a.get("gen_ai.usage.input_tokens") or 0
                 acc["tokens_out"] += a.get("gen_ai.usage.output_tokens") or 0
                 if a.get("hermes.tokens_estimated"):
@@ -983,6 +1037,10 @@ def _tr_summary(ctx):
     return {"ok": True, "since": round(since, 3), "until": round(until, 3),
             "days": days, "spans": n_spans, "truncated": truncated,
             "traces": len(acc["traces"]), "turns": acc["turns"],
+            # `turns` stays the TOTAL (a subset count is the safe shape for a
+            # field other readers already sum); `turns_synthetic` is how many of
+            # them were inferred from Recorder rows alone.
+            "turns_synthetic": acc["synthetic"],
             "tool_spans": acc["tool_spans"], "truncations": acc["truncations"],
             "undone": acc["undone"], "tool_errors": acc["errors"],
             "tokens_in": acc["tokens_in"], "tokens_out": acc["tokens_out"],

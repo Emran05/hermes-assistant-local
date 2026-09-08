@@ -93,7 +93,16 @@
     ["Search index", "Chats, notes, messages, calendar and news, indexed locally in SQLite."],
     ["Conversations", "Every chat is a file under ~/.hermes/dashboard/chats."],
     ["Notes", "The Scratchpad is a local file. Nothing syncs."],
-    ["Flight Recorder", "The undo trail of what the agent did stays on this Mac."]
+    ["Flight Recorder", "The undo trail of what the agent did stays on this Mac."],
+    // Real on-disk exposure, so it is written down here rather than only in the
+    // Tool output budget card: a tool result over the cap is cached WHOLE, and
+    // a tool result can be a file, a page or a command's output. The plugin
+    // deletes day-directories older than seven days
+    // (hermes-plugins/tool-budget/__init__.py, _gc_spill) — if that retention
+    // or that path changes, change this line with it.
+    ["Tool output cache", "A tool result over the budget is kept in full for 7 " +
+      "days under ~/.hermes/dashboard/spill (0600), so the assistant can read " +
+      "the part that was trimmed."]
   ];
 
   // ---- pure helpers (exported for the headless harness) --------------------
