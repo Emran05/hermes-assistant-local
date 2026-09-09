@@ -167,6 +167,14 @@
     border-bottom:1px solid var(--hairline);
     background:linear-gradient(180deg,color-mix(in srgb,var(--ground) 72%,transparent),transparent);
     -webkit-backdrop-filter:blur(18px) saturate(160%);backdrop-filter:blur(18px) saturate(160%)}
+  /* Window drag: the shell is a WKWebView with isMovableByWindowBackground and a
+     hidden, transparent title bar, so the header itself is the only handle. Mark
+     it draggable and carve the controls out, or a header full of chips leaves
+     nothing to grab. */
+  header{-webkit-app-region:drag;app-region:drag;-webkit-user-select:none;user-select:none}
+  header button,header a,header input,header select,header textarea,header [role=button],
+  header [role=tab],header .chip,header .pill,header .seg,header .menu,header .dropdown,
+  header #model-pill,header .ctx-chip{-webkit-app-region:no-drag;app-region:no-drag}
   header .mark{margin-left:52px}
   :root[data-fullscreen="1"] header .mark{margin-left:0}
   .hello .greet{font-size:14px;font-weight:640;letter-spacing:-.01em;line-height:1.15}
