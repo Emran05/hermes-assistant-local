@@ -32,8 +32,9 @@
 # the only thing that runs tools.
 #
 # Session (and therefore the trace grouping) is resolved three ways, in order:
-# the live CHAT_JOBS entry while the job is still in memory (that is also the
-# only place `memory_chars` survives), else the chat store — the user message
+# the live CHAT_JOBS entry while the job is still in memory (`memory_chars` is
+# read there too, but it is no longer the only place it survives — aux_metrics
+# writes it onto the kind:"turn" row), else the chat store — the user message
 # is saved microseconds before the job is created, so the newest user message
 # at or just before the turn's start names the conversation — else the job id
 # alone.  A trace is one conversation on one local day.
@@ -702,10 +703,15 @@ def _tr_day_spans(day, lo, hi, index, keys, trunc, live_jobs):
         job = _tr_clean(rec.get("job"), 32)
         live = live_jobs.get(job) if job else None
         session = ""
-        memory_chars = None
+        # `memory_chars` used to survive only as long as the live job did, so a
+        # span older than the hour CHAT_JOBS keeps lost it. aux_metrics now
+        # persists it on the kind:"turn" row, which is the fallback here; the
+        # live job still wins when it is present (same value, fresher source).
+        memory_chars = rec.get("memory_chars")
         if live is not None:
             session = _tr_clean(live.get("session"), 96)
-            memory_chars = live.get("memory_chars")
+            if live.get("memory_chars") is not None:
+                memory_chars = live.get("memory_chars")
         if not session:
             session = _tr_session_at(index, keys, start)
         trace_id = (_tr_trace_id("session", session, day_iso) if session

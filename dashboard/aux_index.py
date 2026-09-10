@@ -985,8 +985,11 @@ except NameError:
         _ix_prev_save_chat = None
 
 if _ix_prev_save_chat is not None:
-    def save_chat(session, chat):
-        _ix_prev_save_chat(session, chat)
+    def save_chat(session, chat, **kw):
+        # **kw is pass-through, not a feature: server.py's save_chat grew a
+        # `truncate=` opt-out for the append-only guard, and a wrapper that
+        # ate it would TypeError on the one caller that ever needs it.
+        _ix_prev_save_chat(session, chat, **kw)
         try:
             index_touch("chat", session)
         except Exception:

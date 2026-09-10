@@ -12,8 +12,11 @@
 //     points where the next turn starts to be at risk of being summarised away.
 //
 //  2. THE CARD. The window, the four compression knobs, the model that does the
-//     summarising, and the last ten turns as a table, so the knobs are set
-//     against evidence rather than a feeling.
+//     summarising, and the last ten requests as a table, so the knobs are set
+//     against evidence rather than a feeling. The table spans BOTH model-server
+//     lanes and names each row's lane ("chat" for :8080, "background" for the
+//     briefing/news lane on :8081) — the meter's chip deliberately does not,
+//     since it describes the chat turn that just ended and nothing else.
 //
 // HOW IT HOOKS THE CHAT WITHOUT EDITING streamJob. index.html's streamJob is a
 // top-level function declaration, i.e. a writable property of window, and its
@@ -464,18 +467,29 @@
     return v == null ? "" : String(v);
   }
 
+  // lane id (as the API sends it) -> what a person calls that lane. "primary"
+  // and "bg" are the model servers; the words are the ones the model menu and
+  // the README already use for them.
+  var LANE_LABEL = {primary: "chat", bg: "background"};
+
+  function laneLabel(lane) {
+    return LANE_LABEL[lane] || LANE_LABEL.primary;
+  }
+
   function recentRows(rows, window_) {
     if (!rows || !rows.length) {
       return '<p class="cxlede" style="margin:0">No model requests are logged yet. ' +
-             "The table fills in as soon as a conversation runs.</p>";
+             "The table fills in as soon as a conversation — or a briefing — runs.</p>";
     }
     var out = '<div class="cxwrap"><table class="cxt"><thead><tr>' +
-      "<th>Time</th><th>Prompt</th><th>Cached</th><th>Prefill</th><th>Compacted</th>" +
-      "</tr></thead><tbody>";
+      "<th>Time</th><th>Lane</th><th>Prompt</th><th>Cached</th><th>Prefill</th>" +
+      "<th>Compacted</th></tr></thead><tbody>";
     for (var i = rows.length - 1; i >= 0; i--) {
       var r = rows[i];
       var lv = level(r.pct_of_window);
+      var bg = (r.lane === "bg");
       out += "<tr><td>" + E(clock(r.epoch)) + "</td>" +
+        '<td class="' + (bg ? "is-muted" : "") + '">' + E(laneLabel(r.lane)) + "</td>" +
         '<td class="' + (lv ? "is-" + lv : "") + '">' + E(full(r.prompt_tokens)) + "</td>" +
         "<td>" + E(r.cache_pct == null ? "—" : pct(r.cache_pct)) + "</td>" +
         "<td>" + E(r.prefill_s == null ? "—" : secs(r.prefill_s)) + "</td>" +
@@ -565,8 +579,11 @@
     h += '<h3 class="cxh">Recent turns</h3>' +
       recentRows((state.recent || {}).turns, d.window);
 
-    h += '<p class="cxfoot">Read from the model server\'s own log — no model is ' +
-      "started to fill this in. Compaction itself runs on " +
+    h += '<p class="cxfoot">Read from the two model servers\' own logs — the ' +
+      "chat lane and the background lane that runs briefings and the news " +
+      "pass; no model is started to fill this in. The chip beside the model " +
+      "pill stays on the chat lane, because it describes the turn you just " +
+      "had. Compaction itself runs on " +
       E(aux.effective || "the main model") +
       (aux.inherits_main ? " (the main model — " : " (") +
       E(aux.inherits_main ? "no auxiliary.compression.model is set)" :
@@ -725,6 +742,7 @@
     cardHTML: cardHTML, CSS: CSS, chipCSS: chipCSS,
     chipText: chipText, chipTitle: chipTitle, noteText: noteText, level: level,
     tok: tok, full: full, pct: pct, secs: secs, clock: clock,
+    recentRows: recentRows, laneLabel: laneLabel,
     renderChip: renderChip, renderNote: renderNote, measure: measure,
     renderNotMeasured: renderNotMeasured, markStale: markStale,
     install: install, mount: mount, paint: paint, apply: apply, state: S,

@@ -504,6 +504,22 @@ def _escalation_on():
     return True
 
 
+def _apple_apps_state():
+    """settings.json apple_apps.{reminders,notes}, default both False — fails
+    closed the way apple_apps_enabled() does (on = the app launches on refresh)."""
+    fn = _host("apple_apps_enabled")
+    if fn:
+        try:
+            return bool(fn("reminders")), bool(fn("notes"))
+        except Exception:
+            pass
+    s = _read_json(SETTINGS_FILE, {}) or {}
+    cfg = s.get("apple_apps")
+    if isinstance(cfg, dict):
+        return bool(cfg.get("reminders")), bool(cfg.get("notes"))
+    return False, False
+
+
 def _yaml_sane(path):
     """(ok, note) for a YAML file WITHOUT PyYAML — which this Mac's dashboard
     python does not have.  Uses yaml when it is importable and otherwise does a
@@ -827,6 +843,65 @@ def _chk_fda():
                 "open Hermes Assistant.app and let one message sync run")
 
 
+# --------------------------------------------------------------------------
+# dictation — the push-to-talk helper.  Same shape as the FDA check above and
+# for the same reason: the grants belong to a process this one is not.  The
+# helper (app/dictation) POSTs its own verdict to /api/dictation/status and the
+# dashboard stores it; doctor reads that store, never a microphone.
+# --------------------------------------------------------------------------
+
+DICTATION_STORE = os.path.join(DATA, "dictation.json")
+DICTATION_BUNDLE = os.path.join(ROOT, "app", "build", "Hermes Dictation.app")
+DICTATION_STALE_S = 90
+
+
+def _dictation():
+    """(built, running, status) — status is the helper's last heartbeat, {} when
+    it has never sent one.  `running` is its claim ANDed with a fresh heartbeat:
+    a killed process never gets to retract its own."""
+    built = os.path.isdir(DICTATION_BUNDLE)
+    st = _read_json(DICTATION_STORE, None)
+    status = st.get("status") if isinstance(st, dict) else None
+    status = status if isinstance(status, dict) else {}
+    age = _ago(status.get("ts")) if status.get("ts") else None
+    running = bool(status.get("running")) and age is not None and age <= DICTATION_STALE_S
+    return built, running, status, age
+
+
+@check("dictation", "Dictation")
+def _chk_dictation():
+    built, running, status, age = _dictation()
+    if not built:
+        # Informational, not a warning: dictation is opt-in and a Mac without it
+        # is not an unhealthy Mac.
+        return ok("not installed (optional) — build the helper with "
+                  "app/build-dictation.sh, then launch it once")
+    if not running:
+        # Absolute 12-hour clock, per the repo's design law — never "x min ago".
+        when = (" · last heartbeat %s" % _fmt_when(status.get("ts"))) if age is not None \
+            else " · it has never checked in"
+        return warn("helper built but not running" + when,
+                    'open "app/build/Hermes Dictation.app" — it must be launched '
+                    "by hand or by Start at login, never by launchd")
+    bits = []
+    if status.get("engine"):
+        bits.append(str(status["engine"]))
+    if status.get("hotkey"):
+        bits.append("hold " + str(status["hotkey"]))
+    grants = {k: str(status.get(k) or "unknown")
+              for k in ("mic", "accessibility", "speech")}
+    label = {"mic": "microphone", "accessibility": "accessibility", "speech": "speech model"}
+    missing = [label[k] for k, v in grants.items() if v != "granted"]
+    detail = " · ".join(bits + ["%s %s" % (label[k], grants[k]) for k in
+                                ("mic", "accessibility", "speech")])
+    if missing:
+        return warn("running, but " + ", ".join(missing) + " not granted · " + detail,
+                    "System Settings > Privacy & Security — add Hermes "
+                    "Dictation.app under Microphone and Accessibility "
+                    "(a rebuild resets both: it is ad-hoc signed)")
+    return ok("running · " + detail)
+
+
 @check("config", "Config")
 def _chk_config():
     bits, worst, fix = [], PASS, ""
@@ -870,6 +945,16 @@ def _chk_claude():
         return warn("Claude CLI not found — the deep brain is unavailable · " + sw,
                     "install the Claude CLI, or leave escalation off")
     return ok("%s · %s" % (b, sw))
+
+
+@check("apple_apps", "Apple apps")
+def _chk_apple_apps():
+    rem, notes = _apple_apps_state()
+    on = [n for n, v in (("Reminders", rem), ("Notes", notes)) if v]
+    if on:
+        return warn("%s automation ON — launches the app on refresh" % " + ".join(on),
+                    "Settings › Connections › Apple apps")
+    return ok("Reminders + Notes automation off — Google Calendar used for context")
 
 
 @check("index", "Search index")

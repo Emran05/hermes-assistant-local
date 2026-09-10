@@ -1,0 +1,1344 @@
+// ============================================================================
+// Hermes Dictation — local push-to-talk voice dictation for macOS.
+//
+// A SEPARATE helper app from "Hermes Assistant.app".  It exists because of TCC:
+// the microphone and the keyboard are owned by whichever process macOS holds
+// responsible, and a launchd-started python can never durably hold either.  The
+// main app bundle is frozen (rebuilding it changes its ad-hoc cdhash and drops
+// its Full Disk Access grant — see CLAUDE.md, Message Center), so dictation gets
+// its own small bundle that can be rebuilt freely.  It talks to the dashboard
+// over loopback HTTP and nothing else; audio never leaves this Mac.
+//
+// WHAT IT DOES
+//   hold the hotkey (default: Right Option) -> capture with AVAudioEngine and
+//   transcribe on device -> release -> POST the raw transcript to the dashboard
+//   for cleanup -> insert the answer into whatever app was frontmost when the
+//   key went down.
+//
+// ENGINES, in order of preference
+//   1. SpeechAnalyzer + SpeechTranscriber (macOS 26).  Fully on device, the
+//      model is a shared system asset (no RAM of our own, nothing to download
+//      into the repo).  If the locale's asset is not installed we ask
+//      AssetInventory for it and say so in the menu.
+//   2. SFSpeechRecognizer with `requiresOnDeviceRecognition = true`, for
+//      macOS < 26 or when the analyzer refuses.  Still on device — the flag is
+//      what guarantees that.
+//
+// PERMISSIONS (all three are the user's to grant, never ours to assume)
+//   * Microphone  — NSMicrophoneUsageDescription + AVCaptureDevice.
+//   * Accessibility — the CGEventTap that sees the hotkey, and the AX text
+//     insertion.  Requested with AXIsProcessTrustedWithOptions(prompt: true);
+//     until it is granted the menu bar says so and the hotkey does nothing.
+//   * Speech recognition — only the SFSpeechRecognizer fallback needs it.
+//
+//   AD-HOC SIGNING CAVEAT.  build-dictation.sh signs with `-s -`, so the bundle
+//   has no stable TeamIdentifier and TCC keys every grant to the code's cdhash.
+//   REBUILDING THIS HELPER THEREFORE RESETS Microphone AND Accessibility and
+//   they must be granted again in System Settings.  Installing a self-signed
+//   code-signing identity in the login keychain and signing with it instead
+//   gives a stable identity and the grants survive; that is a deliberate,
+//   one-time decision for the owner to make, not something this repo does.
+//
+// TEXT INSERTION
+//   Accessibility first (set kAXSelectedTextAttribute on the focused element,
+//   or splice into kAXValueAttribute at the selection), clipboard + Cmd-V as the
+//   universal fallback with the previous pasteboard contents saved and restored.
+//   Secure input (a password field, Terminal's secure keyboard entry) is
+//   detected and refused with a hint — synthetic keystrokes cannot reach it and
+//   pretending otherwise loses the user's words.
+//   The text is ONLY ever inserted into the app that was frontmost when the
+//   hotkey went down.  If focus moved, we say so and drop it rather than typing
+//   a private sentence into someone else's window.
+//
+// THE DASHBOARD IS OPTIONAL
+//   POST /api/dictation/finish returns the cleaned text; if the dashboard is
+//   unreachable, or slow, or answers nonsense, the raw transcript is inserted.
+//   Dictation must never be blocked on a web server.
+//
+// MODES
+//   (no arguments)        menu-bar app
+//   --selftest <file>     transcribe an audio file with the same engine and
+//                         print the transcript.  No microphone, no TCC prompt,
+//                         no dashboard.  This is what CI/verification uses.
+//   --probe               print engine + permission + asset status as JSON and
+//                         exit.  Requests nothing, prompts for nothing.
+//   --version / --help
+// ============================================================================
+
+import AVFoundation
+import AppKit
+import ApplicationServices
+import Carbon.HIToolbox
+import CoreGraphics
+import Foundation
+import ServiceManagement
+import Speech
+
+// ---------------------------------------------------------------------------
+// small shared helpers
+// ---------------------------------------------------------------------------
+
+let kAppName = "Hermes Dictation"
+let kBundleID = "local.hermes.dictation"
+
+func appVersion() -> String {
+    let d = Bundle.main.infoDictionary ?? [:]
+    let short = d["CFBundleShortVersionString"] as? String
+    return short ?? "0.0.0"
+}
+
+/// One line per event on stderr. `log` is the only output the menu-bar mode
+/// produces; there is no log file of its own (Console.app and the launching
+/// terminal both see this).
+func log(_ msg: String) {
+    FileHandle.standardError.write(("hermes-dictation: " + msg + "\n").data(using: .utf8)!)
+}
+
+func out(_ msg: String) {
+    FileHandle.standardOutput.write((msg + "\n").data(using: .utf8)!)
+}
+
+func nowMs() -> Double { Date().timeIntervalSince1970 * 1000.0 }
+
+// ---------------------------------------------------------------------------
+// dashboard client — loopback only, no Origin header
+// ---------------------------------------------------------------------------
+//
+// The dashboard's same-origin guard (CLAUDE.md) refuses a *present* cross-origin
+// Origin and allows requests that carry none, which is exactly the shape of a
+// native client.  We send no Origin, and our Host (127.0.0.1:7788) is in its
+// ALLOWED_HOSTS.  Everything here is best-effort: a failure is a log line, never
+// a thrown error the dictation path has to handle.
+
+enum Dash {
+    static var base: String {
+        if let v = ProcessInfo.processInfo.environment["HERMES_DASH_URL"], !v.isEmpty {
+            return v.hasSuffix("/") ? String(v.dropLast()) : v
+        }
+        return "http://127.0.0.1:7788"
+    }
+
+    /// Synchronous POST.  Returns the decoded JSON object, or nil on any
+    /// failure (connection refused, timeout, non-JSON, non-200).
+    @discardableResult
+    static func post(_ path: String, _ body: [String: Any], timeout: TimeInterval) -> [String: Any]? {
+        guard let url = URL(string: base + path) else { return nil }
+        var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData,
+                             timeoutInterval: timeout)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body, options: [])
+        return send(req, timeout: timeout)
+    }
+
+    static func get(_ path: String, timeout: TimeInterval) -> [String: Any]? {
+        guard let url = URL(string: base + path) else { return nil }
+        var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData,
+                             timeoutInterval: timeout)
+        req.httpMethod = "GET"
+        return send(req, timeout: timeout)
+    }
+
+    private static func send(_ req: URLRequest, timeout: TimeInterval) -> [String: Any]? {
+        let sem = DispatchSemaphore(value: 0)
+        var result: [String: Any]?
+        let task = URLSession.shared.dataTask(with: req) { data, resp, _ in
+            defer { sem.signal() }
+            guard let http = resp as? HTTPURLResponse, http.statusCode == 200,
+                  let data = data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return }
+            result = obj
+        }
+        task.resume()
+        if sem.wait(timeout: .now() + timeout + 1.0) == .timedOut {
+            task.cancel()
+            return nil
+        }
+        return result
+    }
+}
+
+// ---------------------------------------------------------------------------
+// permissions
+// ---------------------------------------------------------------------------
+
+enum Grant: String {
+    case granted, denied, unknown
+}
+
+enum Perms {
+    static func mic() -> Grant {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized: return .granted
+        case .denied, .restricted: return .denied
+        default: return .unknown            // .notDetermined — never asked yet
+        }
+    }
+
+    /// Ask for the microphone.  Only ever called from a user gesture (the first
+    /// hotkey press), never at launch — an app that prompts before you have used
+    /// it is an app you deny.
+    static func requestMic(_ done: @escaping (Bool) -> Void) {
+        AVCaptureDevice.requestAccess(for: .audio) { ok in
+            DispatchQueue.main.async { done(ok) }
+        }
+    }
+
+    static func accessibility() -> Grant {
+        AXIsProcessTrusted() ? .granted : .unknown
+    }
+
+    /// Shows the system's "open System Settings" prompt.  There is no API that
+    /// reports a *denial* here — an ungranted process is simply untrusted — so
+    /// this is `unknown` until it flips to `granted`.
+    static func promptAccessibility() {
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
+    }
+
+    /// Speech recognition.  The SpeechAnalyzer path needs no authorization (it
+    /// is not SFSpeechRecognizer); what it needs is the locale's asset, so for
+    /// that engine this reports on the asset instead.  Never *requests* — the
+    /// request is a modal prompt and this function is called from heartbeats.
+    static func speech(engine: String, assetInstalled: Bool?) -> Grant {
+        if engine.hasPrefix("SpeechAnalyzer") {
+            if let a = assetInstalled { return a ? .granted : .denied }
+            return .unknown
+        }
+        switch SFSpeechRecognizer.authorizationStatus() {
+        case .authorized: return .granted
+        case .denied, .restricted: return .denied
+        default: return .unknown
+        }
+    }
+
+    static func secureInput() -> Bool {
+        IsSecureEventInputEnabled()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// transcription
+// ---------------------------------------------------------------------------
+
+/// A live (streaming) transcription session.  `feed` is called from the audio
+/// tap thread; `finish` is called once, from anywhere, and returns the text.
+protocol LiveSession: AnyObject {
+    func feed(_ buffer: AVAudioPCMBuffer)
+    func finish(_ done: @escaping (String, String?) -> Void)   // (text, error)
+}
+
+enum EngineKind {
+    case analyzer          // SpeechAnalyzer / SpeechTranscriber, macOS 26+
+    case legacy            // SFSpeechRecognizer, on-device
+
+    var label: String {
+        switch self {
+        case .analyzer: return "SpeechAnalyzer"
+        case .legacy: return "SFSpeechRecognizer"
+        }
+    }
+}
+
+func preferredEngine() -> EngineKind {
+    if #available(macOS 26.0, *) { return .analyzer }
+    return .legacy
+}
+
+// --- SpeechAnalyzer -------------------------------------------------------
+
+@available(macOS 26.0, *)
+enum AnalyzerSupport {
+    static func locale() -> Locale {
+        Locale.current
+    }
+
+    static func supported() async -> Bool {
+        let want = locale().identifier(.bcp47)
+        let all = await SpeechTranscriber.supportedLocales
+        return all.contains { $0.identifier(.bcp47) == want }
+    }
+
+    static func installed() async -> Bool {
+        let want = locale().identifier(.bcp47)
+        let have = await SpeechTranscriber.installedLocales
+        return have.contains { $0.identifier(.bcp47) == want }
+    }
+
+    static func makeTranscriber() -> SpeechTranscriber {
+        SpeechTranscriber(locale: locale(),
+                          transcriptionOptions: [],
+                          reportingOptions: [],
+                          attributeOptions: [])
+    }
+
+    /// Ask the system for the locale's asset.  Returns a human sentence
+    /// describing what happened, or nil when nothing was needed.
+    static func installAssetsIfNeeded(_ transcriber: SpeechTranscriber) async -> String? {
+        if await installed() { return nil }
+        guard await supported() else {
+            return "the speech model does not support \(locale().identifier(.bcp47))"
+        }
+        do {
+            if let request = try await AssetInventory.assetInstallationRequest(
+                supporting: [transcriber]) {
+                try await request.downloadAndInstall()
+                return "downloaded the \(locale().identifier(.bcp47)) speech model"
+            }
+            return nil
+        } catch {
+            return "the speech model for \(locale().identifier(.bcp47)) is not installed "
+                + "and could not be downloaded: \(error.localizedDescription)"
+        }
+    }
+
+    /// One-shot transcription of an audio file.  No microphone, no TCC.
+    static func transcribeFile(_ url: URL) async throws -> String {
+        let transcriber = makeTranscriber()
+        if let note = await installAssetsIfNeeded(transcriber) { log(note) }
+        let analyzer = SpeechAnalyzer(modules: [transcriber])
+        let collector = Task { () -> String in
+            var text = AttributedString("")
+            for try await result in transcriber.results {
+                text += result.text
+            }
+            return String(text.characters)
+        }
+        let file = try AVAudioFile(forReading: url)
+        if let last = try await analyzer.analyzeSequence(from: file) {
+            try await analyzer.finalizeAndFinish(through: last)
+        } else {
+            await analyzer.cancelAndFinishNow()
+        }
+        return try await collector.value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+@available(macOS 26.0, *)
+final class AnalyzerLive: LiveSession {
+    private let transcriber: SpeechTranscriber
+    private let analyzer: SpeechAnalyzer
+    private let stream: AsyncStream<AnalyzerInput>
+    private let feeder: AsyncStream<AnalyzerInput>.Continuation
+    private var collector: Task<String, Error>?
+    private var converter: AVAudioConverter?
+    private var format: AVAudioFormat?
+    private let lock = NSLock()
+    private var closed = false
+
+    init() {
+        transcriber = AnalyzerSupport.makeTranscriber()
+        analyzer = SpeechAnalyzer(modules: [transcriber])
+        (stream, feeder) = AsyncStream<AnalyzerInput>.makeStream()
+    }
+
+    /// Must be awaited before the first `feed`.  Throws when the analyzer will
+    /// not start at all, which is the caller's cue to fall back.
+    func start() async throws {
+        if let note = await AnalyzerSupport.installAssetsIfNeeded(transcriber) {
+            log(note)
+        }
+        format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber])
+        collector = Task { () -> String in
+            var text = AttributedString("")
+            for try await result in transcriber.results {
+                text += result.text
+            }
+            return String(text.characters)
+        }
+        try await analyzer.start(inputSequence: stream)
+    }
+
+    func feed(_ buffer: AVAudioPCMBuffer) {
+        lock.lock()
+        defer { lock.unlock() }
+        if closed { return }
+        guard let fmt = format else { return }
+        guard let conv = Audio.convert(buffer, to: fmt, cache: &converter) else { return }
+        feeder.yield(AnalyzerInput(buffer: conv))
+    }
+
+    func finish(_ done: @escaping (String, String?) -> Void) {
+        lock.lock()
+        if closed { lock.unlock(); return }
+        closed = true
+        lock.unlock()
+        feeder.finish()
+        Task {
+            var text = ""
+            var err: String?
+            do {
+                try await analyzer.finalizeAndFinishThroughEndOfInput()
+                text = try await (collector?.value ?? "")
+            } catch {
+                err = error.localizedDescription
+                text = (try? await collector?.value) ?? ""
+            }
+            done(text.trimmingCharacters(in: .whitespacesAndNewlines), err)
+        }
+    }
+}
+
+// --- SFSpeechRecognizer (fallback) ---------------------------------------
+
+final class LegacyLive: LiveSession {
+    private let recognizer: SFSpeechRecognizer?
+    private let request = SFSpeechAudioBufferRecognitionRequest()
+    private var task: SFSpeechRecognitionTask?
+    private var text = ""
+    private var err: String?
+    private var doneCb: ((String, String?) -> Void)?
+    private var settled = false
+    private let lock = NSLock()
+
+    init() {
+        recognizer = SFSpeechRecognizer(locale: Locale.current) ?? SFSpeechRecognizer()
+        request.shouldReportPartialResults = true
+        request.requiresOnDeviceRecognition = true          // never the network
+    }
+
+    func start() throws {
+        guard let rec = recognizer, rec.isAvailable else {
+            throw NSError(domain: "hermes.dictation", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "no on-device speech recognizer for this locale"])
+        }
+        if SFSpeechRecognizer.authorizationStatus() != .authorized {
+            throw NSError(domain: "hermes.dictation", code: 3, userInfo: [
+                NSLocalizedDescriptionKey: "speech recognition is not authorized"])
+        }
+        task = rec.recognitionTask(with: request) { [weak self] result, error in
+            guard let self = self else { return }
+            if let r = result {
+                self.lock.lock(); self.text = r.bestTranscription.formattedString; self.lock.unlock()
+            }
+            if error != nil || (result?.isFinal ?? false) {
+                if let e = error {
+                    self.lock.lock(); self.err = e.localizedDescription; self.lock.unlock()
+                }
+                self.settle()
+            }
+        }
+    }
+
+    func feed(_ buffer: AVAudioPCMBuffer) {
+        request.append(buffer)
+    }
+
+    func finish(_ done: @escaping (String, String?) -> Void) {
+        lock.lock(); doneCb = done; lock.unlock()
+        request.endAudio()
+        // The recognizer answers on its own schedule; do not wait forever for a
+        // final result when a good partial one is already in hand.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 6.0) { [weak self] in
+            self?.settle()
+        }
+    }
+
+    private func settle() {
+        lock.lock()
+        if settled || doneCb == nil { lock.unlock(); return }
+        settled = true
+        let cb = doneCb
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let e = t.isEmpty ? err : nil
+        lock.unlock()
+        task?.cancel()
+        cb?(t, e)
+    }
+
+    static func transcribeFile(_ url: URL, _ done: @escaping (String, String?) -> Void) {
+        guard let rec = SFSpeechRecognizer(locale: Locale.current) ?? SFSpeechRecognizer(),
+              rec.isAvailable else {
+            done("", "no on-device speech recognizer for this locale")
+            return
+        }
+        guard SFSpeechRecognizer.authorizationStatus() == .authorized else {
+            done("", "speech recognition is not authorized for this helper "
+                 + "(System Settings > Privacy & Security > Speech Recognition)")
+            return
+        }
+        let req = SFSpeechURLRecognitionRequest(url: url)
+        req.requiresOnDeviceRecognition = true
+        req.shouldReportPartialResults = false
+        rec.recognitionTask(with: req) { result, error in
+            if let e = error { done("", e.localizedDescription); return }
+            guard let r = result, r.isFinal else { return }
+            done(r.bestTranscription.formattedString, nil)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// audio capture
+// ---------------------------------------------------------------------------
+
+enum Audio {
+    /// Resample/reformat one buffer.  `cache` keeps the converter across calls —
+    /// building an AVAudioConverter per 4k-frame buffer is the difference
+    /// between free and audible.
+    static func convert(_ buffer: AVAudioPCMBuffer, to fmt: AVAudioFormat,
+                        cache: inout AVAudioConverter?) -> AVAudioPCMBuffer? {
+        if buffer.format == fmt { return buffer }
+        if cache == nil || cache!.inputFormat != buffer.format || cache!.outputFormat != fmt {
+            cache = AVAudioConverter(from: buffer.format, to: fmt)
+        }
+        guard let conv = cache else { return nil }
+        let ratio = fmt.sampleRate / buffer.format.sampleRate
+        let cap = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024
+        guard let outBuf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: cap) else { return nil }
+        var supplied = false
+        var err: NSError?
+        conv.convert(to: outBuf, error: &err) { _, status in
+            if supplied { status.pointee = .noDataNow; return nil }
+            supplied = true
+            status.pointee = .haveData
+            return buffer
+        }
+        if err != nil { return nil }
+        return outBuf.frameLength > 0 ? outBuf : nil
+    }
+}
+
+final class Recorder {
+    private let engine = AVAudioEngine()
+    private var running = false
+
+    func start(_ sink: @escaping (AVAudioPCMBuffer) -> Void) throws {
+        if running { return }
+        let input = engine.inputNode
+        let fmt = input.outputFormat(forBus: 0)
+        guard fmt.sampleRate > 0 else {
+            throw NSError(domain: "hermes.dictation", code: 4, userInfo: [
+                NSLocalizedDescriptionKey: "no usable audio input device"])
+        }
+        input.removeTap(onBus: 0)
+        input.installTap(onBus: 0, bufferSize: 4096, format: fmt) { buf, _ in sink(buf) }
+        engine.prepare()
+        try engine.start()
+        running = true
+    }
+
+    func stop() {
+        if !running { return }
+        running = false
+        engine.inputNode.removeTap(onBus: 0)
+        engine.stop()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// hotkey — a listen-only CGEventTap on flagsChanged
+// ---------------------------------------------------------------------------
+//
+// Push-to-talk needs to OBSERVE a modifier, not swallow a key, so the tap is
+// `.listenOnly`: the keystroke still reaches whatever app has focus.  Right
+// Option is the default because it is a modifier no shortcut uses on its own,
+// it is easy to hold, and unlike Fn/Globe macOS does not claim it for itself.
+//
+// Right Option is identified by the device-dependent bit 0x40 in the event
+// flags (NX_DEVICERALTKEYMASK), which is how left and right Option are told
+// apart; `.maskAlternate` alone cannot.
+
+private let kRightAltDeviceMask: UInt64 = 0x0000_0040
+
+enum HotkeyChoice: String {
+    case rightOption
+    case fn
+
+    var label: String {
+        switch self {
+        case .rightOption: return "Right Option"
+        case .fn: return "Fn (Globe)"
+        }
+    }
+
+    func isDown(_ flags: CGEventFlags) -> Bool {
+        switch self {
+        case .rightOption:
+            return flags.contains(.maskAlternate) && (flags.rawValue & kRightAltDeviceMask) != 0
+        case .fn:
+            return flags.contains(.maskSecondaryFn)
+        }
+    }
+}
+
+private func hotkeyTapCallback(proxy: CGEventTapProxy, type: CGEventType,
+                               event: CGEvent,
+                               refcon: UnsafeMutableRawPointer?) -> Unmanaged<CGEvent>? {
+    guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
+    let monitor = Unmanaged<HotkeyMonitor>.fromOpaque(refcon).takeUnretainedValue()
+    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+        monitor.reenable()
+        return Unmanaged.passUnretained(event)
+    }
+    if type == .flagsChanged {
+        monitor.handle(flags: event.flags)
+    }
+    return Unmanaged.passUnretained(event)
+}
+
+final class HotkeyMonitor {
+    var choice: HotkeyChoice = .rightOption
+    var onDown: () -> Void = {}
+    var onUp: () -> Void = {}
+
+    private var tap: CFMachPort?
+    private var source: CFRunLoopSource?
+    private var down = false
+
+    var isInstalled: Bool { tap != nil }
+
+    @discardableResult
+    func start() -> Bool {
+        if tap != nil { return true }
+        let mask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
+        guard let t = CGEvent.tapCreate(tap: .cgSessionEventTap,
+                                        place: .headInsertEventTap,
+                                        options: .listenOnly,
+                                        eventsOfInterest: mask,
+                                        callback: hotkeyTapCallback,
+                                        userInfo: Unmanaged.passUnretained(self).toOpaque())
+        else {
+            log("event tap refused — Accessibility is not granted yet")
+            return false
+        }
+        tap = t
+        source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, t, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: t, enable: true)
+        log("hotkey tap installed (\(choice.label))")
+        return true
+    }
+
+    func stop() {
+        if let s = source { CFRunLoopRemoveSource(CFRunLoopGetMain(), s, .commonModes) }
+        if let t = tap { CGEvent.tapEnable(tap: t, enable: false) }
+        source = nil
+        tap = nil
+        down = false
+    }
+
+    func reenable() {
+        guard let t = tap else { return }
+        CGEvent.tapEnable(tap: t, enable: true)
+        log("event tap re-enabled after a system disable")
+    }
+
+    fileprivate func handle(flags: CGEventFlags) {
+        let now = choice.isDown(flags)
+        if now == down { return }
+        down = now
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if now { self.onDown() } else { self.onUp() }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// text insertion
+// ---------------------------------------------------------------------------
+
+struct InsertResult {
+    let ok: Bool
+    let method: String        // "accessibility" | "paste" | "none"
+    let error: String?
+}
+
+enum Inserter {
+    static func insert(_ text: String, into pid: pid_t, appName: String) -> InsertResult {
+        if text.isEmpty { return InsertResult(ok: false, method: "none", error: "empty transcript") }
+        if Perms.secureInput() {
+            return InsertResult(ok: false, method: "none",
+                                error: "secure input is on (a password field, or Terminal's "
+                                     + "Secure Keyboard Entry) — macOS blocks inserted text there")
+        }
+        // Never type into a different app than the one that was frontmost when
+        // the hotkey went down.
+        let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        if front != pid {
+            return InsertResult(ok: false, method: "none",
+                                error: "focus left \(appName) while you were speaking — "
+                                     + "nothing was inserted")
+        }
+        if AXIsProcessTrusted(), axInsert(text, pid: pid) {
+            return InsertResult(ok: true, method: "accessibility", error: nil)
+        }
+        if pasteInsert(text) {
+            return InsertResult(ok: true, method: "paste", error: nil)
+        }
+        return InsertResult(ok: false, method: "none",
+                            error: "could not insert the text (no editable field had focus)")
+    }
+
+    // --- Accessibility --------------------------------------------------
+    private static func axInsert(_ text: String, pid: pid_t) -> Bool {
+        let app = AXUIElementCreateApplication(pid)
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString,
+                                            &focusedRef) == .success,
+              let focused = focusedRef, CFGetTypeID(focused) == AXUIElementGetTypeID()
+        else { return false }
+        let element = unsafeBitCast(focused, to: AXUIElement.self)
+
+        // 1. Replace the selection.  This is one call and works in AppKit,
+        //    Catalyst and most native text views.
+        if AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString,
+                                        text as CFTypeRef) == .success {
+            return true
+        }
+
+        // 2. Splice into the value at the selected range.  Electron/CEF fields
+        //    that expose a value but refuse a selected-text write land here.
+        var valueRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString,
+                                            &valueRef) == .success,
+              let value = valueRef as? String
+        else { return false }
+
+        var rangeRef: CFTypeRef?
+        var loc = value.count
+        var len = 0
+        if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString,
+                                         &rangeRef) == .success,
+           let r = rangeRef, CFGetTypeID(r) == AXValueGetTypeID() {
+            var cf = CFRange(location: 0, length: 0)
+            if AXValueGetValue(unsafeBitCast(r, to: AXValue.self), .cfRange, &cf) {
+                loc = max(0, min(value.count, cf.location))
+                len = max(0, min(value.count - loc, cf.length))
+            }
+        }
+        let chars = Array(value)
+        let head = String(chars[0..<loc])
+        let tail = String(chars[(loc + len)...])
+        let merged = head + text + tail
+        guard AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString,
+                                           merged as CFTypeRef) == .success
+        else { return false }
+        // Put the caret after what we inserted; a field that refuses this is
+        // still correctly filled, so the return value is deliberately ignored.
+        var after = CFRange(location: loc + text.count, length: 0)
+        if let axr = AXValueCreate(.cfRange, &after) {
+            _ = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, axr)
+        }
+        return true
+    }
+
+    // --- clipboard + Cmd-V ----------------------------------------------
+    private static func pasteInsert(_ text: String) -> Bool {
+        let pb = NSPasteboard.general
+        let saved = snapshot(pb)
+        pb.clearContents()
+        guard pb.setString(text, forType: .string) else {
+            restore(pb, saved)
+            return false
+        }
+        guard postCommandV() else {
+            restore(pb, saved)
+            return false
+        }
+        // The paste is asynchronous in the receiving app; restoring immediately
+        // would race it.  Half a second is long enough for every app tested and
+        // short enough that a real Cmd-V in between is unlikely.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            restore(pb, saved)
+        }
+        return true
+    }
+
+    private static func postCommandV() -> Bool {
+        guard let src = CGEventSource(stateID: .combinedSessionState) else { return false }
+        let v = CGKeyCode(kVK_ANSI_V)
+        guard let down = CGEvent(keyboardEventSource: src, virtualKey: v, keyDown: true),
+              let up = CGEvent(keyboardEventSource: src, virtualKey: v, keyDown: false)
+        else { return false }
+        down.flags = .maskCommand
+        up.flags = .maskCommand
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
+        return true
+    }
+
+    private static func snapshot(_ pb: NSPasteboard) -> [[NSPasteboard.PasteboardType: Data]] {
+        var saved: [[NSPasteboard.PasteboardType: Data]] = []
+        for item in pb.pasteboardItems ?? [] {
+            var one: [NSPasteboard.PasteboardType: Data] = [:]
+            for type in item.types {
+                if let d = item.data(forType: type) { one[type] = d }
+            }
+            if !one.isEmpty { saved.append(one) }
+        }
+        return saved
+    }
+
+    private static func restore(_ pb: NSPasteboard, _ saved: [[NSPasteboard.PasteboardType: Data]]) {
+        pb.clearContents()
+        if saved.isEmpty { return }
+        var items: [NSPasteboardItem] = []
+        for one in saved {
+            let item = NSPasteboardItem()
+            for (type, data) in one { item.setData(data, forType: type) }
+            items.append(item)
+        }
+        pb.writeObjects(items)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// menu-bar icon — drawn, not shipped as an asset
+// ---------------------------------------------------------------------------
+//
+// A template image (black + alpha) so macOS tints it for light, dark and the
+// highlighted menu-bar state on its own.  Four states, distinguishable at 18pt
+// without colour: outline mic (idle), filled mic (listening), mic with three
+// dots (cleaning), mic with a slash (error).
+
+enum StatusIcon {
+    enum State { case idle, listening, cleaning, error }
+
+    static func image(_ state: State) -> NSImage {
+        let size = NSSize(width: 18, height: 18)
+        let img = NSImage(size: size, flipped: false) { _ in
+            let body = NSBezierPath(roundedRect: NSRect(x: 6.6, y: 6.6, width: 4.8, height: 8.4),
+                                    xRadius: 2.4, yRadius: 2.4)
+            let cradle = NSBezierPath()
+            cradle.appendArc(withCenter: NSPoint(x: 9, y: 7.2), radius: 4.0,
+                             startAngle: 200, endAngle: 340, clockwise: true)
+            let stem = NSBezierPath()
+            stem.move(to: NSPoint(x: 9, y: 3.2))
+            stem.line(to: NSPoint(x: 9, y: 1.5))
+
+            NSColor.black.setStroke()
+            NSColor.black.setFill()
+
+            switch state {
+            case .listening:
+                body.fill()
+            default:
+                body.lineWidth = 1.5
+                body.stroke()
+            }
+            cradle.lineWidth = 1.5
+            cradle.lineCapStyle = .round
+            cradle.stroke()
+            stem.lineWidth = 1.5
+            stem.lineCapStyle = .round
+            stem.stroke()
+
+            if state == .cleaning {
+                for i in 0..<3 {
+                    let dot = NSBezierPath(ovalIn: NSRect(x: 13.4, y: 13.2 - Double(i) * 2.6,
+                                                          width: 1.8, height: 1.8))
+                    dot.fill()
+                }
+            }
+            if state == .error {
+                let slash = NSBezierPath()
+                slash.move(to: NSPoint(x: 3.4, y: 3.0))
+                slash.line(to: NSPoint(x: 14.6, y: 15.4))
+                slash.lineWidth = 1.8
+                slash.lineCapStyle = .round
+                slash.stroke()
+            }
+            return true
+        }
+        img.isTemplate = true
+        return img
+    }
+}
+
+// ---------------------------------------------------------------------------
+// the helper itself
+// ---------------------------------------------------------------------------
+
+let kDefaultsHotkey = "hotkey"
+let kDefaultsCleanup = "cleanup"
+
+final class Controller: NSObject, NSApplicationDelegate {
+    private var statusItem: NSStatusItem!
+    private let hotkey = HotkeyMonitor()
+    private let recorder = Recorder()
+
+    private var state: StatusIcon.State = .idle
+    private var session: LiveSession?
+    private var engineKind = preferredEngine()
+    private var assetInstalled: Bool?
+
+    private var startedAt: Double = 0
+    private var targetPid: pid_t = 0
+    private var targetBundle = ""
+    private var targetName = ""
+
+    private var cleanup = "rules"          // mirrors the dashboard setting
+    private var lastNote = ""
+    private var heartbeat: Timer?
+
+    // --- lifecycle -------------------------------------------------------
+
+    func applicationDidFinishLaunching(_ note: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem.button?.image = StatusIcon.image(.idle)
+        statusItem.button?.toolTip = kAppName
+        rebuildMenu()
+
+        hotkey.choice = savedHotkey()
+        hotkey.onDown = { [weak self] in self?.beginDictation() }
+        hotkey.onUp = { [weak self] in self?.endDictation() }
+        if !hotkey.start() {
+            lastNote = "Accessibility permission is needed for the hotkey."
+            Perms.promptAccessibility()
+        }
+        if #available(macOS 26.0, *), engineKind == .analyzer {
+            Task { @MainActor in
+                let ok = await AnalyzerSupport.installed()
+                self.assetInstalled = ok
+                self.rebuildMenu()
+                self.sendHeartbeat()
+            }
+        }
+        pullSettings()
+        sendHeartbeat()
+        heartbeat = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+            self?.retryTapIfNeeded()
+            self?.sendHeartbeat()
+        }
+        log("\(kAppName) \(appVersion()) ready — hold \(hotkey.choice.label)")
+    }
+
+    func applicationWillTerminate(_ note: Notification) {
+        heartbeat?.invalidate()
+        recorder.stop()
+        hotkey.stop()
+        // Synchronous on purpose: `Dash.post` already blocks on a semaphore and
+        // the process is about to go away, so there is nowhere to hand this off to.
+        Dash.post("/api/dictation/status", statusPayload(running: false), timeout: 2)
+    }
+
+    // --- state -----------------------------------------------------------
+
+    private func setState(_ s: StatusIcon.State) {
+        state = s
+        statusItem.button?.image = StatusIcon.image(s)
+        rebuildMenu()
+        sendHeartbeat()
+    }
+
+    private func retryTapIfNeeded() {
+        if !hotkey.isInstalled && AXIsProcessTrusted() {
+            if hotkey.start() {
+                lastNote = ""
+                rebuildMenu()
+            }
+        }
+    }
+
+    // --- dictation -------------------------------------------------------
+
+    private func beginDictation() {
+        if session != nil { return }
+        if Perms.mic() == .unknown {
+            Perms.requestMic { [weak self] ok in
+                self?.lastNote = ok ? "" : "Microphone access was declined."
+                self?.rebuildMenu()
+            }
+            return
+        }
+        if Perms.mic() == .denied {
+            lastNote = "Microphone access is off for this helper."
+            setState(.error)
+            return
+        }
+        guard let front = NSWorkspace.shared.frontmostApplication else { return }
+        targetPid = front.processIdentifier
+        targetBundle = front.bundleIdentifier ?? ""
+        targetName = front.localizedName ?? ""
+        startedAt = nowMs()
+        lastNote = ""
+
+        if #available(macOS 26.0, *), engineKind == .analyzer {
+            let live = AnalyzerLive()
+            Task { @MainActor in
+                do {
+                    try await live.start()
+                    self.startCapture(live)
+                } catch {
+                    log("SpeechAnalyzer refused (\(error.localizedDescription)) — falling back")
+                    self.engineKind = .legacy
+                    self.startLegacy()
+                }
+            }
+        } else {
+            startLegacy()
+        }
+    }
+
+    private func startLegacy() {
+        let live = LegacyLive()
+        do {
+            try live.start()
+            startCapture(live)
+        } catch {
+            lastNote = error.localizedDescription
+            setState(.error)
+        }
+    }
+
+    private func startCapture(_ live: LiveSession) {
+        session = live
+        do {
+            try recorder.start { [weak live] buf in live?.feed(buf) }
+            setState(.listening)
+        } catch {
+            session = nil
+            lastNote = error.localizedDescription
+            setState(.error)
+        }
+    }
+
+    private func endDictation() {
+        guard let live = session else { return }
+        session = nil
+        recorder.stop()
+        setState(.cleaning)
+        let duration = nowMs() - startedAt
+        let bundle = targetBundle, name = targetName, pid = targetPid
+        let engine = engineKind.label
+        live.finish { [weak self] text, err in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if text.isEmpty {
+                    self.lastNote = err ?? "nothing was heard"
+                    self.setState(.error)
+                    return
+                }
+                DispatchQueue.global().async {
+                    let cleaned = self.cleanUp(text, bundle: bundle, name: name,
+                                               duration: duration, engine: engine)
+                    DispatchQueue.main.async {
+                        let res = Inserter.insert(cleaned, into: pid, appName: name)
+                        if res.ok {
+                            self.lastNote = ""
+                            self.setState(.idle)
+                        } else {
+                            self.lastNote = res.error ?? "the text could not be inserted"
+                            log("insert failed: \(self.lastNote)")
+                            self.setState(.error)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The dashboard cleans the transcript.  It is allowed to be down, slow or
+    /// wrong: any of those and the raw transcript is what gets inserted.
+    private func cleanUp(_ raw: String, bundle: String, name: String,
+                         duration: Double, engine: String) -> String {
+        let body: [String: Any] = ["text": raw, "app_bundle": bundle, "app_name": name,
+                                   "duration_ms": Int(duration.rounded()), "engine": engine]
+        guard let resp = Dash.post("/api/dictation/finish", body, timeout: 8),
+              let text = resp["text"] as? String, !text.isEmpty
+        else {
+            log("dashboard unreachable or empty answer — inserting the raw transcript")
+            return raw
+        }
+        return text
+    }
+
+    // --- dashboard heartbeat --------------------------------------------
+
+    private func statusPayload(running: Bool) -> [String: Any] {
+        [
+            "running": running,
+            "state": String(describing: state),
+            "mic": Perms.mic().rawValue,
+            "accessibility": (hotkey.isInstalled ? Grant.granted : Perms.accessibility()).rawValue,
+            "speech": Perms.speech(engine: engineKind.label, assetInstalled: assetInstalled).rawValue,
+            "engine": engineKind.label,
+            "hotkey": hotkey.choice.label,
+            "note": lastNote,
+            "version": appVersion(),
+        ]
+    }
+
+    private func sendHeartbeat() {
+        let payload = statusPayload(running: true)
+        DispatchQueue.global().async {
+            Dash.post("/api/dictation/status", payload, timeout: 4)
+        }
+    }
+
+    private func pullSettings() {
+        DispatchQueue.global().async { [weak self] in
+            guard let s = Dash.get("/api/dictation/settings", timeout: 4),
+                  let mode = s["cleanup"] as? String else { return }
+            DispatchQueue.main.async {
+                self?.cleanup = mode
+                self?.rebuildMenu()
+            }
+        }
+    }
+
+    private func pushCleanup(_ mode: String) {
+        cleanup = mode
+        rebuildMenu()
+        DispatchQueue.global().async {
+            Dash.post("/api/dictation/settings", ["cleanup": mode], timeout: 4)
+        }
+    }
+
+    // --- menu ------------------------------------------------------------
+
+    private func savedHotkey() -> HotkeyChoice {
+        let raw = UserDefaults.standard.string(forKey: kDefaultsHotkey) ?? ""
+        return HotkeyChoice(rawValue: raw) ?? .rightOption
+    }
+
+    private func rebuildMenu() {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        let head = NSMenuItem(title: headline(), action: nil, keyEquivalent: "")
+        head.isEnabled = false
+        menu.addItem(head)
+        if !lastNote.isEmpty {
+            let note = NSMenuItem(title: lastNote, action: nil, keyEquivalent: "")
+            note.isEnabled = false
+            menu.addItem(note)
+        }
+        if !AXIsProcessTrusted() {
+            let grant = NSMenuItem(title: "Grant Accessibility permission…",
+                                   action: #selector(grantAccessibility), keyEquivalent: "")
+            grant.target = self
+            menu.addItem(grant)
+        }
+        menu.addItem(.separator())
+
+        let login = NSMenuItem(title: "Start at login", action: #selector(toggleLogin),
+                               keyEquivalent: "")
+        login.target = self
+        login.state = loginEnabled() ? .on : .off
+        menu.addItem(login)
+
+        let hk = NSMenuItem(title: "Hotkey", action: nil, keyEquivalent: "")
+        let hkMenu = NSMenu()
+        for choice in [HotkeyChoice.rightOption, .fn] {
+            let it = NSMenuItem(title: choice.label, action: #selector(pickHotkey(_:)),
+                                keyEquivalent: "")
+            it.target = self
+            it.representedObject = choice.rawValue
+            it.state = (hotkey.choice == choice) ? .on : .off
+            hkMenu.addItem(it)
+        }
+        hk.submenu = hkMenu
+        menu.addItem(hk)
+
+        let cu = NSMenuItem(title: "Cleanup", action: nil, keyEquivalent: "")
+        let cuMenu = NSMenu()
+        for (key, label) in [("off", "Off — raw transcript"),
+                             ("rules", "Rules — fillers and punctuation"),
+                             ("model", "Model — rules, then the local model")] {
+            let it = NSMenuItem(title: label, action: #selector(pickCleanup(_:)), keyEquivalent: "")
+            it.target = self
+            it.representedObject = key
+            it.state = (cleanup == key) ? .on : .off
+            cuMenu.addItem(it)
+        }
+        cu.submenu = cuMenu
+        menu.addItem(cu)
+
+        menu.addItem(.separator())
+        let settings = NSMenuItem(title: "Open Settings…", action: #selector(openSettings),
+                                  keyEquivalent: "")
+        settings.target = self
+        menu.addItem(settings)
+        let quit = NSMenuItem(title: "Quit \(kAppName)", action: #selector(quit),
+                              keyEquivalent: "q")
+        quit.target = self
+        menu.addItem(quit)
+
+        statusItem.menu = menu
+    }
+
+    private func headline() -> String {
+        switch state {
+        case .idle:
+            return hotkey.isInstalled ? "Ready — hold \(hotkey.choice.label)"
+                                      : "Hotkey inactive"
+        case .listening: return "Listening…"
+        case .cleaning: return "Transcribing…"
+        case .error: return "Last dictation did not land"
+        }
+    }
+
+    private func loginEnabled() -> Bool {
+        if #available(macOS 13.0, *) {
+            return SMAppService.mainApp.status == .enabled
+        }
+        return false
+    }
+
+    @objc private func toggleLogin() {
+        guard #available(macOS 13.0, *) else { return }
+        do {
+            if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+            } else {
+                try SMAppService.mainApp.register()
+            }
+        } catch {
+            lastNote = "Start at login failed: \(error.localizedDescription)"
+        }
+        rebuildMenu()
+    }
+
+    @objc private func grantAccessibility() {
+        Perms.promptAccessibility()
+    }
+
+    @objc private func pickHotkey(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let choice = HotkeyChoice(rawValue: raw) else { return }
+        hotkey.choice = choice
+        UserDefaults.standard.set(raw, forKey: kDefaultsHotkey)
+        rebuildMenu()
+        sendHeartbeat()
+    }
+
+    @objc private func pickCleanup(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        pushCleanup(key)
+    }
+
+    @objc private func openSettings() {
+        if let url = URL(string: Dash.base + "/#settings/models") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc private func quit() {
+        NSApp.terminate(nil)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// command-line modes
+// ---------------------------------------------------------------------------
+
+func runSelftest(_ path: String) -> Int32 {
+    let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+    guard FileManager.default.fileExists(atPath: url.path) else {
+        out("selftest: no such file: \(url.path)")
+        return 2
+    }
+    let kind = preferredEngine()
+    out("engine: \(kind.label)")
+    var text = ""
+    var err: String?
+    let sem = DispatchSemaphore(value: 0)
+
+    if #available(macOS 26.0, *), kind == .analyzer {
+        Task {
+            do {
+                text = try await AnalyzerSupport.transcribeFile(url)
+            } catch {
+                err = error.localizedDescription
+            }
+            sem.signal()
+        }
+    } else {
+        LegacyLive.transcribeFile(url) { t, e in
+            text = t
+            err = e
+            sem.signal()
+        }
+    }
+    if sem.wait(timeout: .now() + 180) == .timedOut {
+        out("selftest: timed out after 180s")
+        return 3
+    }
+    if let e = err, text.isEmpty {
+        out("selftest: FAILED — \(e)")
+        return 1
+    }
+    out("transcript: \(text)")
+    return text.isEmpty ? 1 : 0
+}
+
+func runProbe() -> Int32 {
+    let kind = preferredEngine()
+    var payload: [String: Any] = [
+        "version": appVersion(),
+        "engine": kind.label,
+        "mic": Perms.mic().rawValue,
+        "accessibility": Perms.accessibility().rawValue,
+        "secure_input": Perms.secureInput(),
+        "dashboard": Dash.base,
+    ]
+    if #available(macOS 26.0, *), kind == .analyzer {
+        let sem = DispatchSemaphore(value: 0)
+        var installed = false
+        var supported = false
+        Task {
+            supported = await AnalyzerSupport.supported()
+            installed = await AnalyzerSupport.installed()
+            sem.signal()
+        }
+        _ = sem.wait(timeout: .now() + 30)
+        payload["locale"] = AnalyzerSupport.locale().identifier(.bcp47)
+        payload["locale_supported"] = supported
+        payload["asset_installed"] = installed
+        payload["speech"] = Perms.speech(engine: kind.label, assetInstalled: installed).rawValue
+    } else {
+        payload["speech"] = Perms.speech(engine: kind.label, assetInstalled: nil).rawValue
+    }
+    let data = (try? JSONSerialization.data(withJSONObject: payload,
+                                            options: [.prettyPrinted, .sortedKeys])) ?? Data()
+    out(String(data: data, encoding: .utf8) ?? "{}")
+    return 0
+}
+
+let kHelp = """
+\(kAppName) \(appVersion()) — local push-to-talk dictation.
+
+  HermesDictation                 run as a menu-bar app (hold the hotkey to talk)
+  HermesDictation --selftest FILE transcribe an audio file and print the text
+  HermesDictation --probe         print engine + permission status as JSON
+  HermesDictation --version       print the version
+  HermesDictation --help          this
+
+Audio never leaves this Mac.  The dashboard (\(Dash.base)) is asked to clean the
+transcript up; if it is not running, the raw transcript is used instead.
+"""
+
+// ---------------------------------------------------------------------------
+// entry point
+// ---------------------------------------------------------------------------
+
+let args = Array(CommandLine.arguments.dropFirst())
+
+if args.first == "--help" || args.first == "-h" {
+    out(kHelp)
+    exit(0)
+}
+if args.first == "--version" {
+    out(appVersion())
+    exit(0)
+}
+if args.first == "--probe" {
+    exit(runProbe())
+}
+if args.first == "--selftest" {
+    guard args.count >= 2 else {
+        out("usage: HermesDictation --selftest <audio file>")
+        exit(2)
+    }
+    exit(runSelftest(args[1]))
+}
+
+let app = NSApplication.shared
+let controller = Controller()
+app.delegate = controller
+app.run()

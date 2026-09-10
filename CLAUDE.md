@@ -794,6 +794,8 @@ tail -f ~/.hermes/logs/{dashboard,serve,gateway}.log        # logs
 hermes gateway status                 # Telegram gateway health
 hermes -z "hi"                        # test the agent directly
 curl -s localhost:8080/v1/models      # is the model up
+tools/tests/run.sh                    # unit tests (CI runs exactly this)
+tools/tests/run.sh live|browser|all   # the tiers that need the dashboard
 ```
 
 ## Hard-won gotchas (do not re-learn these)

@@ -553,6 +553,101 @@ def _goog_disconnect_handler(ctx):
 
 
 # --------------------------------------------------------------------------
+# calendar (read-only — the "today" context source when Google is connected)
+#
+# Owner call (2026-09): Reminders/Notes automation defaults off (repeated
+# osascript launches of those apps), and Google Calendar is connected, so
+# server.py's access_preamble() prefers THIS over the icalBuddy-backed
+# macos_calendar() when connected, and drops the calendar line entirely
+# otherwise — resolved by name at call time (aux_google.py execs after
+# server.py's body), same discipline aux_index/aux_memlayer document.
+# --------------------------------------------------------------------------
+GOOG_CAL_TTL = 300
+
+
+def _goog_ensure_access_token():
+    """A live access token, refreshing via the stored refresh_token if the
+    cached one is expired.  None if not connected or the refresh fails — this
+    never raises and never prompts; the caller degrades to "unavailable"."""
+    payload = _goog_read_json(GOOG_TOKEN)
+    if not isinstance(payload, dict):
+        return None
+    expiry = (_goog_parse_expiry(payload.get("expiry"))
+              if payload.get("expiry") else None)
+    now_utc = _goog_datetime.datetime.now(
+        _goog_datetime.timezone.utc).replace(tzinfo=None)
+    if payload.get("token") and not (expiry and expiry <= now_utc):
+        return payload["token"]
+    refresh = payload.get("refresh_token")
+    if not refresh:
+        return None
+    st, resp = _goog_post_form(payload.get("token_uri") or GOOG_TOKEN_URI, {
+        "client_id": payload.get("client_id") or "",
+        "client_secret": payload.get("client_secret") or "",
+        "refresh_token": refresh,
+        "grant_type": "refresh_token",
+    })
+    if st != 200 or not resp.get("access_token"):
+        return None
+    expires_in = int(resp.get("expires_in") or 3600)
+    new_expiry = (_goog_datetime.datetime.now(_goog_datetime.timezone.utc)
+                  .replace(tzinfo=None)
+                  + _goog_datetime.timedelta(seconds=expires_in))
+    payload["token"] = resp["access_token"]
+    payload["expiry"] = new_expiry.isoformat() + "Z"
+    try:
+        _goog_atomic_write(GOOG_TOKEN, json.dumps(payload, indent=2))
+    except Exception:
+        pass  # a failed persist just means the next call refreshes again
+    return payload["token"]
+
+
+def _goog_calendar_fetch():
+    token = _goog_ensure_access_token()
+    if not token:
+        return {"available": False, "reason": "not_connected"}
+    lt = time.localtime()
+    day_start = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+    day_end = day_start + 86400
+
+    def rfc(ts):
+        return _goog_datetime.datetime.utcfromtimestamp(ts).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+
+    qs = urllib.parse.urlencode({
+        "timeMin": rfc(day_start), "timeMax": rfc(day_end),
+        "singleEvents": "true", "orderBy": "startTime", "maxResults": "20",
+    })
+    url = "https://www.googleapis.com/calendar/v3/calendars/primary/events?" + qs
+    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
+    try:
+        with urllib.request.urlopen(req, timeout=10, context=_goog_sslctx()) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception as e:
+        return {"available": False, "reason": "google_calendar_error: " + type(e).__name__}
+    events = []
+    for it in (data.get("items") or []):
+        if not isinstance(it, dict) or it.get("status") == "cancelled":
+            continue
+        start = it.get("start") or {}
+        title = str(it.get("summary") or "(untitled)")[:120]
+        tstr = ""
+        if start.get("dateTime"):
+            try:
+                dt = _goog_datetime.datetime.fromisoformat(
+                    str(start["dateTime"]).replace("Z", "+00:00")).astimezone()
+                tstr = dt.strftime("%H:%M")
+            except Exception:
+                tstr = ""
+        events.append({"time": tstr, "title": title})
+    return {"available": True, "events": events[:12]}
+
+
+def _goog_calendar_events():
+    return _cached("goog_calendar", GOOG_CAL_TTL, _goog_calendar_fetch)
+
+
+# --------------------------------------------------------------------------
 # routes
 # --------------------------------------------------------------------------
 register_get("/api/google/status", _goog_status_handler)

@@ -5,8 +5,14 @@
 // Zero emoji; bespoke two-tone SVG only; 12-hour times; strings via esc().
 //
 // Public (top-level so the headless render harness can call renderRecorderRows
-// directly, and so inline nothing is needed): renderRecorderRows(actions)
-// returns pure HTML; loadRecorder / recUndo / recDetail drive the live panel.
+// directly, and so inline nothing is needed): renderRecorderRows(actions) and
+// renderRecorderRetention(payload) return pure HTML; loadRecorder / recUndo /
+// recDetail drive the live panel.
+//
+// The card's one settings surface is the retention footer — "Keep history
+// <n days>", GET/POST /api/recorder/retention — deliberately BELOW the feed
+// and in --faint, so it reads as a setting about the log rather than as
+// another line of it.
 
 var recState = {filter: "all", expanded: null, detail: {}, last: null,
                 ckpt: true, err: false, busy: {}};
@@ -226,6 +232,17 @@ function recInjectCss(){
     '.rec-detail .diff .add{color:var(--ok)}.rec-detail .diff .del{color:var(--bad)}',
     '.rec-empty,.rec-hint{font-size:11.5px;color:var(--muted);line-height:1.55;padding:8px 2px}',
     '.rec-hint.bad{color:var(--bad)}',
+    // Retention: one quiet footer line under the feed. It must READ as
+    // settings, not as another row of the log, so it sits below a hairline in
+    // --faint, and it never wraps into two lines in the 320px Agent rail.
+    '#recorder-card .rec-retain{display:flex;align-items:center;gap:8px;margin-top:10px;' +
+      'padding-top:9px;border-top:1px solid var(--hairline);font-size:11px;' +
+      'color:var(--faint);line-height:1.5;flex-wrap:wrap}',
+    '#recorder-card .rec-retain select{font:inherit;font-size:11px;color:var(--ink);' +
+      'background:var(--chip);border:1px solid var(--hairline);border-radius:8px;' +
+      'padding:5px 8px;min-height:32px;cursor:pointer}',
+    '#recorder-card .rec-retain .rr-note{flex:1 1 100%;color:var(--faint);font-size:10.5px}',
+    '#recorder-card .rec-retain .rr-note.bad{color:var(--bad)}',
     '#recorder-card .skel i{height:26px}'
   ].join("");
   document.head.appendChild(s);
@@ -249,7 +266,8 @@ function recEnsureCard(){
       'Flight Recorder <span class="rec-count" id="rec-count"></span></h2>' +
     '<div class="body"><div id="rec-banner"></div>' +
     '<div class="rec-filters" id="rec-filters"></div>' +
-    '<div id="rec-list"><div class="skel"><i></i><i></i><i></i></div></div></div>';
+    '<div id="rec-list"><div class="skel"><i></i><i></i><i></i></div></div>' +
+    '<div class="rec-retain" id="rec-retain" hidden></div></div>';
   host.insertBefore(card, host.firstChild);
   return card;
 }
@@ -281,6 +299,7 @@ async function loadRecorder(){
   var card = recEnsureCard();
   if (!card) return;
   recRenderFilters();
+  recLoadRetention();          // own cadence (60s), not the 3s console poll
   var url = "/api/recorder?limit=50";
   if (recState.filter !== "all") url += "&kind=" + encodeURIComponent(recState.filter);
   var d;
@@ -366,6 +385,123 @@ function recAppendHint(msg){
   h.className = "rec-hint rec-livehint";
   h.textContent = msg;
   lst.appendChild(h);
+}
+
+// ---- retention -----------------------------------------------------------
+// recorder.db used to grow forever. The window lives in settings.json
+// (recorder.retain_days) and is swept once a day by the reconciler; this is
+// the control for it. Fetched ONCE, not on the 3s console poll — the feed
+// refreshes constantly and a settings row that re-renders under the cursor
+// is how a select gets closed mid-choice.
+var recRetain = {data: null, loaded: false, busy: false, err: "", at: 0};
+var REC_RETAIN_TTL_MS = 60000;      // the counts move slowly; the feed does not
+
+var REC_RETAIN_CHOICES = [14, 30, 60, 90, 180, 365];
+
+function recRetainLabel(days){
+  if (!days) return "forever";
+  return days + " day" + (days === 1 ? "" : "s");
+}
+
+// Pure: (payload) -> the control's inner HTML. Exported for the headless
+// render harness, like renderRecorderRows.
+function renderRecorderRetention(d){
+  if (!d || d.ok === false) {
+    return '<span class="rr-note bad">' +
+      recE((d && d.error) || "retention settings unavailable") + "</span>";
+  }
+  var cur = (typeof d.retain_days === "number") ? d.retain_days : 90;
+  var min = d.min_days || 14;
+  var choices = REC_RETAIN_CHOICES.filter(function(n){ return n >= min; });
+  if (cur && choices.indexOf(cur) < 0) choices.push(cur);
+  choices.sort(function(a, b){ return a - b; });
+
+  var opts = choices.map(function(n){
+    return '<option value="' + n + '"' + (n === cur ? " selected" : "") + ">" +
+           recE(recRetainLabel(n)) + "</option>";
+  }).join("") +
+    '<option value="0"' + (cur ? "" : " selected") + ">" + recE("keep forever") + "</option>";
+
+  var next = d.next_sweep || null;
+  var note;
+  if (!cur) {
+    note = "Nothing is ever deleted. The database grows with every tool call.";
+  } else if (next && next.would_delete) {
+    note = "The next daily sweep removes " + next.would_delete + " row" +
+           (next.would_delete === 1 ? "" : "s") + ".";
+  } else {
+    note = "Nothing is old enough to sweep yet.";
+  }
+  note += " Undone actions and anything still holding a snapshot are kept" +
+          " whatever their age — undo material outlives the window.";
+  if (d.clamped) {
+    note = min + " days is the minimum, to match how long undo material is" +
+           " kept. " + note;
+  }
+
+  return '<label for="rec-retain-sel">Keep history</label>' +
+    '<select id="rec-retain-sel"' + (recRetain.busy ? " disabled" : "") + ">" +
+    opts + "</select>" +
+    '<span>' + recE(String(d.total == null ? "" : d.total)) +
+    (d.total == null ? "" : (d.total === 1 ? " row" : " rows")) + "</span>" +
+    '<span class="rr-note' + (recRetain.err ? " bad" : "") + '">' +
+    recE(recRetain.err || note) + "</span>";
+}
+
+function recRenderRetention(){
+  var el = document.getElementById("rec-retain");
+  if (!el) return;
+  if (!recRetain.loaded) { el.hidden = true; return; }
+  // Never rebuild the row while the user is IN the select — replacing the
+  // element mid-choice closes the dropdown and loses the click.
+  var open = document.getElementById("rec-retain-sel");
+  if (open && document.activeElement === open && !recRetain.busy) return;
+  el.hidden = false;
+  el.innerHTML = renderRecorderRetention(recRetain.data);
+  var sel = document.getElementById("rec-retain-sel");
+  if (sel) sel.addEventListener("change", function(){ recSetRetention(sel.value); });
+}
+
+async function recLoadRetention(force){
+  var fresh = recRetain.loaded &&
+              (Date.now() - recRetain.at) < REC_RETAIN_TTL_MS;
+  if (fresh && !force) return;
+  try {
+    var d = await (await fetch("/api/recorder/retention", {cache: "no-store"})).json();
+    recRetain.data = d;
+    recRetain.loaded = true;
+    recRetain.at = Date.now();
+    recRetain.err = "";
+  } catch (e) {
+    // A card that cannot read its own setting keeps whatever it last read and
+    // shows nothing at all on a cold start: the feed above it is the point of
+    // the card, and a broken settings row must not eat it.
+    if (!recRetain.loaded) return;
+  }
+  recRenderRetention();
+}
+
+async function recSetRetention(v){
+  if (recRetain.busy) return;
+  recRetain.busy = true;
+  recRenderRetention();
+  try {
+    var r = await fetch("/api/recorder/retention", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({retain_days: Number(v)})
+    });
+    var d = await r.json();
+    recRetain.busy = false;
+    if (d && d.ok === false) { recRetain.err = d.error || "could not save"; }
+    else {
+      recRetain.err = ""; recRetain.data = d;
+      recRetain.loaded = true; recRetain.at = Date.now();
+    }
+  } catch (e) {
+    recRetain.busy = false;
+    recRetain.err = "could not save — the dashboard did not answer";
+  }
+  recRenderRetention();
 }
 
 // ---- detail pane (lazy diff) ---------------------------------------------

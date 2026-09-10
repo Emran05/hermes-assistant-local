@@ -280,6 +280,30 @@ else
 fi
 
 # ===========================================================================
+# 6b. the dictation helper (its own bundle, always built when it can be)
+# ===========================================================================
+# A SEPARATE app from Hermes Assistant.app on purpose: it needs its own
+# Microphone and Accessibility grants and will be rebuilt whenever dictation
+# changes, and rebuilding the MAIN app would drop its Full Disk Access. This
+# step only BUILDS it — launching is the user's job, because a GUI launch is
+# what makes the helper the process macOS attributes the microphone prompt to.
+step "Dictation helper"
+if ! command -v swiftc >/dev/null 2>&1; then
+  info "Skipped — swiftc is not installed (xcode-select --install), so voice"
+  info "dictation is unavailable. Everything else works without it."
+elif [ "$DRY" = "1" ]; then
+  plan "run app/build-dictation.sh (builds app/build/Hermes Dictation.app; never launches it)"
+else
+  if bash "$ROOT/app/build-dictation.sh"; then
+    info "Built. To use it: open \"$ROOT/app/build/Hermes Dictation.app\", grant"
+    info "Microphone and Accessibility when asked, then hold Right Option and talk."
+    info "Rebuilding the helper resets both grants (it is ad-hoc signed)."
+  else
+    warn "the dictation helper did not build — dictation stays off, nothing else changes"
+  fi
+fi
+
+# ===========================================================================
 # 7. services
 # ===========================================================================
 step "Background services"

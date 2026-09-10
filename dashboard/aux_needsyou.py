@@ -781,6 +781,8 @@ def _ny_rem_fetch():
     when the richer query fails — those rows simply have no deadline and are
     therefore never collected.
     """
+    if not apple_apps_enabled("reminders"):                       # noqa: F821
+        return {"ok": False, "error": "Apple Reminders is off in Settings"}
     def fetch():
         script = (
             'set out to ""\n'

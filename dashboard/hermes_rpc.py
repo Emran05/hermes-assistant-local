@@ -25,6 +25,12 @@ TOKEN_FILE = os.path.join(os.path.expanduser("~"), ".hermes", "dashboard",
                           "serve-token")
 TURN_TIMEOUT = int(os.environ.get("HUB_TURN_TIMEOUT", "600"))
 RECORDER_HOOK = None   # set by dashboard/aux_recorder.py; called (sid, etype, payload)
+# set by dashboard/aux_branch.py; called (chat_meta) -> extra `session.create`
+# params. Returns {} for an ordinary conversation (so the minting path below is
+# unchanged) and {"messages": [...seed...], "parent_session_id": ...} for a
+# branched one, which is how a fork carries its pre-branch history without a
+# single change to hermes-agent.
+SEED_HOOK = None
 
 try:
     import permissions as _perm   # P1.3 graduated permission tiers (policy engine)
@@ -226,10 +232,18 @@ def run_turn(job, chat_meta, prompt, save_meta, source="hub"):
             except WSError:
                 alive = False
         if not alive:
-            res = srv.call("session.create",
-                           {"title": chat_meta.get("title") or "Hub chat",
-                            "cwd": os.path.expanduser("~"), "source": source},
-                           timeout=20)
+            params = {"title": chat_meta.get("title") or "Hub chat",
+                      "cwd": os.path.expanduser("~"), "source": source}
+            # A branched conversation is born with the transcript it forked
+            # from (aux_branch.br_seed_params). Ordinary chats get {} back and
+            # take exactly the call they always took; a hook that raises is a
+            # branch with no context, never a lost turn.
+            if SEED_HOOK is not None:
+                try:
+                    params.update(SEED_HOOK(chat_meta) or {})
+                except Exception:
+                    pass
+            res = srv.call("session.create", params, timeout=20)
             sid = res.get("session_id") or ""
             key = res.get("stored_session_id") or res.get("session_key") or ""
             if not sid:

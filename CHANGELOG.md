@@ -6,6 +6,74 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-10
+
+The harness verifies itself and starts solving day-to-day problems: the test suites live in the
+repo with a CI job, conversations can be branched from any turn, dictation runs entirely on the
+Mac, Apple Reminders/Notes are no longer launched behind your back, and the 1.2 follow-ups land.
+
+### Added
+- **Apple Reminders/Notes automation is off by default** — every osascript read of Reminders
+  or Notes LAUNCHED the app and left it open on each refresh. New `apple_apps.{reminders,
+  notes}` toggles (off by default, `GET/POST /api/apple_apps`, Settings › Connections card)
+  gate all four call sites, showing a quiet "off" state instead. Google Calendar
+  (`aux_google.py`) now supplies calendar context when connected, with no Apple fallback.
+- **Local voice dictation** — hold Right Option anywhere on this Mac, talk, let go, and the
+  text lands at your cursor. A separate ad-hoc-signed helper (`app/dictation`, built by
+  `app/build-dictation.sh`) owns the microphone and the keyboard, because TCC will not let a
+  launchd python hold either and the main app is frozen; it transcribes with Apple's
+  on-device SpeechAnalyzer (SFSpeechRecognizer as the fallback), inserts via the
+  Accessibility API with a save-and-restore clipboard paste behind it, and heartbeats its own
+  three permissions to the dashboard. `aux_dictation.py` cleans the transcript — rules by
+  default (fillers, doubled words, self-corrections, dictionary, sentence case), optionally a
+  4 s pass on a lane that is **already** awake, never a wake — with per-app styles (prose /
+  casual / verbatim). Settings card, a doctor check, and history **off** by default.
+- **Branch a conversation from any turn** — hover a message, "Branch from here", and a new
+  conversation opens carrying that message and everything above it, leaving the original
+  untouched: a copy plus `forked_from`, one appended row in the source's `branches`, and a
+  `save_chat` that now refuses any save which would shorten either list. It gets its own
+  agent session lazily, seeded with the copied prefix — user/assistant text only, so tool
+  results before the cut are not carried (the UI says so). No agent-side change.
+  `POST /api/sessions/branch`, `GET /api/sessions/tree`, lineage on `GET /api/sessions`.
+- **The test suites are in the repo** — `tools/tests/`, one runner
+  (`run.sh unit|live|browser|all`), tiered by what a test needs: `unit/` (1,614
+  checks over the dashboard modules with stubbed globals and throwaway HOMEs),
+  `live/` (311, needs the dashboard, capture-and-restore), `browser/` (170,
+  Playwright), `ac/` (may load a model — refused off AC, never in CI). CI runs
+  the unit tier on macOS under a guard that makes the dashboard/model ports unreachable.
+- **The context meter sees the background lane** — it read only the primary model
+  server's log, so every token the briefing, the watchtower synthesis, the news pass and
+  For-You spend on the `:8081` lane was invisible. `GET /api/context/recent` now tails
+  `mlx-bg.log` as well (512 KB per log, cached per log — the read is exactly as bounded
+  as before), tags every row `lane: primary|bg`, takes an optional `&lane=` filter, and
+  the recent-turns table in Settings › Agent & Models names each row's lane. The
+  "compacted" heuristic compares a request only to the previous request of the SAME lane,
+  or a briefing's 40k prefill landing between two chat turns would read as a compaction.
+  The header chip and `/api/context/turn` stay primary-only on purpose: they describe the
+  chat turn that just ended.
+- **The flight recorder has a retention window** — `recorder.db` grew forever, a row per
+  tool call from every surface. `recorder.retain_days` in settings.json (default 90,
+  `0` = keep forever) is swept once a day by the reconciler, and the sweep never touches
+  undo material: a row you undid (the receipt for that restore) or one still holding a
+  snapshot survives whatever its age, and the window itself is clamped up to the 14-day
+  undo-trash TTL so the two can never disagree. `GET/POST /api/recorder/retention`, a
+  compact control in the Flight Recorder card's footer, a preview of what the next sweep
+  would remove before it removes it, and one log line per sweep with the count deleted.
+
+### Fixed
+- **`memory_chars` outlives its chat job** — the characters the memory layer injects into
+  a turn were stamped on the in-memory job only, and the dashboard drops a finished job
+  after an hour, so every trace span exported later had a hole where that number should
+  have been. It is written to the per-turn metrics row now, and the trace export reads it
+  from there when the live job is gone (the live job still wins while it exists).
+- **dashboard.log rotates itself** — launchd opens `StandardOutPath` once and never
+  rotates it, so the hub's log grew for the life of the Mac and doctor had to work around
+  a 4 MB+ file. At startup and once an hour, a log over 8 MB is rotated to
+  `dashboard.log.1`…`.3` by copy-truncate — a rename would leave the service writing to
+  an inode with no name, since launchd holds the fd open. The fresh file opens with the
+  start banner doctor scopes its error count to, so "N error lines since the last start"
+  survives a rotation. `errors.log` belongs to the agent and is left alone.
+
 ## [1.2.4] - 2026-09-08
 
 Review release for the 1.2 line: a security pass and a silent-failure pass over everything

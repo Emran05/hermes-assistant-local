@@ -265,8 +265,20 @@ def _met_finish_turn(job, now):
         except Exception:
             model = ""
 
+        # What the memory layer injected into THIS turn's prompt (1.2.2).
+        # /api/chat stamps it on the job; the job is dropped an hour after it
+        # finishes, so without this the number only ever existed for an hour
+        # and every older trace span lost it. aux_trace reads it back off the
+        # metrics row when the live job is gone.
+        memory_chars = job.get("memory_chars")
+        try:
+            memory_chars = int(memory_chars) if memory_chars is not None else None
+        except (TypeError, ValueError):
+            memory_chars = None
+
         metrics_record(
             "turn", job=str(job.get("id") or "")[:12],
+            memory_chars=memory_chars,
             ttft_ms=(round(ttft_ms) if ttft_ms is not None else None),
             setup_ms=(round(setup_ms) if setup_ms is not None else None),
             serve_ttft_ms=(round(serve_ttft_ms) if serve_ttft_ms is not None else None),

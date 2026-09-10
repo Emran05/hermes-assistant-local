@@ -61,6 +61,12 @@ No inference API keys. No token bills. No transcript leaves the machine.
   interlinked notes (`obsidian_sync.py`, `obsidian_daily.py`).
 - **Modular widget hub** — 20+ widgets (markets, HN, GitHub trending, RSS,
   iMessage, Claude-plan usage…), each with a rich pop-out; add, remove, reorder.
+- **Apple Reminders/Notes automation, off by default** — reading either app via AppleScript
+  launches it and leaves it open, so the Reminders/Notes widgets, their pop-outs, and the
+  Needs-you inbox's reminders collector are gated behind two Settings › Connections switches
+  (`apple_apps.reminders` / `.notes`, both off) that show a quiet "off" state instead of
+  triggering the app. With Google Calendar connected, calendar/"today" context comes from
+  there instead — no Apple Calendar fallback.
 - **Updates that come to you** — Settings › System & Data checks GitHub
   Releases, shows the notes, and applies the update with a live log.
 
@@ -180,13 +186,24 @@ matched to a turn by time, and to the conversation lane by `stream=True` (the
 auxiliary traffic that shares the same server — conversation titles, the
 summariser itself — is `stream=False` and two orders of magnitude smaller).
 
+The background lane is read too. `~/.hermes/logs/mlx-bg.log` is the second
+model server's log (`:8081` — the briefing, the watchtower synthesis, the news
+pass, For-You), and the context those spend is context spent on this Mac, so
+every row in the table names its lane: **chat** or **background**. Each log is
+tailed separately, 512 KB apiece, and the "compacted" heuristic only ever
+compares a request to the previous request *of the same lane* — a briefing's
+40k-token prefill landing between two chat turns is not a conversation and must
+not look like one. The chip beside the model pill stays chat-only on purpose:
+it describes the turn you just had.
+
 When a compaction happens, the status line reads **Compacting context** while it
 runs and the transcript keeps a one-line note afterwards:
 
 > Context compacted — prompt went from 31.2k to 12.4k tokens
 
 **Settings › Agent & Models › Context & compaction** shows the window, the four
-knobs and the last ten turns as a table:
+knobs and the last ten requests as a table — time, lane, prompt, cached,
+prefill, compacted:
 
 | Setting | Range | What it does |
 |---|---|---|
@@ -203,7 +220,8 @@ the values up with no restart (an open one keeps the compressor it was built
 with). The card also names the model doing the summarising —
 `auxiliary.compression.model` if you set one, otherwise the main model.
 
-`GET /api/context/recent?n=20`, `GET /api/context/turn?job=<id>` and
+`GET /api/context/recent?n=20` (add `&lane=primary` or `&lane=bg` to narrow it;
+each row carries `lane`), `GET /api/context/turn?job=<id>` and
 `GET/POST /api/context/compression` for scripts.
 
 ### Tool output budget
@@ -288,6 +306,12 @@ and under that a **child span per tool call**, with its kind, target, status,
 duration, whether it is reversible and whether it was undone. Tool results the
 tool-output budget truncated appear as **events** on the turn they happened in.
 
+The memory-layer figure used to be the one number that decayed: it lived only
+on the in-memory chat job, and the dashboard drops a finished job after an
+hour, so any trace exported the next day had a hole where it should have been.
+It is written to the per-turn metrics row now, and the export reads it from
+there whenever the job is gone.
+
 There is no shared id between those stores — the metrics record carries the
 dashboard job id, the recorder's `session` means Hermes-agent's own session id
 on most rows, and there is no `job_id` column anywhere — so **the join is by
@@ -320,6 +344,18 @@ labelled `token=`/`api_key=` values, `Bearer` headers, and unlabelled shapes
 tokens). If that scrubber is somehow unavailable the export refuses rather than
 shipping unscrubbed text. Nothing is collected that was not already on disk,
 and nothing is sent anywhere: the route returns a file.
+
+**The recorder keeps 90 days.** `recorder.db` had no expiry — a row per tool
+call from every surface, forever. A sweep now runs once a day and deletes rows
+older than the window, with two exemptions that are the whole point of a flight
+recorder: a row you **undid** (it is the receipt for that restore) and a row
+still holding a **snapshot** (it is undo material) are kept whatever their age.
+For the same reason the window cannot be set below 14 days, which is how long
+an undone file stays in the undo trash. Set it from the footer of the Flight
+Recorder card in the Console view — 14 / 30 / 60 / 90 / 180 / 365 days, or
+*keep forever* — or with `GET/POST /api/recorder/retention {retain_days}`
+(`0` = forever). The GET previews how many rows the next sweep would remove
+before it removes them, and every sweep logs the count it deleted.
 
 
 ### Evals
@@ -375,6 +411,114 @@ suite's, and a scheduled run can never overwrite a drill result.
 `GET /api/evals` (settings, last run, the last 60 runs, the last run's cases),
 `POST /api/evals/run`, `POST /api/evals/settings`. Settings › Agent & Models ›
 Evals.
+
+
+### Branching a conversation
+
+Hover any message — yours or the assistant's — and a small branch action
+appears next to the copy button: **Branch from here**. It opens a new
+conversation carrying that message and everything above it, and leaves the one
+you were in exactly as it was. Use it to try a second answer without losing the
+first, or to fork a long thread before taking it somewhere narrow.
+
+Nothing is ever rewritten. The branch is a new `chats/<id>.json` holding a copy
+of the prefix (timestamps and all) plus a `forked_from` record; the source
+gains one appended row in a `branches` list and not a single edit to its
+messages. `save_chat` enforces that: a save that would shorten either list is
+refused unless the caller explicitly asks to truncate, so a checkpoint you can
+branch from is still there tomorrow. The sidebar shows the lineage quietly —
+*from &lt;title&gt; · turn n* on a branch, *n branches* on its source — and
+`GET /api/sessions/tree?session=<id>` returns the whole line: ancestors, the
+cut point each was made at, and every child with its title and message count.
+
+**What a branch carries.** The new conversation gets its own agent session, and
+it gets it lazily — nothing talks to the model until you actually send
+something. On that first message the session is created with the copied prefix
+as seed history, so the assistant opens the branch already knowing the
+conversation. What the seed cannot carry is tool activity: `session.create`
+accepts user, assistant and system **text** only, so tool calls and their
+results from before the branch point do not come across. The UI says so when
+you branch, and it is the one thing to keep in mind — if a branch depends on
+something a tool found earlier, the assistant will need to look it up again.
+(The copied prefix is also written into the agent's own `state.db` when the
+source conversation still has a live agent session to link the branch to; with
+no such link the context lives in the running session only.)
+
+`POST /api/sessions/branch {session, at_index, title?}` — `at_index` is how
+many leading messages to carry (1 … length) — and
+`GET /api/sessions/tree?session=<id>`. `GET /api/sessions` gained
+`forked_from`, `forked_title`, `forked_turn` and a `branches` count.
+
+
+### Dictation
+
+Hold a key anywhere on this Mac, talk, let go, and the text lands where your
+cursor is. Everything happens on this Mac: the audio never leaves it, no
+recording is written, and by default nothing you dictated is stored either.
+
+Dictation is a **separate helper app**, `Hermes Dictation.app`, and not part of
+`Hermes Assistant.app`. macOS attributes the microphone and the keyboard to
+whichever process it holds responsible, and a launchd-started python can never
+durably hold either — while the main app is deliberately frozen, because
+rebuilding it changes its ad-hoc signature and drops its Full Disk Access. So
+the helper gets its own bundle, which can be rebuilt whenever dictation
+changes without costing the Message Center its permissions.
+
+**Build and launch.** `./install.sh` builds it for you when `swiftc` is
+available; otherwise:
+
+```bash
+bash app/build-dictation.sh          # -> app/build/Hermes Dictation.app
+open "app/build/Hermes Dictation.app"
+```
+
+It never launches itself, and it must not be started by launchd: a GUI launch
+is what makes the helper the process macOS asks *you* about when it wants the
+microphone. Grant **Microphone** and **Accessibility** in System Settings ›
+Privacy & Security when it asks — Accessibility is what lets it see the hotkey
+and place the text. Then hold **Right Option** and talk. The menu-bar item
+carries the hotkey choice, a cleanup switch that mirrors the dashboard, *Start
+at login*, and *Open Settings*.
+
+> **Rebuilding resets both permissions.** The helper is ad-hoc signed, so macOS
+> keys its grants to the code's hash, which changes on every build — the same
+> mechanism that costs the main app its Full Disk Access. Grant Microphone and
+> Accessibility again after each rebuild. Signing the helper with a self-signed
+> code-signing identity of your own (`HERMES_SIGN_ID=…`) gives it a stable
+> identity and the grants then survive; the repo does not create certificates
+> for you.
+
+**Transcription** uses Apple's on-device `SpeechAnalyzer` on macOS 26 — the
+model is a shared system asset, so it costs no RAM of ours and competes with
+nothing — falling back to `SFSpeechRecognizer` with on-device recognition
+required. **Insertion** tries the Accessibility API first and falls back to a
+clipboard paste that saves and restores what you had. Text only ever goes into
+the app that was frontmost when you pressed the key, and secure input (a
+password field, Terminal's secure keyboard entry) is refused with a reason
+rather than silently swallowed.
+
+**Cleanup** happens in the dashboard, in Settings › Agent & Models › Dictation:
+*off* inserts exactly what was heard; *rules* (the default) removes filler
+words, doubled words and false starts, folds self-corrections into what they
+correct, applies your dictionary, and fixes sentence case — pure Python, about
+a millisecond; *model* runs the rules first and then a short pass on a model
+lane **that is already awake**, with a four-second cap and the rules result as
+the fallback. It never wakes a model. Per-app styles decide how far cleanup
+goes: prose for Mail and Notes, casual for Slack and Messages, and verbatim for
+Terminal and VS Code, where punctuation and capitalisation are left exactly as
+spoken. If the dashboard is down the helper inserts the raw transcript rather
+than making you wait.
+
+**Privacy.** Audio is never stored and never leaves this Mac. *Keep what was
+dictated* is **off** by default: the dashboard records how many dictations,
+how many words and how long they took, but not the words themselves, and
+turning the switch off also deletes what was already kept. The store is
+`~/.hermes/dashboard/dictation.json`, mode 0600, pruned to the window you set.
+
+`GET /api/dictation`, `GET/POST /api/dictation/settings`,
+`POST /api/dictation/finish`, `POST /api/dictation/status`,
+`GET /api/dictation/install`; `python3 dashboard/doctor.py` has a **Dictation**
+check that reports what the helper itself says about its three permissions.
 
 
 ## Requirements
@@ -685,6 +829,18 @@ Every check is read-only and **none of them can start or wake a model server** �
 launchd is only ever `list`ed, the model lanes are HTTP probes, and nothing is
 written. It is safe to run on battery.
 
+**dashboard.log rotates itself.** launchd opens `StandardOutPath` once, before
+the process starts, and never rotates it, so the hub's log used to grow for the
+life of the Mac. The dashboard now rotates its own: at startup and once an
+hour, a `~/.hermes/logs/dashboard.log` over 8 MB is moved to `dashboard.log.1`
+(then `.2`, `.3`, and the oldest falls off). It is a *copy-truncate*, not a
+rename — launchd holds the file open, and renaming it would leave the service
+writing to an inode with no name. The fresh file opens with the same start
+banner doctor scopes its error count to, so "*N* error lines since the last
+start" still means what it says on the other side of a rotation.
+`~/.hermes/logs/errors.log` is the **agent's** log, not the dashboard's, and is
+left to it — it keeps its own `.1`/`.2` beside it.
+
 ### Quick ones
 
 Start with **[RUNBOOK.md](RUNBOOK.md)** — setup, integrations, and the "if
@@ -720,6 +876,25 @@ every shell script, syntax-checks every dashboard JS file, and fails on a
 committed home-directory path — run those checks locally before you push.
 `CLAUDE.md` is the architecture map and the list of hard-won gotchas; read it
 before changing anything under `dashboard/`.
+
+### Tests
+
+The suites live in [`tools/tests/`](tools/tests/README.md) and run through one
+script — no test framework, stdlib and bash only, like everything else here:
+
+```bash
+tools/tests/run.sh              # unit (the default) — what CI runs
+tools/tests/run.sh live         # needs the dashboard on 127.0.0.1:7788
+PWENV=/path/to/venv tools/tests/run.sh browser    # Playwright
+tools/tests/run.sh all
+```
+
+Four tiers by what a test *needs*: `unit/` (no dashboard, no network, no model —
+and the runner enforces it by making those ports unreachable), `live/`,
+`browser/`, and `ac/` (may load a model; refused unless the Mac is on AC, never
+in CI). Two rules for anything you add: **never wake a model**, and **capture
+any owner setting you change and put it back on every exit path** — an early
+acceptance script left the Claude escalation switch on for days.
 
 ## Credits
 

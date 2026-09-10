@@ -15,6 +15,9 @@
 #   3. upstream CheckpointManager (subprocess driver) — the only race-free
 #      before-snapshot; we never write its git store, only call restore/list.
 #
+# Routes: GET /api/recorder (feed + detail), POST /api/undo,
+#         GET/POST /api/recorder/retention (the actions TTL — see "retention").
+#
 # exec'd into server.py globals by the aux loader (after expanders_extra.py and
 # aux_memory.py, before class Handler).  May use these server globals:
 #   HOME HERE DATA STATE_DB read_json write_json _state_lock _widget_cache
@@ -634,6 +637,8 @@ def recorder_record_local(tool, target, kind="write", reversible="yes",
 # leg 2 — state.db reconciler (all surfaces, mode=ro, cursor + dedupe)
 # --------------------------------------------------------------------------
 _rec_gc_last = 0.0
+_rec_retain_last = 0.0          # 0.0 -> the first loop tick sweeps
+_rec_retain_state = {}          # the last sweep's result, for /api/recorder/retention
 
 
 def _reconcile_once():
@@ -799,8 +804,152 @@ def _gc_trash():
         pass
 
 
+# --------------------------------------------------------------------------
+# retention — a TTL for the `actions` table (settings.json recorder.retain_days)
+# --------------------------------------------------------------------------
+# recorder.db had none: three observation legs write a row per tool call from
+# every surface and nothing ever removed one.  A window is swept once a day
+# now, and it is deliberately NOT the whole table.  Two kinds of row are undo
+# material and are never swept, whatever their age:
+#
+#   * status='undone' — the RECEIPT for a restore the user performed.  It is
+#     the only record that the undo happened, /api/undo's "already undone"
+#     guard reads it, and the undo itself wrote a second row pointing at the
+#     pre-rollback snapshot that makes the undo re-undoable.
+#   * a non-empty snapshot_ref — the row still names a checkpoint to restore
+#     from.  Whether that checkpoint is still in the agent's store is upstream's
+#     business (a pruned one is discovered at undo time and the row is marked
+#     `reversible='no', undo_note='snapshot pruned'`); keeping such a row costs
+#     one row, deleting a row whose checkpoint IS still there costs the undo.
+#
+# The floor comes from the undo trash.  `_gc_trash` keeps everything under
+# ~/.hermes/dashboard/undo-trash for UNDO_TRASH_TTL (14 days) regardless of how
+# old the action that produced it was — a file moved aside by an undo is
+# recoverable for a fortnight.  A retention window shorter than that would
+# delete the row explaining a file still sitting in the trash, so any non-zero
+# window is clamped up to the same 14 days.  0 means keep forever and skips the
+# sweep entirely.
+REC_RETAIN_DEFAULT  = 90
+REC_RETAIN_MIN_DAYS = UNDO_TRASH_TTL // 86400        # 14 — the undo-trash window
+REC_RETAIN_MAX_DAYS = 3650
+REC_RETAIN_EVERY_S  = 86400                          # one sweep a day
+
+# The rows retention must never touch, as one SQL predicate. Kept in one place
+# so the count, the preview and the DELETE cannot drift apart.
+_REC_KEEP_SQL = "status='undone' OR (snapshot_ref IS NOT NULL AND snapshot_ref!='')"
+
+
+def _rec_retain_clamp(v):
+    """days -> the window actually used.  0 (or a negative) means keep forever;
+    anything else is clamped into [REC_RETAIN_MIN_DAYS, REC_RETAIN_MAX_DAYS];
+    an absent or unparsable value falls back to the default.  PURE, so the whole
+    policy is testable without a database."""
+    if v is None:
+        return REC_RETAIN_DEFAULT
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return REC_RETAIN_DEFAULT
+    if n <= 0:
+        return 0
+    return max(REC_RETAIN_MIN_DAYS, min(REC_RETAIN_MAX_DAYS, n))
+
+
+def _rec_retain_days():
+    """The configured window, read FRESH every time (settings.json is tiny), so
+    a change takes effect with no restart and no cache to invalidate."""
+    try:
+        cfg = (get_settings() or {}).get("recorder")
+    except Exception:
+        return REC_RETAIN_DEFAULT
+    if not isinstance(cfg, dict):
+        return REC_RETAIN_DEFAULT
+    return _rec_retain_clamp(cfg.get("retain_days"))
+
+
+def _rec_set_retain_days(v):
+    """Write the window.  Fresh read-modify-write under `_state_lock` — every
+    other key in settings.json has to survive.  Returns the CLAMPED value, which
+    the caller shows back to the user (a typed 7 becomes 14 and the field must
+    say so, the lesson aux_watchtower's time inputs already learned)."""
+    days = _rec_retain_clamp(v)
+    with _state_lock:
+        s = get_settings() or {}
+        cfg = s.get("recorder")
+        s["recorder"] = {**(cfg if isinstance(cfg, dict) else {}),
+                         "retain_days": days}
+        write_json(SETTINGS_FILE, s)
+    return days
+
+
+def _rec_retention_counts(con, cutoff):
+    """(sweepable, kept_undone, kept_snapshot) older than `cutoff`."""
+    doomed = con.execute(
+        "SELECT COUNT(*) FROM actions WHERE ts < ? AND NOT (%s)" % _REC_KEEP_SQL,
+        (cutoff,)).fetchone()[0]
+    kept_undone = con.execute(
+        "SELECT COUNT(*) FROM actions WHERE ts < ? AND status='undone'",
+        (cutoff,)).fetchone()[0]
+    kept_snap = con.execute(
+        "SELECT COUNT(*) FROM actions WHERE ts < ? AND status!='undone' "
+        "AND snapshot_ref IS NOT NULL AND snapshot_ref!=''", (cutoff,)).fetchone()[0]
+    return doomed, kept_undone, kept_snap
+
+
+def _rec_sweep_retention(days=None, dry=False, now=None, db=None):
+    """Delete `actions` rows older than the window, keeping the undo material.
+
+    `dry=True` counts without deleting (that is also what the API's preview
+    uses); `db` points the sweep at another file, which is how it is tested
+    against a COPY instead of the owner's live recorder.db.  Never raises: a
+    failed sweep must not take the reconciler thread down."""
+    global _rec_retain_state
+    days = _rec_retain_days() if days is None else _rec_retain_clamp(days)
+    now = time.time() if now is None else float(now)
+    if not days:
+        out = {"ok": True, "days": 0, "forever": True, "deleted": 0,
+               "kept_undone": 0, "kept_snapshot": 0, "dry": bool(dry),
+               "ts": now, "note": "retention off — nothing is swept"}
+        _rec_retain_state = out
+        return out
+    cutoff = now - days * 86400
+    try:
+        with _rec_lock:
+            con = sqlite3.connect(db or REC_DB, timeout=8.0)
+            con.row_factory = sqlite3.Row
+            try:
+                con.execute("PRAGMA busy_timeout=8000")
+                doomed, kept_undone, kept_snap = _rec_retention_counts(con, cutoff)
+                if doomed and not dry:
+                    con.execute("DELETE FROM actions WHERE ts < ? AND NOT (%s)"
+                                % _REC_KEEP_SQL, (cutoff,))
+                    con.commit()
+            finally:
+                con.close()
+        out = {"ok": True, "days": days, "forever": False, "deleted": doomed,
+               "kept_undone": kept_undone, "kept_snapshot": kept_snap,
+               "cutoff": round(cutoff, 3), "dry": bool(dry), "ts": now}
+    except Exception as e:                                   # pragma: no cover
+        out = {"ok": False, "days": days, "deleted": 0, "dry": bool(dry),
+               "ts": now, "error": "%s: %s" % (type(e).__name__, e)}
+        _rec_log("retention sweep failed: %r" % e)
+        if db is None:
+            _rec_retain_state = out
+        return out
+    # One line per sweep, deleted count included, so the log says what a TTL
+    # took away — the thing nobody can reconstruct afterwards.
+    _rec_log("retention sweep: %s %d row(s) older than %d day(s)%s; kept %d undone "
+             "+ %d with a snapshot"
+             % ("would delete" if dry else "deleted", doomed, days,
+                (" [%s]" % os.path.basename(db)) if db else "",
+                kept_undone, kept_snap))
+    if db is None:
+        _rec_retain_state = out
+    return out
+
+
 def recorder_loop():
-    global _rec_gc_last
+    global _rec_gc_last, _rec_retain_last
     _rec_init()
     _rec_log("reconciler started")
     while True:
@@ -811,6 +960,12 @@ def recorder_loop():
             if time.time() - _rec_gc_last > 3600:
                 _gc_trash()
                 _rec_gc_last = time.time()
+            # Daily TTL. `_rec_retain_last` starts at 0.0, so the first pass
+            # after a restart sweeps; a settings change resets it to 0.0 and
+            # the next 5 s tick applies the new window.
+            if time.time() - _rec_retain_last > REC_RETAIN_EVERY_S:
+                _rec_retain_last = time.time()
+                _rec_sweep_retention()
         except Exception as e:                               # pragma: no cover
             _rec_log("loop: %r" % e)
         time.sleep(5)
@@ -1100,6 +1255,82 @@ def recorder_undo_handler(ctx):
         return {"ok": False, "error": "internal: " + str(e)}
 
 
+def recorder_retention_get(ctx):
+    """The window, its bounds, what the last sweep did — and a DRY PREVIEW of
+    what the next one would remove.
+
+    The preview is the point of having a GET at all: a TTL whose effect cannot
+    be seen before it runs is a data-loss button with a friendly label."""
+    try:
+        _rec_init()
+        days = _rec_retain_days()
+        raw = None
+        try:
+            cfg = (get_settings() or {}).get("recorder")
+            raw = cfg.get("retain_days") if isinstance(cfg, dict) else None
+        except Exception:
+            pass
+        try:
+            same = raw is not None and not isinstance(raw, bool) and int(raw) == days
+        except (TypeError, ValueError):
+            same = False
+        out = {"ok": True, "retain_days": days, "forever": days == 0,
+               "configured": raw, "clamped": (raw is not None and not same),
+               "min_days": REC_RETAIN_MIN_DAYS, "max_days": REC_RETAIN_MAX_DAYS,
+               "default_days": REC_RETAIN_DEFAULT,
+               "undo_trash_days": UNDO_TRASH_TTL // 86400,
+               "sweep_every_hours": REC_RETAIN_EVERY_S // 3600,
+               "last_sweep": (_rec_retain_state or None)}
+        con = _rec_conn()
+        try:
+            out["total"] = con.execute("SELECT COUNT(*) FROM actions").fetchone()[0]
+            if days:
+                cutoff = time.time() - days * 86400
+                d, ku, ks = _rec_retention_counts(con, cutoff)
+                out["next_sweep"] = {"cutoff": round(cutoff, 3), "would_delete": d,
+                                     "kept_undone": ku, "kept_snapshot": ks}
+            else:
+                out["next_sweep"] = None
+        finally:
+            con.close()
+        out.update(_rec_init_state())
+        return out
+    except Exception as e:                                   # pragma: no cover
+        return {"ok": False, "error": "internal: " + str(e)}
+
+
+def recorder_retention_post(ctx):
+    """Set the window.  `{"retain_days": 0}` = keep forever; anything else is
+    clamped into [min, max] and the CLAMPED value comes back, so a field that
+    typed 7 can redraw itself as 14 instead of lying about what was stored."""
+    global _rec_retain_last
+    try:
+        _rec_init()
+        body = ctx.body if isinstance(ctx.body, dict) else {}
+        if "retain_days" not in body:
+            return {"ok": False,
+                    "error": "retain_days required (0 = keep forever)"}, 400
+        want = body.get("retain_days")
+        if isinstance(want, bool):
+            return {"ok": False, "error": "retain_days must be a number of days"}, 400
+        try:
+            asked = int(want)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "retain_days must be a number of days"}, 400
+        days = _rec_set_retain_days(asked)
+        # Apply it through the ONE code path that sweeps — the reconciler's next
+        # 5 s tick.  Deleting inline would put an unbounded DELETE on a request
+        # thread and give the sweep a second implementation to drift from.
+        _rec_retain_last = 0.0
+        out = recorder_retention_get(ctx)
+        if isinstance(out, dict):
+            out["asked"] = asked
+            out["clamped"] = (asked != days)
+        return out
+    except Exception as e:                                   # pragma: no cover
+        return {"ok": False, "error": "internal: " + str(e)}
+
+
 # --------------------------------------------------------------------------
 # wiring — init, routes, hub-live hook, reconciler thread (all guarded)
 # --------------------------------------------------------------------------
@@ -1107,6 +1338,8 @@ _rec_init()
 
 register_get("/api/recorder", recorder_api_handler)
 register_post("/api/undo", recorder_undo_handler)
+register_get("/api/recorder/retention", recorder_retention_get)
+register_post("/api/recorder/retention", recorder_retention_post)
 
 try:                          # leg 1: hub-live feed (server.py imports hermes_rpc
     import hermes_rpc         # function-locally, so we import it ourselves here)

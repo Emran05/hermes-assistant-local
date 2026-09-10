@@ -379,6 +379,18 @@
   .cs-item.on{background:color-mix(in srgb,var(--iris) 15%,transparent);color:var(--ink);font-weight:600}
   .cs-item .ic{width:13px;height:13px;flex:none;color:var(--iris)}
   .cs-item .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* ---- branching: one quiet second line, never a second row ----
+     The row stays a flex ROW (cvRenameRow swaps .t in place, so .t must keep
+     its position as a direct child); the lineage line wraps under it on a
+     100% basis instead. Indent = icon 13px + gap 8px, so it lines up with
+     the title rather than the chat glyph. */
+  .cs-item.forked,.cs-item.hasbranch{flex-wrap:wrap;row-gap:1px}
+  .cs-fork{flex-basis:100%;min-width:0;padding-left:21px;font-size:10.5px;line-height:1.35;
+    color:var(--faint);display:flex;align-items:center;gap:5px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .cs-fork>span{overflow:hidden;text-overflow:ellipsis}
+  .cs-item.renaming .cs-fork{display:none}
+  .cs-fork .ic{width:11px;height:11px;flex:none;color:var(--faint);stroke-width:2.2}
   /* ---- conversation management: search / pin / rename / export ---- */
   .cs-search{display:flex;align-items:center;gap:7px;margin:0 12px 6px;padding:6px 8px;flex:none;
     border-radius:var(--radius-xs);background:var(--field);border:1px solid var(--field-edge);
@@ -827,6 +839,15 @@
   .bubble.bot:hover .msg-copy{opacity:1}
   .msg-copy:hover{color:var(--iris)} .msg-copy.ok{color:var(--ok);opacity:1}
   .msg-copy .ic{width:13px;height:13px}
+  /* "Branch from here" — same plate as the copy action, one slot to its left
+     on a bot bubble (which already spends right:5px on copy) and in that slot
+     itself on a user bubble, which has no other action. */
+  .msg-branch{position:absolute;top:5px;right:5px;padding:4px;border-radius:7px;background:var(--glass);
+    border:1px solid var(--hairline);color:var(--muted);opacity:0;transition:opacity .15s,color .2s}
+  .bubble.bot .msg-branch{right:31px}
+  .bubble:hover .msg-branch,.bubble:focus-within .msg-branch{opacity:1}
+  .msg-branch:hover{color:var(--iris)}
+  .msg-branch .ic{width:13px;height:13px}
   .bubble.user{align-self:flex-end;background:var(--user-bubble);color:var(--user-ink);
     border:1px solid color-mix(in srgb,var(--iris) 24%,transparent);border-bottom-right-radius:6px;white-space:pre-wrap}
   .bubble.bot{align-self:flex-start;background:var(--glass);border:1px solid var(--edge);
@@ -1339,6 +1360,10 @@ function setChatMode(m){
 const CV_IC_CHAT='<svg class="ic" viewBox="0 0 24 24"><path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.5 8.5 8.5 0 0 1-3.9-.9L3 21l1.9-5.6A8.5 8.5 0 1 1 21 11.5z"/></svg>';
 const CV_IC_PINNED='<svg class="cs-pinned" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.4 3h5.2l-.7 6.4 2.9 3.2H7.2l2.9-3.2z"/><line x1="12" y1="12.6" x2="12" y2="21"/></svg>';
 const CV_IC_PIN='<svg class="ic" viewBox="0 0 24 24"><path d="M9.4 3h5.2l-.7 6.4 2.9 3.2H7.2l2.9-3.2z"/><line x1="12" y1="12.6" x2="12" y2="21"/></svg>';
+// branching: a trunk that carries on, one line leaving it, and a FILLED dot on
+// the fork point — the dot is the only feature that still reads at 11px in the
+// sidebar, so it carries the meaning and the strokes are the supporting cast.
+const CV_IC_BRANCH='<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4v16"/><path d="M7 11h6a4 4 0 0 1 4 4v4"/><circle cx="7" cy="11" r="2.4" fill="currentColor" stroke="none"/></svg>';
 const CV_IC_PEN='<svg class="ic" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>';
 const CV_IC_TRASH='<svg class="ic" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
 let cvTerm='';        // active query ('' = not searching)
@@ -1701,6 +1726,19 @@ async function renderChatSide(){
     el.appendChild(t);
     if(s){                                 // the "(new conversation)" pseudo-row
       if(s.pinned)t.insertAdjacentHTML('afterend',CV_IC_PINNED);
+      // lineage line: where this one was cut from, and/or what was cut from it
+      const ff=s.forked_from,nb=s.branches||0;
+      if(ff||nb){
+        const bits=[];
+        if(ff)bits.push('from '+(s.forked_title||ff.session||'')+
+                        (s.forked_turn?' · turn '+s.forked_turn:''));
+        if(nb)bits.push(nb+(nb===1?' branch':' branches'));
+        const f=document.createElement('div');f.className='cs-fork';
+        f.innerHTML=CV_IC_BRANCH+'<span></span>';
+        f.querySelector('span').textContent=bits.join(' · ');
+        el.classList.add(ff?'forked':'hasbranch');
+        el.appendChild(f);
+      }
       const acts=document.createElement('span');acts.className='cs-acts';
       acts.appendChild(cvActBtn('cs-pin',s.pinned?'Unpin':'Pin',CV_IC_PIN,async()=>{
         if(await cvMeta(id,{pinned:!s.pinned})){loadSessions();renderChatSide();}}));
@@ -1917,7 +1955,8 @@ const RENDER={
       const tx=document.createElement('span');tx.className='txt';tx.textContent=t.text;
       const x=document.createElement('button');x.innerHTML='<svg class="ic" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';x.onclick=()=>taskOp({op:'delete',id:t.id});
       row.append(c,tx,x);tl.appendChild(row);});},
-  reminders(b,d){if(d.available)b.innerHTML=(d.items||[]).map(r=>'<div class="ev"><span class="n">'+esc(r)+'</span></div>').join('')||'<div class="hint">No open reminders.</div>';
+  reminders(b,d){if(d.off)b.innerHTML='<div class="hint">'+esc(d.note||'Off · using Google Calendar')+'</div>';
+    else if(d.available)b.innerHTML=(d.items||[]).map(r=>'<div class="ev"><span class="n">'+esc(r)+'</span></div>').join('')||'<div class="hint">No open reminders.</div>';
     else b.innerHTML='<div class="hint">Reminders needs access — allow it in System Settings → Privacy → Reminders.</div>';},
   notes(b,d){b.innerHTML='<textarea class="notespad" placeholder="Quick notes…"></textarea>';
     const ta=b.querySelector('.notespad');ta.value=d.text||'';let t;
@@ -2947,7 +2986,48 @@ function emptyState(){
    '<div class="big">What can I help with?</div>'+
    'Your assistant sees your tasks, calendar and granted folders, uses its learned skills, and can act on your Mac. Everything stays local.</div>';
 }
-function addBubble(text,who,isMd){
+// "Branch from here" — stamps a bubble with its index into chat["messages"]
+// and hangs the action off it. Only bubbles whose index we actually KNOW get
+// the action: a live streaming bubble has no persisted index yet, so it gets
+// stamped by stampBubbles() once the turn has landed rather than guessing.
+function brStamp(b,i){
+  if(!b||typeof i!=='number')return b;
+  b.dataset.i=i;
+  if(b.querySelector('.msg-branch'))return b;
+  const btn=document.createElement('button');btn.className='msg-branch';
+  btn.title='Branch from here — a new conversation carrying this and everything above it';
+  btn.setAttribute('aria-label','Branch from here');
+  btn.innerHTML=CV_IC_BRANCH;
+  btn.onclick=e=>{e.stopPropagation();branchFrom(Number(b.dataset.i));};
+  b.appendChild(btn);
+  return b;
+}
+// After a live turn the DOM and the file agree again — re-walk and stamp. A
+// count mismatch (a deep card that has not been persisted yet, a bubble the
+// client added on its own) means we cannot trust positional indexes, so we
+// stamp nothing rather than something wrong; the next loadHistory() fixes it.
+function stampBubbles(msgs){
+  if(!msgs)return;
+  const bs=$('msgs').querySelectorAll('.bubble');
+  if(bs.length!==msgs.length)return;
+  bs.forEach((b,i)=>brStamp(b,i));
+}
+async function branchFrom(i){
+  if(!(i>=0))return;
+  let d;
+  try{
+    d=await (await fetch('/api/sessions/branch',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({session,at_index:i+1})})).json();
+  }catch(e){toast('Could not reach the dashboard backend.');return;}
+  if(!d||!d.ok){toast((d&&d.error)||'Could not branch this conversation.');return;}
+  session=d.session;localStorage.setItem('hermes_session',session);
+  await loadHistory();await loadSessions();
+  if((document.querySelector('.deck').dataset.chat||'')==='full')renderChatSide();
+  // Say the one thing that is genuinely lost: `session.create`'s seed carries
+  // user/assistant TEXT only, so tool calls and their results stop here.
+  toast('Branched at turn '+(d.turn||0)+' · tool results before this point are not carried into the branch',5200);
+}
+function addBubble(text,who,isMd,idx){
   const empty=$('msgs').querySelector('.empty-chat'); if(empty)empty.remove();
   const b=document.createElement('div');b.className='bubble '+who;
   if(isMd){const m=document.createElement('div');m.className='md';m.innerHTML=renderMd(text);b.appendChild(m);}
@@ -2961,23 +3041,24 @@ function addBubble(text,who,isMd){
       setTimeout(()=>{cp.classList.remove('ok');cp.innerHTML='<svg class="ic" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';},1400);};
     b.appendChild(cp);
   }
+  brStamp(b,idx);
   $('msgs').appendChild(b);$('msgs').scrollTop=$('msgs').scrollHeight;return b;
 }
 async function loadHistory(){
   $('msgs').innerHTML='';
   const d=await (await fetch('/api/history?session='+encodeURIComponent(session))).json();
   if(!d.messages||!d.messages.length){emptyState();return;}
-  for(const m of d.messages){
+  d.messages.forEach((m,i)=>{
     if(m.role!=='user'&&m.deep&&!m.err){   // a Claude answer (auto-route / escalate) — same card as live
-      const b=addBubble('','bot',true);
+      const b=addBubble('','bot',true,i);
       const md=b.querySelector('.md'); if(md)md.remove();
       b.setAttribute('data-esc','1');
       b.insertAdjacentHTML('beforeend',deepCardHTML(m.text,m.deep,m.ts));
-      continue;
+      return;
     }
-    const b=addBubble(m.text,m.role==='user'?'user':'bot',m.role!=='user'&&!m.err);
+    const b=addBubble(m.text,m.role==='user'?'user':'bot',m.role!=='user'&&!m.err,i);
     if(m.err)b.classList.add('err');
-  }
+  });
 }
 // shared markup for a Claude "deep" answer card (aux_agent.js injects the .deepcard CSS)
 function deepCardHTML(text,meta,ts){
@@ -3034,6 +3115,9 @@ async function sendMsg(text){
     else{thinking.remove();
       const b=addBubble(d.reply,'bot',d.ok); if(!d.ok)b.classList.add('err');}
   }catch(e){thinking.remove();addBubble('Could not reach the dashboard backend.','bot',false).classList.add('err');}
+  // the turn is on disk now — give the two new bubbles their message index so
+  // "Branch from here" works without a reload (a local read, not a re-render)
+  try{const h=await (await fetch('/api/history?session='+encodeURIComponent(session))).json();stampBubbles(h.messages);}catch(e){}
   $('send').disabled=false;$('input').focus();loadSessions();renderHub();
   if((document.querySelector('.deck').dataset.chat||'')==='full')renderChatSide();
 }
@@ -3222,5 +3306,9 @@ try{
 <script src="/aux_evals.js"></script>
 <script src="/aux_memlayer.js"></script>
 <script src="/aux_trace.js"></script>
+<script src="/aux_dictation.js"></script>
+<!-- Apple apps card. After aux_google.js so it sits below the Google card in
+     #sec-connections. -->
+<script src="/aux_appleapps.js"></script>
 </body>
 </html>

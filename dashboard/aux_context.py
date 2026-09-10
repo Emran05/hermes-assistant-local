@@ -5,7 +5,8 @@
 #   GET  /api/context/turn?job=<id>            -> the measurement for one chat job
 #   GET  /api/context/turn?since=&until=       -> same, for an explicit epoch window
 #                                                 (debug seam; no job needed)
-#   GET  /api/context/recent?n=20              -> the last N primary-lane turns
+#   GET  /api/context/recent?n=20[&lane=]      -> the last N requests, BOTH lanes
+#                                                 (each row carries lane=primary|bg)
 #   GET  /api/context/compression              -> the four compression.* knobs
 #   POST /api/context/compression              -> write them (validated, backed up)
 #
@@ -35,7 +36,18 @@
 #   * `stream=(True|False)` is captured, because it is what separates a
 #     CONVERSATION turn from the auxiliary traffic that shares this server.
 #
-# THE PRIMARY LANE.  Everything the dashboard chat sends is `stream=True`.  The
+# TWO LOGS, TWO LANES.  The primary model server (:8080) is the chat lane; the
+# background lane (com.hermes.mlx-bg, :8081) runs the briefing, the watchtower
+# synthesis, the intel pass and For-You, and writes the SAME two lines to
+# ~/.hermes/logs/mlx-bg.log (install-services.sh's StandardOutPath for that
+# label).  `/api/context/recent` reads both and tags every row `lane`, because
+# context spent by background work is still context spent on this Mac.  The
+# HEADER CHIP and `/api/context/turn` stay primary-only on purpose — they
+# describe THE CHAT TURN that just ended, and a briefing's prefill has nothing
+# to do with it.  Each log is tailed and cached separately, `_CX_TAIL_BYTES`
+# apiece, so the second lane costs one more bounded read and nothing else.
+#
+# THE STREAM FILTER.  Everything the dashboard chat sends is `stream=True`.  The
 # auxiliary client — conversation titles, the compression summariser itself, the
 # watchtower's small classifier calls — is `stream=False` and usually two orders
 # of magnitude smaller (94 and 207 tokens, against 20-27k for a real turn).  A
@@ -98,10 +110,23 @@ import datetime as _cx_datetime
 # constants
 # ---------------------------------------------------------------------------
 _CX_LOG = _cx_os.path.join(HOME, ".hermes", "logs", "mlx-server.log")   # noqa: F821
+# The BACKGROUND lane's server (com.hermes.mlx-bg on :8081 — briefing,
+# watchtower synthesis, the intel pass, For-You). Its StandardOutPath in
+# install-services.sh, and it writes the byte-identical `Prefill completed` /
+# `Request completed` pair, so the same vendored parser reads it.
+_CX_LOG_BG = _cx_os.path.join(HOME, ".hermes", "logs", "mlx-bg.log")    # noqa: F821
 _CX_CFG = _cx_os.path.join(HOME, ".hermes", "config.yaml")             # noqa: F821
+
+# lane id -> log. The ORDER is the display order; the id is what rides on every
+# row as `lane`. A lane whose log does not exist yields no rows and no error.
+_CX_LANE_LOGS = (("primary", _CX_LOG), ("bg", _CX_LOG_BG))
+_CX_LANE_OF = {_CX_LOG: "primary", _CX_LOG_BG: "bg"}
 
 # 512 KB reaches back to 2026-07-17 on this machine (43 requests, 6.3k lines)
 # against a 4.3 MB log — several months of chat for a tenth of the read.
+# It is PER LOG, so adding the background lane doubles the ceiling and nothing
+# else: the bg log is the busier of the two (6.4 MB here) and is read exactly
+# as shallowly.
 _CX_TAIL_BYTES = 512 * 1024
 
 _CX_ENDPOINT = "/chat/completions"
@@ -151,7 +176,7 @@ _CX_DEFAULTS = {"threshold": 0.50, "target_ratio": 0.20,
 _CX_FALLBACK_WINDOW = 65536
 
 _cx_lock = _cx_threading.Lock()
-_cx_cache = {"key": None, "rows": None}      # (mtime_ns, size) -> parsed rows
+_cx_cache = {}                               # log path -> {"key","rows"}
 _CX_LAST = {}                                # session -> last prompt_tokens
 _CX_DONE = {}                                # job id -> first observed done ts
 _CX_TURN = {}                                # job id -> computed payload
@@ -259,22 +284,31 @@ def _cx_parse(text, endpoint_filter=_CX_ENDPOINT):
     return out
 
 
-def _cx_rows():
-    """Parsed rows for the current log tail, cached on (mtime_ns, size) so a
-    burst of requests re-reads nothing."""
+def _cx_rows(path=None):
+    """Parsed rows for the current tail of ONE model-server log, cached per log
+    on (mtime_ns, size) so a burst of requests re-reads nothing.
+
+    Defaults to the PRIMARY lane, which is the only lane the per-turn meter and
+    the header chip ever describe: the chat goes to :8080 and nowhere else.
+    Every row is stamped with the lane it came from, so a merged list stays
+    attributable."""
+    path = path or _CX_LOG
     try:
-        st = _cx_os.stat(_CX_LOG)
+        st = _cx_os.stat(path)
         key = (st.st_mtime_ns, st.st_size)
     except OSError:
         key = None
     with _cx_lock:
-        if key is not None and _cx_cache["key"] == key and _cx_cache["rows"] is not None:
-            return _cx_cache["rows"]
-    text, _size = _cx_read_tail(_CX_LOG, _CX_TAIL_BYTES)
+        ent = _cx_cache.get(path)
+        if key is not None and ent is not None and ent["key"] == key:
+            return ent["rows"]
+    text, _size = _cx_read_tail(path, _CX_TAIL_BYTES)
     rows = _cx_parse(text)
+    lane = _CX_LANE_OF.get(path, "primary")
+    for r in rows:
+        r["lane"] = lane
     with _cx_lock:
-        _cx_cache["key"] = key
-        _cx_cache["rows"] = rows
+        _cx_cache[path] = {"key": key, "rows": rows}
     return rows
 
 
@@ -282,7 +316,13 @@ def _cx_primary(rows):
     """Conversation turns only. stream=True is the dashboard/gateway lane; the
     auxiliary client (titles, the compression summariser) is stream=False. A log
     whose backend never printed `stream=` yields None everywhere — then every
-    row is kept rather than showing an empty meter."""
+    row is kept rather than showing an empty meter.
+
+    Despite the name this is the STREAM filter, not the primary-vs-background
+    one: the background lane's own producers are streamed too, so it is applied
+    to each log SEPARATELY — the fallback ("keep everything when no row is
+    streamed") has to be decided per log, or one busy lane would silence the
+    other's fallback."""
     lane = [r for r in rows if r.get("stream") is True]
     return lane if lane else rows
 
@@ -627,10 +667,13 @@ def _cx_strip_emoji(text):
 
 
 def _cx_row_out(r, window):
-    """One log row in the shape the UI reads."""
+    """One log row in the shape the UI reads. `lane` is "primary" (the chat
+    lane, :8080) or "bg" (:8081); it is stamped on by `_cx_rows`, and the
+    per-turn meter's own rows are always primary."""
     return {
         "ts": r.get("ts"),
         "epoch": r.get("epoch"),
+        "lane": r.get("lane") or "primary",
         "model": r.get("model"),
         "prompt_tokens": r.get("prompt_tokens"),
         "cached_tokens": r.get("cached_tokens"),
@@ -788,30 +831,58 @@ def _cx_turn(ctx):
 
 
 def _cx_recent(ctx):
+    """The last N requests across BOTH model-server lanes, newest last.
+
+    The chat lane is not the only thing that spends context: the briefing, the
+    watchtower synthesis and For-You run whole tool loops on :8081, and until
+    this read them the table said the machine was idle whenever the user was.
+    Each row carries `lane`, and the two logs are parsed INDEPENDENTLY — the
+    `compacted` heuristic compares a request to the previous request of the
+    same lane, because a bg prefill landing between two chat turns is not a
+    conversation of any kind and would fake a prompt drop.
+
+    Bounded exactly as before: `_CX_TAIL_BYTES` per log, cached per log on
+    (mtime_ns, size). `lane=primary|bg` narrows it."""
     try:
         n = int(ctx.q1("n", "20") or 20)
     except ValueError:
         n = 20
     n = max(1, min(n, 100))
+    want = (ctx.q1("lane", "") or "").strip().lower()
+    if want not in ("primary", "bg"):
+        want = ""
 
     cfg = _cx_read_cfg()
     window, window_src = _cx_window(cfg)
-    lane = _cx_primary(_cx_rows())
 
     out = []
-    for i, r in enumerate(lane):
-        row = _cx_row_out(r, window)
-        back = lane[i - 1] if i else None
-        prev = back.get("prompt_tokens") if back else None
-        gap = None
-        if back and back.get("epoch") is not None and r.get("epoch") is not None:
-            gap = r["epoch"] - back["epoch"]
-        row["prev_prompt_tokens"] = prev
-        row["compacted"] = _cx_dropped(row.get("prompt_tokens"), prev, gap)
-        out.append(row)
+    lanes = {}
+    for lane, path in _CX_LANE_LOGS:
+        if want and lane != want:
+            continue
+        rows = _cx_primary(_cx_rows(path))
+        lanes[lane] = len(rows)
+        for i, r in enumerate(rows):
+            row = _cx_row_out(r, window)
+            back = rows[i - 1] if i else None
+            prev = back.get("prompt_tokens") if back else None
+            gap = None
+            if back and back.get("epoch") is not None and r.get("epoch") is not None:
+                gap = r["epoch"] - back["epoch"]
+            row["prev_prompt_tokens"] = prev
+            row["compacted"] = _cx_dropped(row.get("prompt_tokens"), prev, gap)
+            out.append(row)
+
+    # Merge on the log clock. A row whose timestamp did not parse sorts FIRST,
+    # so it falls out of the tail rather than displacing a row that can be
+    # placed in time.
+    out.sort(key=lambda r: (0 if r.get("epoch") is None else 1, r.get("epoch") or 0.0))
 
     return {"ok": True, "window": window, "window_source": window_src,
-            "log": _CX_LOG, "count": len(out[-n:]), "total": len(lane),
+            "log": _CX_LOG,
+            "logs": {lane: path for lane, path in _CX_LANE_LOGS},
+            "lanes": lanes, "lane": want or None,
+            "count": len(out[-n:]), "total": len(out),
             "turns": out[-n:]}
 
 

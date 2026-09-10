@@ -244,6 +244,9 @@ def expand_reminders():
     """Rich Reminders view: open items grouped by list, due states, priority.
     Locale-proof dates via AppleScript component extraction; \x1f field /
     \x1e record delimiters. Degrades to available:false if Automation denied."""
+    if not apple_apps_enabled("reminders"):
+        return {"available": False, "off": True,
+                "reason": "Apple Reminders is off — using Google Calendar"}
     def fetch():
         script = (
             'set fs to (ASCII character 31)\n'
@@ -358,6 +361,11 @@ def expand_notes():
         # Bulk-fetch names + modification deltas in one AppleScript pass.
         # Using (current date - modification date) keeps it timezone-clean and
         # avoids per-note round-trips. Needs a one-time Automation grant.
+        # Gated: `tell application "Notes"` LAUNCHES Notes.app and leaves it
+        # open, so this only runs when the owner switched it on in Settings.
+        if not apple_apps_enabled("notes"):                         # noqa: F821
+            return {"available": False, "off": True,
+                    "reason": "Apple Notes is off — using Google Calendar"}
         osa = (
             'tell application "Notes"\n'
             '  set nowD to current date\n'
@@ -401,13 +409,17 @@ def expand_notes():
         items.sort(key=lambda x: x["ts"], reverse=True)
         return {"available": True, "total": len(items), "notes": items[:8]}
 
+    apple_block = ({"available": False, "off": True,
+                    "reason": "Apple Notes is off"}
+                   if not apple_apps_enabled("notes")
+                   else _cached("notes_apple", 120, apple_notes))
     return {
         "text": text,
         "words": words,
         "chars": len(text),
         "lines": (text.count("\n") + 1) if text else 0,
         "read_min": read_min,
-        "apple": _cached("notes_apple", 120, apple_notes),
+        "apple": apple_block,
     }
 
 # ===== briefing =====

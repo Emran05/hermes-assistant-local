@@ -1125,11 +1125,24 @@ def access_preamble(user_text=""):
     if tasks:
         lines.append("[context] The user's open tasks (from their dashboard task "
                      "list): " + "; ".join(t["text"] for t in tasks))
-    cal = macos_calendar()
-    if cal.get("available") and cal.get("events"):
-        lines.append("[context] Today's events from the user's macOS Calendar: "
-                     + "; ".join(f"{e['time']} {e['title']}".strip()
-                                 for e in cal["events"]))
+    # Google Calendar preferred over Apple Calendar/Reminders for "today"
+    # context (owner call, 2026-09: Reminders/Notes automation is off, so use
+    # Google Calendar for now). Resolved by name at call time — aux_google.py
+    # execs after this function is defined — and dropped entirely (no macOS
+    # Calendar fallback) when Google isn't connected, per that instruction.
+    try:
+        _goog_status_fn = globals().get("_goog_status_compute")
+        _goog_cal_fn = globals().get("_goog_calendar_events")
+        if (callable(_goog_status_fn) and callable(_goog_cal_fn)
+                and _goog_status_fn().get("connected")):
+            cal = _goog_cal_fn()
+            if cal.get("available") and cal.get("events"):
+                lines.append(
+                    "[context] Today's events from the user's Google Calendar: "
+                    + "; ".join(f"{e['time']} {e['title']}".strip()
+                                for e in cal["events"]))
+    except Exception:
+        pass
     # Memory layer v1 (1.2.2, aux_memlayer.py). Retrieved per message, so it is
     # the most volatile thing here except the clock — which is why it goes
     # LAST but one, after every stable line and after tasks/calendar, per the
@@ -1924,13 +1937,46 @@ def load_chat(session):
     return read_json(chat_path(session), {"messages": [], "title": ""})
 
 
-def save_chat(session, chat):
+def save_chat(session, chat, truncate=False):
+    """Persist a conversation. APPEND-ONLY unless the caller says otherwise.
+
+    A conversation file has always been append-only in practice — every writer
+    (POST /api/chat, _finish_chat_job, aux_autoroute, aux_convos' rename/pin,
+    the serve_sid/serve_key meta save) loads fresh, appends or edits metadata,
+    and saves. Branching (aux_branch.py) makes that an INVARIANT rather than a
+    habit: a checkpoint you can branch from has to still be there, and every
+    writer's read-modify-write is a lost-update race waiting for a second
+    thread. A save that would shorten `messages` is therefore refused, which
+    turns a silent lost message into a caller-visible error it can retry on.
+
+    `branches` is guarded the same way and for the same reason: it is the only
+    record that a fork was ever cut, and a writer holding a snapshot from
+    before the fork would otherwise silently un-register it. Deleting a branch
+    does NOT prune the row (GET /api/sessions/tree reports it as gone), so
+    nothing legitimately shrinks that list either.
+
+    `truncate=True` is the explicit opt-out for a future caller that genuinely
+    means to drop turns. Nothing passes it today.
+    """
     with _state_lock:
+        if not truncate:
+            prev = read_json(chat_path(session), None)
+            if isinstance(prev, dict):
+                for field, noun in (("messages", "message"),
+                                    ("branches", "branch record")):
+                    old_n = len(prev.get(field) or [])
+                    new_n = len(chat.get(field) or [])
+                    if new_n < old_n:
+                        raise ValueError(
+                            "save_chat(%s) would drop %d %s(s) (%d -> %d); "
+                            "reload the conversation before saving, or pass "
+                            "truncate=True if that is really intended"
+                            % (session, old_n - new_n, noun, old_n, new_n))
         write_json(chat_path(session), chat)
 
 
 def list_sessions():
-    out = []
+    out, titles = [], {}
     for fn in os.listdir(CHATS):
         if not fn.endswith(".json"):
             continue
@@ -1940,14 +1986,42 @@ def list_sessions():
         chat = load_chat(sid)
         if not chat["messages"]:
             continue
-        out.append({
+        # a user rename (POST /api/sessions/meta) writes chat["title"], so
+        # the custom title already wins over the first-message excerpt
+        titles[sid] = chat.get("title") or chat["messages"][0].get("text", "")[:48]
+        row = {
             "id": sid,
-            # a user rename (POST /api/sessions/meta) writes chat["title"], so
-            # the custom title already wins over the first-message excerpt
-            "title": chat.get("title") or chat["messages"][0].get("text", "")[:48],
+            "title": titles[sid],
             "updated": os.path.getmtime(chat_path(sid)),
             "pinned": bool(chat.get("pinned")),
-        })
+        }
+        # Branching (aux_branch.py). `forked_from` rides through verbatim so
+        # the client never has to re-read the file; `branches` is sent as a
+        # COUNT, because the sidebar only ever shows "n branches" and the full
+        # list belongs to GET /api/sessions/tree.
+        forked = chat.get("forked_from")
+        if isinstance(forked, dict):
+            row["forked_from"] = forked
+            # "turn n" is the human count: at_index counts messages, a turn is
+            # a user message. Derived here so no chats/*.json needs migrating.
+            try:
+                cut = int(forked.get("at_index"))
+            except (TypeError, ValueError):
+                cut = None
+            row["forked_turn"] = None if cut is None else sum(
+                1 for m in chat["messages"][:cut]
+                if isinstance(m, dict) and m.get("role") == "user")
+        n = len(chat.get("branches") or [])
+        if n:
+            row["branches"] = n
+        out.append(row)
+    # the parent's own title, resolved in the pass that already read it (a
+    # deleted parent falls back to its id rather than vanishing from the line)
+    for row in out:
+        f = row.get("forked_from")
+        if isinstance(f, dict):
+            src = f.get("session") or ""
+            row["forked_title"] = titles.get(src) or src
     # pinned first (they must survive the 30-row cap even when old), then newest
     out.sort(key=lambda c: (not c["pinned"], -c["updated"]))
     return out[:30]
@@ -1978,6 +2052,31 @@ SETTINGS_FILE = os.path.join(DATA, "settings.json")
 
 def get_settings():
     return read_json(SETTINGS_FILE, {})
+
+
+def apple_apps_enabled(kind):
+    """Is Apple <kind> ("reminders"|"notes") automation allowed? settings.json
+    `apple_apps.{reminders,notes}`, default OFF.
+
+    Every `osascript -e 'tell application "Reminders"/"Notes" ...'` call site
+    in the dashboard (the widgets, their pop-out expanders, the needs-you
+    reminders collector) checks this FIRST and returns a quiet off-note
+    instead of shelling out — launching either app from a background widget
+    refresh and never closing it again was the complaint this exists to fix.
+    Google Calendar is used for calendar/"today" context instead (see
+    access_preamble, aux_google.py's `_goog_calendar_events`).
+
+    Read fresh on every call (get_settings() is a small read_json, no cache),
+    so the Settings toggle takes effect on the very next refresh with no
+    restart. Any read problem fails CLOSED (False) — a corrupt settings file
+    must never silently start launching an app again."""
+    try:
+        cfg = get_settings().get("apple_apps")
+        if isinstance(cfg, dict):
+            return bool(cfg.get(kind))
+    except Exception:
+        pass
+    return False
 
 
 # --------------------------------------------------------------------------
@@ -2498,6 +2597,9 @@ def w_worldclock():
 
 
 def w_reminders():
+    if not apple_apps_enabled("reminders"):
+        return {"configured": False, "off": True, "available": False,
+                "note": "Apple Reminders is off — using Google Calendar"}
     def fetch():
         script = ('set out to ""\n'
                   'tell application "Reminders"\n'
@@ -4143,7 +4245,125 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
 
+# --------------------------------------------------------------------------
+# dashboard.log rotation — launchd never rotates StandardOutPath
+# --------------------------------------------------------------------------
+# launchd opens ~/.hermes/logs/dashboard.log once, before exec, and hands this
+# process the fd.  It never reopens it and never rotates it, so the file grows
+# for the life of the machine — doctor already had to warn about a 4 MB+ one.
+# The process that OWNS the log is the only one that can fix that, so it does.
+#
+# COPY-TRUNCATE, not rename.  Renaming the file would leave this process (and
+# launchd) writing into an inode with no name: the live path would sit at 0
+# bytes forever and every line would go to a file nobody can open.  So the
+# bytes are copied aside and the SAME inode is truncated in place — the fd
+# stays valid, and because launchd opens it O_APPEND the next write lands at
+# offset 0 of the now-empty file instead of leaving a multi-megabyte hole.
+# (Verified against the running service: after a rotation `ls -l` shows a small
+# file, not a sparse 8 MB one, and new lines appear in it.)
+#
+# The window between the copy and the truncate is not locked: a line written in
+# those few milliseconds is lost.  That is the price of not stopping the
+# service to rotate its log, and it is one line of stdout.
+#
+# errors.log is NOT rotated here.  ~/.hermes/logs/errors.log belongs to the
+# HERMES AGENT, not to the dashboard — nothing in this repo opens it for
+# writing (doctor.py only reads it, and says so: "the agent's").  Copy-
+# truncating a file this process does not write is how you lose somebody
+# else's buffered output, so it is left alone; the agent already keeps its own
+# errors.log.1/.2 beside it.
+LOG_DIR       = os.path.join(HOME, ".hermes", "logs")
+DASH_LOG      = os.path.join(LOG_DIR, "dashboard.log")
+DASH_LOG_KEEP = 3                      # dashboard.log.1 .. .3
+try:
+    DASH_LOG_MAX = int(os.environ.get("HERMES_DASH_LOG_MAX", "") or 8 * 1024 * 1024)
+except ValueError:
+    DASH_LOG_MAX = 8 * 1024 * 1024
+DASH_LOG_EVERY_S = 3600                # and once an hour after that
+
+
+def _log_rotate_once(path=None, max_bytes=None, keep=DASH_LOG_KEEP, marker=""):
+    """Rotate `path` if it is over the cap.  Returns the rotated size, or None.
+
+    `marker` is appended to the freshly truncated file: a string, or a callable
+    taking the rotated size (see `_dash_log_marker` for why that matters to
+    doctor).  Never raises: a log that cannot be rotated must not take the
+    dashboard down."""
+    path = path or DASH_LOG
+    max_bytes = DASH_LOG_MAX if max_bytes is None else max_bytes
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return None
+    if max_bytes <= 0 or size <= max_bytes:
+        return None
+    try:
+        # Anything this process still has in its stdio buffers belongs in the
+        # ARCHIVE, not at the top of the new file.
+        for _s in (sys.stdout, sys.stderr):
+            try:
+                _s.flush()
+            except Exception:
+                pass
+        # .2 -> .3, .1 -> .2; whatever was .keep falls off the end.
+        for i in range(int(keep) - 1, 0, -1):
+            src = "%s.%d" % (path, i)
+            if os.path.exists(src):
+                os.replace(src, "%s.%d" % (path, i + 1))
+        shutil.copyfile(path, path + ".1")
+        os.truncate(path, 0)
+        line = marker(size) if callable(marker) else marker
+        if line:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(str(line).rstrip("\n") + "\n")
+    except OSError as e:
+        print(f"[logrotate] {os.path.basename(path)}: {type(e).__name__}: {e}",
+              file=sys.stderr)
+        return None
+    print("[logrotate] %s reached %.1f MB — rotated to %s.1 (keeping %d)"
+          % (os.path.basename(path), size / (1024.0 ** 2),
+             os.path.basename(path), keep), file=sys.stderr)
+    return size
+
+
+def _dash_log_marker(size):
+    """The first line written into a freshly truncated dashboard.log.
+
+    doctor.py scopes its "error lines since the last start" count to the LAST
+    `Hermes Assistant dashboard: http://…` line in the tail — the banner main()
+    prints once.  A rotation carries that marker off into the .1 file with
+    everything else, and without it doctor silently falls back to "in the last
+    200 KB", i.e. it stops describing the running process.  So the banner is
+    re-emitted, with the reason appended: the count stays scoped, and a human
+    reading the log is told why it appears twice.  It deliberately contains no
+    word `_ERR_RE` matches, or the marker would count itself as an error."""
+    return ("Hermes Assistant dashboard: http://%s:%s  "
+            "(log rotated at %.1f MB — earlier output moved to dashboard.log.1)"
+            % (DASH_HOST, DASH_PORT, size / (1024.0 ** 2)))
+
+
+def log_rotate_loop():
+    """Once an hour, for the life of the process."""
+    while True:
+        time.sleep(DASH_LOG_EVERY_S)
+        try:
+            _log_rotate_once(DASH_LOG, marker=_dash_log_marker)
+        except Exception as e:                               # pragma: no cover
+            print(f"[logrotate] loop: {type(e).__name__}: {e}", file=sys.stderr)
+
+
 def main():
+    # Rotate first, and write the marker HERE rather than relying on the banner
+    # printed at the bottom of this function: under launchd stdout is a file, so
+    # it is BLOCK-buffered and that banner can sit in the buffer for minutes,
+    # while the marker goes straight to the file. Without it a startup rotation
+    # would leave doctor with no start marker in the fresh log and it would
+    # silently fall back to "in the last 200 KB" — i.e. stop describing the
+    # running process, which is the exact regression the marker exists to
+    # prevent. When the real banner does flush it simply re-marks the same
+    # process, which is still right.
+    _log_rotate_once(DASH_LOG, marker=_dash_log_marker)
+    threading.Thread(target=log_rotate_loop, daemon=True).start()
     # On-demand model (2026-09-01): the mlx services no longer start at login.
     # If the model is down and not deliberately paused, mark it idle-suspended
     # so every existing wake path (chat worker, the idle loop's Telegram

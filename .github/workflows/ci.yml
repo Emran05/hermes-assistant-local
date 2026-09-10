@@ -68,3 +68,35 @@ jobs:
           echo "VERSION = $v"
           echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' \
             || { echo "::error::VERSION must look like 1.2.3"; exit 1; }
+
+  unit-tests:
+    name: Unit tests (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The unit tier is the only tier that may run here: it stubs the dashboard
+      # modules against throwaway HOMEs, and run.sh loads an offline guard that
+      # refuses the dashboard / model / serve ports for the whole tier, so a
+      # suite that quietly needed the owner's running Mac fails instead of
+      # passing by accident.  live/, browser/ and ac/ need a real machine.
+      - name: Run the unit tier
+        run: |
+          set -euo pipefail
+          node --version
+          python3 --version
+          tools/tests/run.sh unit
+
+      - name: No model server was started
+        run: |
+          set -uo pipefail
+          if pgrep -fl 'mlx-vlm-launch|mlx_lm server'; then
+            echo "::error::a test started a model server"
+            exit 1
+          fi
+          echo "clean"
