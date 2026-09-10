@@ -8,7 +8,7 @@ dashboard that must keep working on a Mac with nothing installed.
 ```
 tools/tests/
   run.sh          the one runner:  run.sh unit|live|browser|ac|all
-  lib/            the offline guard the unit tier runs under
+  lib/            the offline guards (Python + Node) the unit tier runs under
   unit/           no dashboard, no network, no model   ← this is what CI runs
   live/           needs the dashboard on 127.0.0.1:7788
   browser/        Playwright, needs the dashboard
@@ -33,10 +33,42 @@ owner's running Mac fails here instead of passing on one machine and failing in
 CI. (The guard is a `usercustomize`, not a `sitecustomize`: Homebrew ships its
 own `sitecustomize.py` and shadowing it breaks site-packages resolution.)
 
-The runner also snapshots `pgrep -f 'mlx-vlm-launch|mlx_lm server'` before and
-after every run outside the `ac` tier. If a model server appears, the run fails
-even when every check passed — waking an 18 GB model on a laptop on battery is a
-bug, not a side effect.
+**Node suites get the same guard.** `run.sh unit` also sets
+`NODE_OPTIONS="--require lib/offline-guard.js"` for the tier, which patches
+`http.request`/`http.get`/`fetch` (and their `https` equivalents) to throw
+instead of connecting to 127.0.0.1/localhost/`::1` on the same three ports.
+It is intentionally minimal — a synchronous throw, not an emitted `'error'`
+event — matching the Python guard's abruptness rather than Node's usual async
+convention, so a suite that ignores the failure still cannot proceed. It does
+**not** cover raw `net.Socket`/`tls.connect`, WebSocket libraries, or anything
+a suite shells out to (a `child_process` hitting curl, say); none of the
+suites here currently need those paths, but a future one that does is not
+protected by this guard and should say so in its own docstring the way this
+README documents the gap.
+
+**Strict mode.** By default a python3 or node that failed to load its guard
+only prints a `WARNING` and the tier still runs (useful when iterating
+locally with a stray `PYTHONPATH`/`NODE_OPTIONS`). Set `HERMES_TESTS_STRICT=1`
+— or run under CI, where GitHub Actions already sets `CI=true` and `run.sh`
+treats that the same way — and a guard that fails to load is a hard failure
+of the whole run instead: an unguarded unit tier proves nothing, so CI must
+never silently fall back to running it that way.
+
+```bash
+HERMES_TESTS_STRICT=1 tools/tests/run.sh unit     # fail loudly if either guard is missing
+```
+
+**The model-wake guard is stricter than "no model at the end".** The runner
+snapshots `pgrep -f 'mlx-vlm-launch|mlx_lm server'` once before the tier(s)
+run and once after, and fails the run if the two snapshots differ **in either
+direction** — a lane that *appeared* during the run (a test woke or started
+one) or one that *disappeared* (a test killed a lane that was already up for
+some other reason) are both bugs in a test, not just the "started" case.
+Because the comparison is before-vs-after rather than "empty at the end", a
+run that begins with a lane already resident is not a safe baseline either:
+run `tools/tests/run.sh` only when `pgrep -f 'mlx-vlm-launch|mlx_lm server'`
+is already empty, the same way CI's own before/after snapshot refuses to even
+start if one is resident going in.
 
 ## Running them
 
@@ -130,7 +162,10 @@ follows the throwaway HOME and would silently check the wrong thing.
    ```
    Exit non-zero when anything failed. A suite that cannot run at all should
    print a line starting with `SKIP` and exit 0 — the runner reports it as
-   skipped rather than green.
+   skipped rather than green. A suite that exits without printing either line
+   is a **FAIL**, not a silent pass with zero assertions — `run.sh` never
+   credits a suite for a summary it did not actually print, no matter what its
+   exit code was.
 6. **Never start a model.** If a test genuinely needs one, it goes in `ac/`, it
    is documented there, and it never runs in CI.
 7. Run `tools/tests/run.sh unit` before you push; CI runs exactly that.

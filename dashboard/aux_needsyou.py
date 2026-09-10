@@ -497,9 +497,19 @@ def _ny_classify(item, now=None):
 # COLLECTORS — each CONSUMES an existing store and returns [] when it is
 # absent.  `srcs` (optional) records present/absent for the payload.
 # ==========================================================================
-def _ny_mark(srcs, name, present):
+def _ny_mark(srcs, name, present, reason=None):
+    """`reason` (only meaningful when present=False) distinguishes a
+    deliberate off-switch (e.g. "Apple Reminders is off in Settings") from
+    every other kind of absence (not granted, store missing, fetch failed) —
+    both used to collapse into the same "absent", which reads to the user as
+    "not connected" when it's really "you turned this off". Stored as a
+    sibling `<name>_reason` key: aux_needsyou.js's sources() only ever looks
+    up the fixed names it knows about, so an extra key here is inert until a
+    client chooses to read it."""
     if isinstance(srcs, dict):
         srcs[name] = "present" if present else "absent"
+        if not present and reason:
+            srcs[name + "_reason"] = reason
     return present
 
 
@@ -848,7 +858,12 @@ def _ny_collect_reminder(srcs=None, now=None):
     except Exception:
         d = None
     if not isinstance(d, dict) or not d.get("available"):
-        _ny_mark(srcs, "reminder", False)
+        # _ny_rem_fetch() returns {"ok": False, "error": "..."} specifically
+        # for the "off in Settings" refusal (every other failure shape has no
+        # "error" key) — carry that string through instead of reporting the
+        # same bare "absent" for "off" as for "not granted"/"fetch failed".
+        reason = d.get("error") if isinstance(d, dict) else None
+        _ny_mark(srcs, "reminder", False, reason=reason)
         return []
     _ny_mark(srcs, "reminder", True)
     eod = _ny_end_of_day(now)
@@ -1580,21 +1595,24 @@ def _ny_start_draft(item):
     """
     new_job = _ny_fn("_new_job")
     worker = _ny_fn("_chat_worker")
-    loader = _ny_fn("load_chat")
-    saver = _ny_fn("save_chat")
+    updater = _ny_fn("save_chat_update")
     preamble = _ny_fn("access_preamble")
     if new_job is None or worker is None:
         return ({"ok": False, "error": "chat unavailable"}, 503)
     session = "needsyou"
     prompt_body = _ny_draft_prompt(item)
+    def _append_draft(chat):
+        chat.setdefault("messages", []).append(
+            {"role": "user", "text": prompt_body, "ts": time.time()})
+        if not chat.get("title"):
+            chat["title"] = "Needs you — drafts"
+
     try:
-        if loader is not None and saver is not None:
-            chat = loader(session)
-            chat.setdefault("messages", []).append(
-                {"role": "user", "text": prompt_body, "ts": time.time()})
-            if not chat.get("title"):
-                chat["title"] = "Needs you — drafts"
-            saver(session, chat)
+        # save_chat_update: load+append+save under one lock, so a draft cannot
+        # overwrite a reply that landed while this was being built
+        # (2026-09-10 audit A03).
+        if updater is not None:
+            updater(session, _append_draft)
     except Exception as e:                                    # pragma: no cover
         _ny_log("draft chat save failed: %s" % type(e).__name__)
     full = prompt_body

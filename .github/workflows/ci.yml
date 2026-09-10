@@ -70,22 +70,55 @@ jobs:
             || { echo "::error::VERSION must look like 1.2.3"; exit 1; }
 
   unit-tests:
-    name: Unit tests (macOS)
+    name: Unit tests (macOS, Python ${{ matrix.python-version }})
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The owner's own Mac (and its dashboard) runs Python 3.14 — see
+        # CLAUDE.md — so CI must cover the version actually in use, not
+        # whatever was newest when this file was written. 3.13 stays in the
+        # matrix as the previous stable series; drop it once 3.14 has been
+        # green here for a while. Confirmed both are published in
+        # actions/setup-python's version manifest as of this writing.
+        python-version: ["3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
+
+      # run.sh's own model-wake guard only compares before/after WITHIN one
+      # run.sh invocation, so a runner that somehow already had a lane
+      # resident (a leftover from something else on a self-hosted box, say)
+      # would still read as "unchanged" if a test left it running too.
+      # Snapshot it here as an independent, job-level check.
+      - name: Snapshot model processes before the run
+        run: |
+          set -uo pipefail
+          before="$(pgrep -f 'mlx-vlm-launch|mlx_lm server' | tr '\n' ' ')"
+          echo "MODELS_BEFORE=$before" >> "$GITHUB_ENV"
+          if [ -n "$before" ]; then
+            echo "::error::a model server is already resident before the run started"
+            pgrep -fl 'mlx-vlm-launch|mlx_lm server'
+            exit 1
+          fi
+          echo "clean (before)"
 
       # The unit tier is the only tier that may run here: it stubs the dashboard
       # modules against throwaway HOMEs, and run.sh loads an offline guard that
       # refuses the dashboard / model / serve ports for the whole tier, so a
       # suite that quietly needed the owner's running Mac fails instead of
       # passing by accident.  live/, browser/ and ac/ need a real machine.
+      # HERMES_TESTS_STRICT=1 makes a missing offline guard a hard failure
+      # instead of a warning — GitHub Actions already sets CI=true, which
+      # run.sh treats the same way, but this is explicit in case that ever
+      # changes or the job runs somewhere else.
       - name: Run the unit tier
+        env:
+          HERMES_TESTS_STRICT: "1"
         run: |
           set -euo pipefail
           node --version
@@ -95,8 +128,11 @@ jobs:
       - name: No model server was started
         run: |
           set -uo pipefail
-          if pgrep -fl 'mlx-vlm-launch|mlx_lm server'; then
-            echo "::error::a test started a model server"
+          after="$(pgrep -f 'mlx-vlm-launch|mlx_lm server' | tr '\n' ' ')"
+          before="${MODELS_BEFORE:-}"
+          if [ "$after" != "$before" ]; then
+            echo "::error::a model server's presence changed during the run (before=[${before:-none}] after=[${after:-none}])"
+            pgrep -fl 'mlx-vlm-launch|mlx_lm server' || true
             exit 1
           fi
           echo "clean"

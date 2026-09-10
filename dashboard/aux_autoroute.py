@@ -45,7 +45,15 @@ import json
 import time
 import threading
 
-AR_DEFAULT_MODE = "auto"
+# Default mode is "off" (2026-09-10 audit A02, was "auto"): the router already
+# short-circuits on the claude_escalation master switch (_ar_before checks
+# _ar_escalation_on() before ever scoring or spawning a thread), but that
+# switch now defaults to OFF too — so a fresh install with escalation later
+# turned on should not ALSO silently start auto-routing every scored turn to
+# Claude until the owner opts into that separately. "suggest" would also never
+# call claude_think() on its own; "off" is the more conservative pairing with
+# the rest of A02's "nothing leaves without an explicit choice" policy.
+AR_DEFAULT_MODE = "off"
 AR_DEFAULT_MIN = 2.5
 AR_MAX_TASK = 4000          # chars of user message passed to Claude
 AR_MAX_REPLY = 3000         # chars of the local reply passed as context
@@ -103,13 +111,22 @@ def _ar_escalation_on():
     """The Claude master switch (aux_claudebridge.claude_escalation_enabled).
     Looked up through globals() at CALL time because aux_autoroute sorts BEFORE
     aux_claudebridge in the aux loader, so the name does not exist yet at exec
-    time. Missing helper = bridge module absent = treat as ON and let
-    claude_think's own absence do the gating (fail open, same as claude_think)."""
+    time.
+
+    FAILS CLOSED (2026-09-10 audit A02, was fail-open): a missing helper
+    (bridge module absent or not loaded yet) or any exception evaluating it
+    means "we don't know that escalation is on", and the router must never
+    treat "don't know" as permission to spend the Max plan. claude_think()
+    itself now defaults closed too (CB_ESC_DEFAULT = False), so this no longer
+    needs to defer to it for the safe answer — it gives the safe answer
+    directly."""
     fn = globals().get("claude_escalation_enabled")
+    if not callable(fn):
+        return False
     try:
-        return bool(fn()) if callable(fn) else True
+        return bool(fn())
     except Exception:
-        return True
+        return False
 
 
 def _ar_settings():
@@ -129,19 +146,28 @@ def _ar_settings():
 
 
 def _ar_set_mode(mode, min_score=None):
+    """Persist the routing mode through server.py's settings_update().
+
+    This used to read settings.json and write the whole blob back with NO lock
+    at all, so it could silently revert any other module's write (and lose its
+    own to theirs) — 2026-09-10 audit A01. settings_update() holds _state_lock
+    across the read, the merge and the write, and only `auto_route` is
+    touched."""
     mode = str(mode or "").lower()
     if mode not in ("auto", "suggest", "off"):
         return False
-    s = read_json(SETTINGS_FILE, {}) or {}
-    cfg = s.get("auto_route") if isinstance(s.get("auto_route"), dict) else {}
-    cfg["mode"] = mode
-    if min_score is not None:
-        try:
-            cfg["min_score"] = float(min_score)
-        except (TypeError, ValueError):
-            pass
-    s["auto_route"] = cfg
-    write_json(SETTINGS_FILE, s)
+
+    def _apply(s):
+        cfg = s.get("auto_route") if isinstance(s.get("auto_route"), dict) else {}
+        cfg["mode"] = mode
+        if min_score is not None:
+            try:
+                cfg["min_score"] = float(min_score)
+            except (TypeError, ValueError):
+                pass
+        s["auto_route"] = cfg
+
+    settings_update(_apply)                                        # noqa: F821
     return True
 
 
@@ -164,9 +190,11 @@ def _ar_last_user_text(session):
 
 def _ar_persist(session, entry):
     try:
-        chat = load_chat(session)
-        chat["messages"].append(entry)
-        save_chat(session, chat)
+        # save_chat_update appends inside the lock. The old load/append/save
+        # pair raced the local worker's own reply on the very same
+        # conversation — both saw N messages, both wrote N+1, and whichever
+        # landed second erased the other (2026-09-10 audit A03).
+        save_chat_update(session, lambda chat: chat["messages"].append(entry))
     except Exception as e:
         print("[aux_autoroute] persist failed: %r" % e, file=sys.stderr)
 

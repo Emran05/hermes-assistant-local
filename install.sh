@@ -140,6 +140,40 @@ for d in "$HERMES_DIR" "$HERMES_DIR/dashboard" "$HERMES_DIR/logs"; do
   fi
 done
 
+# --- model on-demand default (2026-09-10 audit A09) -------------------------
+# mlx-server.sh refuses an unsolicited start (no fresh dashboard-minted start
+# token) unless HERMES_MODEL_ALWAYS_ON=1 — but until now no installer ever
+# created the (now informational) model-autostart-off marker, so a fresh
+# install had no record of that choice either way. "Fresh" here means no
+# settings.json and no marker yet — i.e. this Mac has never been set up —
+# so a --no-services install (which never reaches install-services.sh, the
+# other place this same check runs) still gets the on-demand default.
+DASH_DATA="$HERMES_DIR/dashboard"
+AUTOSTART_MARKER="$DASH_DATA/model-autostart-off"
+ALWAYS_ON_MARKER="$DASH_DATA/model-always-on"
+SETTINGS_FILE_PATH="$DASH_DATA/settings.json"
+if [ "${HERMES_MODEL_ALWAYS_ON:-0}" = "1" ] || [ -f "$ALWAYS_ON_MARKER" ]; then
+  if [ "$DRY" = "1" ]; then
+    plan "keep the model server always-on (HERMES_MODEL_ALWAYS_ON)"
+  else
+    mkdir -p "$DASH_DATA"
+    : > "$ALWAYS_ON_MARKER"
+    rm -f "$AUTOSTART_MARKER"
+    oky "HERMES_MODEL_ALWAYS_ON=1 — model server will stay always-on"
+  fi
+elif [ ! -e "$SETTINGS_FILE_PATH" ] && [ ! -e "$AUTOSTART_MARKER" ]; then
+  if [ "$DRY" = "1" ]; then
+    plan "create $AUTOSTART_MARKER (fresh install: model server starts on-demand only)"
+  else
+    mkdir -p "$DASH_DATA"
+    : > "$AUTOSTART_MARKER"
+    oky "fresh install: model server set to on-demand by default"
+    info "  (set HERMES_MODEL_ALWAYS_ON=1 before running this script to keep it always-on)"
+  fi
+else
+  oky "model server autostart setting left as-is"
+fi
+
 seed() {   # seed <template> <dest> <mode>
   local src="$1" dst="$2" mode="$3"
   if [ -e "$dst" ]; then

@@ -368,19 +368,19 @@ check("redaction: both ~/.hermes paths -> [redacted path]", out.count("[redacted
 check("sanitising: <script> neutralised", "<script" not in out and "&lt;script" in out)
 
 # 1.1.5: raw, UNLABELED shapes go through the same _plain() the tools use.
-raw_probe = ("no labels here: sk-ant-api03-A1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8 "
-             "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8 AKIAIOSFODNN7EXAMPLE "
-             "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawX "
-             "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+raw_probe = ("no labels here: sk-ant-" "api03-A1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8 "
+             "ghp_A1" "b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8 AKIAIO" "SFODNN7EXAMPLE "
+             "123456" "789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawX "
+             "eyJhbG" "ciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdW" "IiOiIxMjM0NTY3ODkwIn0."
              "dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk "
              "commit 9f3a2b7c8d1e4f5a6b7c8d9e0f1a2b3c4d5e6f7a")
 raw_out = M._plain(raw_probe)
 print("     raw: " + raw_out)
-for _lbl, _v in (("anthropic key", "sk-ant-api03-A1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"),
-                 ("github PAT", "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"),
-                 ("AWS key id", "AKIAIOSFODNN7EXAMPLE"),
-                 ("telegram token", "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawX"),
-                 ("JWT", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9")):
+for _lbl, _v in (("anthropic key", "sk-ant-" "api03-A1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"),
+                 ("github PAT", "ghp_A1" "b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"),
+                 ("AWS key id", "AKIAIO" "SFODNN7EXAMPLE"),
+                 ("telegram token", "123456" "789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawX"),
+                 ("JWT", "eyJhbG" "ciOiJIUzI1NiIsInR5cCI6IkpXVCJ9")):
     check("redaction: unlabeled %s gone" % _lbl, _v not in raw_out, raw_out[:200])
 check("redaction: a git sha is NOT a secret",
       "9f3a2b7c8d1e4f5a6b7c8d9e0f1a2b3c4d5e6f7a" in raw_out, raw_out[:200])
@@ -429,7 +429,7 @@ for _rx in ("_CV_SECRET_RE", "_CV_BEARER_RE", "_CV_HERMES_PATH_RE"):
 # _looks_secret is the gate memory_facts(add=) applies BEFORE the round trip —
 # the same test aux_memlayer._ml_looks_secret runs before it stores a fact.
 check("memory guard: an anthropic key looks like a credential",
-      M._looks_secret("sk-ant-api03-A1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"))
+      M._looks_secret("sk-ant-" "api03-A1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"))
 check("memory guard: a labeled token looks like a credential",
       M._looks_secret("the api_key = 8f3a9c2b7d1e5f0a"))
 check("memory guard: ordinary prose does not",
@@ -571,7 +571,7 @@ try:
                                        "text": "the harness wrote this"}})
     try:
         M.t_memory_facts({"add": {"text": "my token is "
-                                          "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"}})
+                                          "ghp_A1" "b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"}})
         _sec = ""
     except M.ToolError as e:
         _sec = str(e)

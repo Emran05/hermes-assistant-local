@@ -87,10 +87,46 @@ def read_json(path, default):
 
 
 def write_json(path, obj):
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(obj, f, indent=1)
-    os.replace(tmp, path)
+    """Atomically replace `path` with `obj` as pretty JSON.
+
+    The temp file is UNIQUE per writer, not the shared `path + ".tmp"` it used
+    to be (2026-09-10 audit A01). settings.json alone has a dozen writers
+    spread across server.py and the aux modules; two of them running at once
+    opened the SAME `settings.json.tmp`, interleaved their bytes, and then both
+    os.replace()d it — so the file that survived could be one JSON document
+    assembled from two half-documents. Same shape aux_watchtower._wt_write_json
+    and permissions.py already use: pid + thread id + the nanosecond clock. At
+    most one write_json per thread is ever in flight, so that triple is unique
+    among live writers, and the clock keeps it clear of a leftover from a
+    crashed one; O_EXCL means such a leftover is never silently adopted.
+
+    An existing target's mode is preserved; a brand-new file is created 0600 —
+    every file this writes lives under ~/.hermes and several of them
+    (settings.json, chats/*.json) hold personal content.
+
+    NOTE: atomic replacement is NOT protection from a lost update. A caller
+    that reads, thinks, and then writes the whole object back still clobbers
+    whatever landed in between — use settings_update() for settings.json and
+    save_chat_update() for a conversation.
+    """
+    tmp = "%s.tmp.%d.%d.%d" % (path, os.getpid(), threading.get_ident(),
+                               time.time_ns())
+    try:
+        mode = os.stat(path).st_mode & 0o777
+    except OSError:
+        mode = 0o600
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(obj, f, indent=1)
+        os.chmod(tmp, mode)          # umask must not narrow a preserved mode
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 # --------------------------------------------------------------------------
@@ -924,11 +960,58 @@ def _new_job(session):
 
 
 def _finish_chat_job(job, session):
-    """Persist the bot reply once a job completes."""
-    chat = load_chat(session)
-    chat["messages"].append({"role": "bot", "text": job["reply"],
-                             "ts": time.time(), "err": not job["ok"]})
-    save_chat(session, chat)
+    """Persist the bot reply, THEN publish the job as done.
+
+    Order matters. `done` is what /api/chat/poll turns into "this turn is
+    over" in the UI, and hermes_rpc.run_turn used to set it before this
+    function ran — so a reply could be rendered as delivered and only
+    afterwards fail to reach chats/<session>.json, with nothing anywhere to
+    say so (2026-09-10 audit A03). This is now the ONLY place a chat job's
+    `done` becomes true, it becomes true last, and `persisted` rides alongside
+    it so the client can tell the user when the transcript did not get the
+    reply it is showing.
+
+    A raise here used to be able to escape and kill the worker thread outright
+    while the UI kept polling a job that would never finish. Use
+    save_chat_update (load+mutate+save under one lock), retry once against a
+    fresh load, and never let the exception escape.
+
+    Idempotent: a second call on an already-done job returns immediately, so
+    the wake-failure early return and _chat_worker's `finally` cannot append
+    the same reply twice.
+    """
+    if job.get("done"):
+        return
+
+    def _append(chat):
+        chat["messages"].append({"role": "bot", "text": job["reply"],
+                                 "ts": time.time(), "err": not job["ok"],
+                                 "id": _new_message_id()})
+
+    persisted = False
+    try:
+        save_chat_update(session, _append)
+        persisted = True
+    except Exception as e:
+        print(f"[chat] _finish_chat_job({session}): save failed "
+              f"({type(e).__name__}: {e}) — retrying once against a fresh load",
+              file=sys.stderr, flush=True)
+        try:
+            save_chat_update(session, _append)
+            persisted = True
+        except Exception as e2:
+            print(f"[chat] _finish_chat_job({session}): save failed again "
+                  f"({type(e2).__name__}: {e2}) — giving up; the reply shown "
+                  "in the UI was NOT persisted", file=sys.stderr, flush=True)
+    job["persisted"] = persisted
+    job["state"] = "done"
+    job["done"] = True          # LAST — see the ordering note above
+
+
+# What the installed CLI prints (and exits 1 with) when `--continue <id>`
+# resolves to nothing: hermes_cli/main.py cmd_chat ->
+# "No session found matching '<id>'."
+_CLI_NO_SESSION_RE = re.compile(r"no session found", re.I)
 
 
 def _chat_worker(job, session, prompt):
@@ -941,34 +1024,113 @@ def _chat_worker(job, session, prompt):
             if not agent_wake(wait=True):
                 job.update(reply="The model was asleep and didn't wake in time — "
                            "give it a few seconds and send that again.",
-                           ok=False, state="done", done=True)
-                _finish_chat_job(job, session)
-                return
+                           ok=False, state="done")
+                return          # the finally below persists and marks it done
         chat = load_chat(session)
 
-        def save_meta():
-            cur = load_chat(session)
+        def _apply_meta(cur):
             cur["serve_sid"] = chat.get("serve_sid", "")
             cur["serve_key"] = chat.get("serve_key", "")
-            save_chat(session, cur)
+            # hermes_rpc.run_turn stamps this on `chat` (the same dict passed
+            # in as chat_meta) for a branch whose SEED_HOOK ran — carry it
+            # into the persisted file so aux_branch's tree/node views can
+            # report whether the branch's context actually got seeded.
+            if "seeded" in chat:
+                cur["seeded"] = chat["seeded"]
+
+        def save_meta():
+            # Bookkeeping only (persists serve_sid/serve_key so the next turn
+            # can resume the same serve session) — NOT the reply itself
+            # (_finish_chat_job below does that). A raise here used to escape
+            # through hermes_rpc.run_turn into the except below, which treats
+            # ANY exception as "the serve backend is broken" and spends a
+            # whole second model turn re-running the prompt one-shot for what
+            # was really just a save error. Catch it here instead.
+            try:
+                save_chat_update(session, _apply_meta)
+            except Exception as e:
+                print(f"[chat] save_meta({session}) failed "
+                      f"({type(e).__name__}: {e}) — serve session id may not "
+                      "persist for this turn", file=sys.stderr, flush=True)
 
         hermes_rpc.run_turn(job, chat, prompt, save_meta)
     except Exception as e:
-        # serve backend unreachable/broken — fall back to the old one-shot CLI.
-        # Print the real cause FIRST: this except swallowed everything, so a
-        # missing hermes_rpc, a WS 401 from a stale serve token, a protocol
-        # change and a plain bug all looked identical in the log (i.e. absent)
-        # and were only visible as "one-shot mode" in the UI. Type + message +
-        # the last 5 traceback frames is enough to name the failure without
-        # dumping a full trace on every turn.
-        print(f"[chat] serve turn failed ({type(e).__name__}: {e}) — "
-              "falling back to one-shot mode", file=sys.stderr, flush=True)
+        # The serve turn raised. Print the real cause FIRST: this except
+        # swallowed everything, so a missing hermes_rpc, a WS 401 from a stale
+        # serve token, a protocol change and a plain bug all looked identical
+        # in the log (i.e. absent) and were only visible as "one-shot mode" in
+        # the UI. Type + message + the last 5 traceback frames is enough to
+        # name the failure without dumping a full trace on every turn.
+        print(f"[chat] serve turn failed ({type(e).__name__}: {e})",
+              file=sys.stderr, flush=True)
         for _tl in traceback.format_exc().rstrip().splitlines()[-5:]:
             print("[chat]   " + _tl, file=sys.stderr, flush=True)
-        job["status"] = "serve backend unavailable, using one-shot mode"
-        ok, text = run_agent(prompt, session=session)
-        job.update(reply=text, ok=ok, state="done", done=True)
-    _finish_chat_job(job, session)
+
+        # ---- 2026-09-10 audit A04 -------------------------------------
+        # This used to unconditionally re-run the prompt as
+        # `hermes --continue <dashboard conversation key>`. BOTH halves were
+        # wrong:
+        #
+        #  * the dashboard's `chat-…` file name is not an agent session id.
+        #    The installed CLI resolves --continue against state.db session
+        #    ids and titles (hermes_cli/main.py _resolve_session_by_name_or_id)
+        #    and exits 1 with "No session found matching …" for anything else,
+        #    so the recovery path could not work even when a perfectly good
+        #    serve session existed. The durable id is chat["serve_key"] —
+        #    serve's `stored_session_id`, which IS a state.db session id.
+        #  * it retried even when prompt.submit had already gone out and tool
+        #    events had already arrived, so one dropped stream could run an
+        #    action-bearing prompt twice.
+        #
+        # So: the one-shot fallback runs ONLY when nothing was submitted.
+        # After submission we say what happened and let the user decide —
+        # never a silent re-run.
+        submitted = bool(job.get("submit_sent") or job.get("submitted")
+                         or job.get("_submitted_ts"))
+        tools_seen = int(job.get("tool_events") or 0)
+        meta = {}
+        try:
+            meta = load_chat(session)
+        except Exception:
+            meta = {}
+
+        if submitted or tools_seen:
+            status_fn = getattr(hermes_rpc, "turn_status", None)
+            live = None
+            if callable(status_fn):
+                live = status_fn((meta.get("serve_sid") or "").strip())
+            note = ("Its agent session is still there, so open the conversation "
+                    "in Hermes to see how it ended."
+                    if live else
+                    "Its agent session could not be reached to check.")
+            print(f"[chat] not retrying {session}: the prompt was already "
+                  f"submitted (tool events: {tools_seen}) — a re-run could "
+                  "repeat an action", file=sys.stderr, flush=True)
+            job.update(
+                reply="The agent connection dropped after your message was "
+                      "submitted — check the conversation before repeating an "
+                      "action. " + note,
+                ok=False, state="done")
+        else:
+            job["status"] = "serve backend unavailable, using one-shot mode"
+            key = (meta.get("serve_key") or "").strip()
+            ok, text = run_agent(prompt, session=key or None)
+            if not ok and key and _CLI_NO_SESSION_RE.search(text or ""):
+                # serve minted the key but never persisted a row for it (a
+                # session.create whose first prompt.submit never landed).
+                # Nothing was submitted, so a fresh session is safe — but say
+                # so, because it starts with no memory of this conversation.
+                ok, text = run_agent(prompt, session=None)
+                if ok:
+                    text += ("\n\n(The saved agent session could not be "
+                             "resumed, so this ran in a new one and it has no "
+                             "memory of the earlier turns here.)")
+            job.update(reply=text, ok=ok, state="done")
+    finally:
+        # The ONLY place a chat job is marked done — after its reply has been
+        # persisted. Runs on every path, including the wake-failure return
+        # above and an exception nothing else caught.
+        _finish_chat_job(job, session)
 
 
 def run_agent(message, session=None, lane="primary"):
@@ -1064,6 +1226,24 @@ def get_access():
     return read_json(ACCESS_FILE, {"dirs": []})
 
 
+_CAL_FAIL_LOG_MIN_GAP = 600      # seconds; one line per 10 min at most
+_last_cal_fail_log = [0.0]
+
+
+def _log_calendar_context_failure(reason):
+    """Rate-limited stderr line for a Google Calendar context-block failure
+    in access_preamble(). That block used to be a bare `except: pass` —
+    every chat turn silently lost calendar context with nothing in the log
+    to explain why. Capped at once per _CAL_FAIL_LOG_MIN_GAP so a
+    persistently-down calendar doesn't spam the log on every turn."""
+    now = time.time()
+    if now - _last_cal_fail_log[0] < _CAL_FAIL_LOG_MIN_GAP:
+        return
+    _last_cal_fail_log[0] = now
+    print(f"[access_preamble] Google Calendar context unavailable: {reason}",
+          file=sys.stderr, flush=True)
+
+
 def access_preamble(user_text=""):
     """The [context] block prepended to an outbound prompt.
 
@@ -1141,8 +1321,13 @@ def access_preamble(user_text=""):
                     "[context] Today's events from the user's Google Calendar: "
                     + "; ".join(f"{e['time']} {e['title']}".strip()
                                 for e in cal["events"]))
-    except Exception:
-        pass
+            elif not cal.get("available"):
+                # An actual fetch/token failure, not just "no events today" —
+                # this used to be indistinguishable from success because the
+                # whole block was a silent except below.
+                _log_calendar_context_failure(cal.get("reason") or "unknown")
+    except Exception as e:
+        _log_calendar_context_failure(f"{type(e).__name__}: {e}")
     # Memory layer v1 (1.2.2, aux_memlayer.py). Retrieved per message, so it is
     # the most volatile thing here except the clock — which is why it goes
     # LAST but one, after every stable line and after tasks/calendar, per the
@@ -1665,11 +1850,12 @@ def prewarm_enabled():
 
 def set_prewarm_enabled(on):
     on = bool(on)
-    with _state_lock:
-        s = get_settings() or {}
+
+    def _apply(s):
         cfg = s.get("prewarm")
         s["prewarm"] = {**(cfg if isinstance(cfg, dict) else {}), "enabled": on}
-        write_json(SETTINGS_FILE, s)
+
+    settings_update(_apply)
     return on
 
 
@@ -1937,6 +2123,104 @@ def load_chat(session):
     return read_json(chat_path(session), {"messages": [], "title": ""})
 
 
+def _new_message_id():
+    """A short, stable per-message id. os.urandom rather than uuid so this
+    stays callable from a stubbed namespace (the audit probes and the unit
+    suites extract these definitions with `ast` and hand-build globals)."""
+    return os.urandom(6).hex()
+
+
+def stamp_message_ids(chat):
+    """Give every message a stable `id` if it lacks one.
+
+    Purely additive: nothing reads it yet, every existing reader keys off the
+    list position as before, and a chat file written by an older build gets ids
+    the first time it is saved. It exists so a writer can say WHICH message it
+    means — "append this reply" instead of "here is my whole list, which is one
+    longer than the one I read" — which is the shape a lost update hides in
+    (2026-09-10 audit A03)."""
+    msgs = chat.get("messages")
+    if not isinstance(msgs, list):
+        return
+    for m in msgs:
+        if isinstance(m, dict) and not m.get("id"):
+            m["id"] = _new_message_id()
+
+
+def _save_chat_locked(session, chat, truncate=False):
+    """Do the actual guard-check + write. Caller MUST already hold
+    _state_lock (threading.Lock is not reentrant, so save_chat() and
+    save_chat_update() both take the lock themselves and call this).
+
+    Every write bumps `chat["rev"]`, read straight off the file that is being
+    replaced. A caller whose snapshot carries a rev BEHIND the on-disk one is
+    refused: it read the conversation, something else saved, and writing now
+    would silently drop that other writer's work. The length guard below
+    cannot catch that case on its own — two workers that each append one
+    message to the same N-message snapshot both save N+1 and both pass it
+    (2026-09-10 audit A03)."""
+    path = chat_path(session)
+    prev, corrupt = None, False
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                prev = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            corrupt = True
+    try:
+        prev_rev = int((prev or {}).get("rev") or 0)
+    except (TypeError, ValueError, AttributeError):
+        prev_rev = 0
+    if not truncate:
+        if corrupt:
+            # read_json()'s (path, None) default made this indistinguishable
+            # from "no previous file", which silently skipped the append-only
+            # guard below for exactly the file most worth protecting. Move it
+            # aside instead of either overwriting it unguarded or refusing to
+            # save the new turn.
+            corrupt_path = path + f".corrupt-{int(time.time())}"
+            try:
+                os.replace(path, corrupt_path)
+                print(f"[save_chat] {session}: existing chat file was unreadable "
+                      f"— moved aside to {os.path.basename(corrupt_path)} instead "
+                      "of silently skipping the append-only guard",
+                      file=sys.stderr, flush=True)
+            except OSError as e:
+                print(f"[save_chat] {session}: existing chat file was unreadable "
+                      f"and could not be moved aside ({e}) — writing the new "
+                      "chat anyway", file=sys.stderr, flush=True)
+        elif isinstance(prev, dict):
+            # Staleness first: it is the general case, and a stale snapshot
+            # that happens to be the same length or longer sails past the
+            # length guard below.
+            mine = chat.get("rev")
+            try:
+                mine = int(mine) if mine is not None else None
+            except (TypeError, ValueError):
+                mine = None
+            if mine is not None and mine < prev_rev:
+                raise ValueError(
+                    "save_chat(%s) is %d revision(s) behind the file on disk "
+                    "(rev %d, disk is at %d) — it would overwrite a save that "
+                    "landed after this copy was loaded. Reload the "
+                    "conversation, or use save_chat_update(session, fn) so the "
+                    "read and the write happen under one lock"
+                    % (session, prev_rev - mine, mine, prev_rev))
+            for field, noun in (("messages", "message"),
+                                ("branches", "branch record")):
+                old_n = len(prev.get(field) or [])
+                new_n = len(chat.get(field) or [])
+                if new_n < old_n:
+                    raise ValueError(
+                        "save_chat(%s) would drop %d %s(s) (%d -> %d); "
+                        "reload the conversation before saving, or pass "
+                        "truncate=True if that is really intended"
+                        % (session, old_n - new_n, noun, old_n, new_n))
+    stamp_message_ids(chat)
+    chat["rev"] = prev_rev + 1
+    write_json(path, chat)
+
+
 def save_chat(session, chat, truncate=False):
     """Persist a conversation. APPEND-ONLY unless the caller says otherwise.
 
@@ -1955,24 +2239,51 @@ def save_chat(session, chat, truncate=False):
     does NOT prune the row (GET /api/sessions/tree reports it as gone), so
     nothing legitimately shrinks that list either.
 
+    Since the 2026-09-10 audit (A03) a conversation also carries a `rev`
+    counter that every save bumps, and this refuses a snapshot whose `rev` is
+    behind the file on disk — the case the length guard is blind to, where two
+    workers each append one reply to the same N-message copy and both save
+    N+1. The second one now raises instead of quietly replacing the first
+    one's answer.
+
     `truncate=True` is the explicit opt-out for a future caller that genuinely
-    means to drop turns. Nothing passes it today.
+    means to drop turns (it skips BOTH guards). Nothing passes it today.
+
+    An existing file that fails to parse is NOT treated as "no previous
+    file" (which would silently skip the guard above) — see
+    _save_chat_locked. For a read-modify-write sequence (load, mutate, save)
+    prefer save_chat_update(), which holds _state_lock across all three steps
+    instead of only the final write.
     """
     with _state_lock:
-        if not truncate:
-            prev = read_json(chat_path(session), None)
-            if isinstance(prev, dict):
-                for field, noun in (("messages", "message"),
-                                    ("branches", "branch record")):
-                    old_n = len(prev.get(field) or [])
-                    new_n = len(chat.get(field) or [])
-                    if new_n < old_n:
-                        raise ValueError(
-                            "save_chat(%s) would drop %d %s(s) (%d -> %d); "
-                            "reload the conversation before saving, or pass "
-                            "truncate=True if that is really intended"
-                            % (session, old_n - new_n, noun, old_n, new_n))
-        write_json(chat_path(session), chat)
+        _save_chat_locked(session, chat, truncate=truncate)
+
+
+def save_chat_update(session, mutate_fn):
+    """Read-modify-write a chat file atomically under _state_lock.
+
+    Every existing read-modify-write caller (_finish_chat_job's message
+    append, _chat_worker's save_meta) used to call load_chat() then
+    save_chat() with no lock held across the pair — a second writer's save
+    landing in between was a lost update the append-only guard cannot catch
+    (it only compares against whatever is on disk at save time). Holding the
+    lock across load + mutate + save closes that window.
+
+    `mutate_fn(chat)` mutates the freshly loaded dict in place, or returns a
+    replacement dict; the saved dict (with its new `rev`) is returned. Append
+    explicitly inside it —
+    `chat["messages"].append(...)` — never assign a list built outside; the
+    whole point is that the list being appended to is the one on disk right
+    now. The rev check in _save_chat_locked can never fire for this path,
+    because the read that produced the rev happened inside this same lock.
+    """
+    with _state_lock:
+        chat = read_json(chat_path(session), {"messages": [], "title": ""})
+        result = mutate_fn(chat)
+        if isinstance(result, dict):
+            chat = result
+        _save_chat_locked(session, chat)
+        return chat
 
 
 def list_sessions():
@@ -2054,6 +2365,59 @@ def get_settings():
     return read_json(SETTINGS_FILE, {})
 
 
+def settings_update(mutate_fn):
+    """THE settings.json writer. Read-modify-write under `_state_lock`.
+
+    Every writer in the dashboard goes through this (server.py's weather /
+    prewarm / POST /api/settings, and aux_appleapps, aux_autoroute,
+    aux_claudebridge, aux_config, aux_dictation, aux_evals, aux_memlayer,
+    aux_recorder, aux_toolbudget, aux_update). The old pattern — read the whole
+    settings object, do some work, then write the whole object back with only
+    the final write locked — is a lost update, and the 2026-09-10 audit (A01)
+    reproduced the worst case: `weather()` captured settings, went to the
+    network to geocode, and on the way back wrote its stale snapshot over an
+    explicit "turn Claude off" the owner had made in the meantime. A privacy
+    switch silently flipping itself back on is exactly the failure this closes.
+
+    `mutate_fn(settings)` gets the CURRENT contents of the file (never a
+    snapshot the caller took earlier) and either mutates that dict in place or
+    returns a replacement dict. It must touch only the keys it owns and must
+    NOT do anything slow — no network, no subprocess, no model call: the lock
+    is the one every other settings reader/writer in the process waits on. Do
+    the slow part first, then call this with just the result (see weather()).
+
+    Returns a deep copy of the settings as written, so a caller that keeps the
+    result cannot accidentally mutate the next writer's view of the file.
+    """
+    with _state_lock:
+        s = read_json(SETTINGS_FILE, {})
+        if not isinstance(s, dict):
+            # A corrupt settings.json already reads back as {} via read_json's
+            # default; this covers the "valid JSON, wrong type" case ("[]",
+            # '"x"') so a mutate_fn never sees a non-dict.
+            s = {}
+        result = mutate_fn(s)
+        if isinstance(result, dict):
+            s = result
+        write_json(SETTINGS_FILE, s)
+        return json.loads(json.dumps(s))
+
+
+def settings_set(**fields):
+    """settings_update() for the simple case: merge these top-level keys.
+
+    `settings_set(weather_lat=1.0, weather_lon=2.0)` replaces exactly those
+    keys and leaves the rest of the file — including anything another thread
+    wrote a millisecond ago — alone. For a nested merge (`claude_escalation`,
+    `dictation`, …) use settings_update() with a mutate function instead, so
+    the sub-dict is merged against what is on disk NOW.
+    """
+    def _merge(s):
+        s.update(fields)
+
+    return settings_update(_merge)
+
+
 def apple_apps_enabled(kind):
     """Is Apple <kind> ("reminders"|"notes") automation allowed? settings.json
     `apple_apps.{reminders,notes}`, default OFF.
@@ -2132,7 +2496,13 @@ def weather():
         return {"configured": False}
 
     def fetch():
+        # `s` is a SNAPSHOT taken before any network call. It is read from
+        # here and never written back: the geocoding round-trip below can take
+        # seconds, and writing this whole stale object afterwards used to
+        # revert every unrelated setting the owner changed in the meantime —
+        # including turning the Claude bridge off (2026-09-10 audit A01).
         lat, lon = s.get("weather_lat"), s.get("weather_lon")
+        name = s.get("weather_city") or city
         if lat is None or lon is None:
             try:
                 geo = _http_json("https://geocoding-api.open-meteo.com/v1/search?count=1&name="
@@ -2144,10 +2514,10 @@ def weather():
             if not hits:
                 return {"configured": True, "error": f"city '{city}' not found"}
             lat, lon = hits[0]["latitude"], hits[0]["longitude"]
-            s.update({"weather_lat": lat, "weather_lon": lon,
-                      "weather_city": hits[0]["name"]})
-            with _state_lock:
-                write_json(SETTINGS_FILE, s)
+            name = hits[0]["name"]
+            # Network is DONE. Merge only the three keys this function owns
+            # into whatever settings.json says now.
+            settings_set(weather_lat=lat, weather_lon=lon, weather_city=name)
         try:
             w = _http_json(f"https://api.open-meteo.com/v1/forecast?latitude={lat}"
                            f"&longitude={lon}&current=temperature_2m,weather_code"
@@ -2157,7 +2527,7 @@ def weather():
             return {"configured": True, "error": "weather fetch failed"}
         cur = w.get("current", {})
         daily = w.get("daily", {})
-        return {"configured": True, "city": s.get("weather_city", city),
+        return {"configured": True, "city": name,
                 "temp": round(cur.get("temperature_2m", 0)),
                 "desc": WMO.get(cur.get("weather_code"), "—"),
                 "hi": round((daily.get("temperature_2m_max") or [0])[0]),
@@ -3827,6 +4197,11 @@ class Handler(BaseHTTPRequestHandler):
                             "text": job["text"], "status": job["status"],
                             "approval": job["approval"], "done": job["done"],
                             "reply": job["reply"], "err": not job["ok"],
+                            # 2026-09-10 audit A03: `done` is now published
+                            # only after the reply has been written to
+                            # chats/<session>.json, and this says whether that
+                            # write actually succeeded. None while running.
+                            "persisted": job.get("persisted"),
                             # aux_autoroute: Claude auto-escalation for this turn
                             "deep": job.get("deep"),
                             # aux_memlayer: chars of memory injected this turn
@@ -4028,20 +4403,25 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/settings":
             data = self._body_json()
-            s = get_settings()
-            if "weather_city" in data:
-                s["weather_city"] = (data["weather_city"] or "").strip()[:80]
-                s.pop("weather_lat", None)
-                s.pop("weather_lon", None)
-            # widget config: list-valued settings (tickers, coins, rss_feeds,
-            # quicklinks, timezones) accepted as-is so widgets are customizable
-            for key in ("tickers", "coins", "rss_feeds", "quicklinks", "timezones",
-                        "starred_tickers", "news_feeds"):
-                if key in data and isinstance(data[key], list):
-                    s[key] = data[key][:20]
+
+            def _apply(s):
+                # Only the keys this request actually carries are touched —
+                # the read happens inside settings_update's lock, so a widget
+                # save can no longer revert whatever another card wrote while
+                # this request body was being parsed (2026-09-10 audit A01).
+                if "weather_city" in data:
+                    s["weather_city"] = (data["weather_city"] or "").strip()[:80]
+                    s.pop("weather_lat", None)
+                    s.pop("weather_lon", None)
+                # widget config: list-valued settings (tickers, coins, rss_feeds,
+                # quicklinks, timezones) accepted as-is so widgets are customizable
+                for key in ("tickers", "coins", "rss_feeds", "quicklinks",
+                            "timezones", "starred_tickers", "news_feeds"):
+                    if key in data and isinstance(data[key], list):
+                        s[key] = data[key][:20]
+
+            settings_update(_apply)
             _widget_cache.clear()
-            with _state_lock:
-                write_json(SETTINGS_FILE, s)
             self._json({"ok": True})
             return
 
@@ -4201,11 +4581,16 @@ class Handler(BaseHTTPRequestHandler):
                             "hit 'Allow over-limit' in the model menu."})
                 return
 
-            chat = load_chat(session)
-            chat["messages"].append({"role": "user", "text": message, "ts": time.time()})
-            if not chat.get("title"):
-                chat["title"] = message[:48]
-            save_chat(session, chat)
+            def _append_user(chat):
+                chat["messages"].append({"role": "user", "text": message,
+                                         "ts": time.time()})
+                if not chat.get("title"):
+                    chat["title"] = message[:48]
+
+            # load+append+save under ONE lock: a bot reply or an autoroute
+            # answer landing between the read and the write used to be
+            # silently dropped (2026-09-10 audit A03).
+            save_chat_update(session, _append_user)
 
             prompt = access_preamble(message)
             if attachments:
@@ -4279,6 +4664,13 @@ try:
     DASH_LOG_MAX = int(os.environ.get("HERMES_DASH_LOG_MAX", "") or 8 * 1024 * 1024)
 except ValueError:
     DASH_LOG_MAX = 8 * 1024 * 1024
+if DASH_LOG_MAX <= 0:
+    # _log_rotate_once() below silently no-ops forever at <= 0 — that may be
+    # deliberate, but it's just as likely a blank/"0" env var typo, so say so
+    # once at start rather than leaving dashboard.log to grow unbounded with
+    # no clue why rotation never fires.
+    print(f"[logrotate] HERMES_DASH_LOG_MAX={os.environ.get('HERMES_DASH_LOG_MAX')!r} "
+          "parsed to <= 0 — dashboard.log rotation is DISABLED", file=sys.stderr)
 DASH_LOG_EVERY_S = 3600                # and once an hour after that
 
 
@@ -4305,12 +4697,20 @@ def _log_rotate_once(path=None, max_bytes=None, keep=DASH_LOG_KEEP, marker=""):
                 _s.flush()
             except Exception:
                 pass
+        # Copy to a staging file FIRST — an earlier version rolled .2->.3,
+        # .1->.2 before copying the live log to .1, so a copy failure
+        # (disk full, permission) left rotation half-done: older generations
+        # already shuffled/overwritten even though nothing new was ever
+        # safely captured. Roll only after the copy is confirmed good, then
+        # os.replace() the staged copy into place (atomic on the same fs).
+        tmp1 = path + ".1.tmp"
+        shutil.copyfile(path, tmp1)
         # .2 -> .3, .1 -> .2; whatever was .keep falls off the end.
         for i in range(int(keep) - 1, 0, -1):
             src = "%s.%d" % (path, i)
             if os.path.exists(src):
                 os.replace(src, "%s.%d" % (path, i + 1))
-        shutil.copyfile(path, path + ".1")
+        os.replace(tmp1, path + ".1")
         os.truncate(path, 0)
         line = marker(size) if callable(marker) else marker
         if line:

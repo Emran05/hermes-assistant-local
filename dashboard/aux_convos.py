@@ -248,14 +248,18 @@ def _cv_meta(ctx):
         return {"ok": False, "error": "unknown session"}, 404
     if "pinned" not in b and "title" not in b:
         return {"ok": False, "error": "nothing to set"}, 400
-    chat = load_chat(sid)
-    if "pinned" in b:
-        chat["pinned"] = bool(b.get("pinned"))
-    if "title" in b:
-        # an empty title clears the rename — list_sessions() then falls back
-        # to the first-message excerpt again
-        chat["title"] = _cv_clean_title(b.get("title"))
-    save_chat(sid, chat)
+    def _apply(chat):
+        if "pinned" in b:
+            chat["pinned"] = bool(b.get("pinned"))
+        if "title" in b:
+            # an empty title clears the rename — list_sessions() then falls
+            # back to the first-message excerpt again
+            chat["title"] = _cv_clean_title(b.get("title"))
+
+    # One lock across load+edit+save: a rename used to be a read, a think and
+    # a write of the WHOLE conversation, so a reply that arrived in between
+    # was dropped along with it (2026-09-10 audit A03).
+    chat = save_chat_update(sid, _apply)                      # noqa: F821
     return {"ok": True, "session": sid, "pinned": bool(chat.get("pinned")),
             "title": chat.get("title") or ""}
 

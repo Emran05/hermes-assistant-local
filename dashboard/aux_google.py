@@ -48,6 +48,7 @@ import sys
 import json
 import time
 import base64
+import threading
 import hashlib
 import secrets
 import tempfile
@@ -565,10 +566,16 @@ def _goog_disconnect_handler(ctx):
 GOOG_CAL_TTL = 300
 
 
-def _goog_ensure_access_token():
+def _goog_ensure_access_token(timeout=25):
     """A live access token, refreshing via the stored refresh_token if the
     cached one is expired.  None if not connected or the refresh fails — this
-    never raises and never prompts; the caller degrades to "unavailable"."""
+    never raises and never prompts; the caller degrades to "unavailable".
+
+    `timeout` bounds only the refresh POST. Default (25s) matches
+    _goog_post_form's own default for the general OAuth path (auth-code
+    exchange etc.); _goog_calendar_fetch passes a much shorter timeout since
+    it runs on the chat request path (access_preamble()) where a slow
+    network must not stall a turn."""
     payload = _goog_read_json(GOOG_TOKEN)
     if not isinstance(payload, dict):
         return None
@@ -586,7 +593,7 @@ def _goog_ensure_access_token():
         "client_secret": payload.get("client_secret") or "",
         "refresh_token": refresh,
         "grant_type": "refresh_token",
-    })
+    }, timeout=timeout)
     if st != 200 or not resp.get("access_token"):
         return None
     expires_in = int(resp.get("expires_in") or 3600)
@@ -603,7 +610,14 @@ def _goog_ensure_access_token():
 
 
 def _goog_calendar_fetch():
-    token = _goog_ensure_access_token()
+    # This is the function access_preamble() (server.py) calls on the LIVE
+    # chat request path on a cache miss — a slow/hung network call here used
+    # to be able to spend up to ~35s (25s token refresh + 10s events GET)
+    # before a turn even reached the model. ~4s per leg instead; the
+    # background prime loop below keeps _widget_cache["goog_calendar"] warm
+    # so the request path hits that cache far more often than it hits this
+    # function at all.
+    token = _goog_ensure_access_token(timeout=4)
     if not token:
         return {"available": False, "reason": "not_connected"}
     lt = time.localtime()
@@ -611,8 +625,8 @@ def _goog_calendar_fetch():
     day_end = day_start + 86400
 
     def rfc(ts):
-        return _goog_datetime.datetime.utcfromtimestamp(ts).strftime(
-            "%Y-%m-%dT%H:%M:%SZ")
+        return _goog_datetime.datetime.fromtimestamp(
+            ts, tz=_goog_datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     qs = urllib.parse.urlencode({
         "timeMin": rfc(day_start), "timeMax": rfc(day_end),
@@ -621,7 +635,7 @@ def _goog_calendar_fetch():
     url = "https://www.googleapis.com/calendar/v3/calendars/primary/events?" + qs
     req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
     try:
-        with urllib.request.urlopen(req, timeout=10, context=_goog_sslctx()) as r:
+        with urllib.request.urlopen(req, timeout=4, context=_goog_sslctx()) as r:
             data = json.loads(r.read().decode("utf-8", "replace"))
     except Exception as e:
         return {"available": False, "reason": "google_calendar_error: " + type(e).__name__}
@@ -645,6 +659,37 @@ def _goog_calendar_fetch():
 
 def _goog_calendar_events():
     return _cached("goog_calendar", GOOG_CAL_TTL, _goog_calendar_fetch)
+
+
+# --------------------------------------------------------------------------
+# background priming — access_preamble() reads _goog_calendar_events() on
+# EVERY chat turn; left alone, a cache miss (first call, or GOOG_CAL_TTL
+# having lapsed) pays a real network round trip inline on the request path.
+# Refresh proactively on an interval at/under the TTL so, once warm, the
+# request path is reading _widget_cache and nothing else. Connected-only:
+# no point spending a cycle when there's no token to use.
+# --------------------------------------------------------------------------
+GOOG_CAL_PRIME_INTERVAL = GOOG_CAL_TTL  # 300s
+
+
+def _goog_calendar_prime_loop():
+    while True:
+        try:
+            if _goog_status_compute().get("connected"):
+                _goog_calendar_events()
+        except Exception as e:
+            print(f"[aux_google] calendar prime failed: {type(e).__name__}: {e}",
+                  file=sys.stderr, flush=True)
+        time.sleep(GOOG_CAL_PRIME_INTERVAL)
+
+
+if not globals().get("_goog_calendar_prime_started"):
+    globals()["_goog_calendar_prime_started"] = True
+    try:
+        threading.Thread(target=_goog_calendar_prime_loop, daemon=True).start()
+    except Exception as _e:                                  # pragma: no cover
+        print(f"[aux_google] calendar prime thread failed to start: {_e!r}",
+              file=sys.stderr, flush=True)
 
 
 # --------------------------------------------------------------------------

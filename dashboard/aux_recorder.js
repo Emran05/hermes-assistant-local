@@ -403,6 +403,23 @@ function recRetainLabel(days){
   return days + " day" + (days === 1 ? "" : "s");
 }
 
+// Pure: last_sweep (server.py's _rec_retain_state, or null) -> one line for
+// the footer. The reconciler thread sweeps once a day (recorder_loop) — if it
+// ever dies, retention just silently stops working with nothing to say so.
+// Surfacing WHEN the last sweep ran (not just what it did) is what makes a
+// dead thread visible: "last swept 6 days ago" next to a once-a-day policy is
+// the tell, long before the row count itself looks obviously wrong.
+function recLastSweepNote(ls){
+  if (!ls || !ls.ts) return "No retention sweep has run yet.";
+  var when = recWhen(ls.ts) || "recently";
+  if (ls.ok === false) {
+    return "Last sweep " + when + " failed: " + (ls.error || "unknown error") + ".";
+  }
+  if (ls.forever) return "Last checked " + when + " — retention is off.";
+  var n = ls.deleted || 0;
+  return "Last swept " + when + " — removed " + n + " row" + (n === 1 ? "" : "s") + ".";
+}
+
 // Pure: (payload) -> the control's inner HTML. Exported for the headless
 // render harness, like renderRecorderRows.
 function renderRecorderRetention(d){
@@ -445,7 +462,9 @@ function renderRecorderRetention(d){
     '<span>' + recE(String(d.total == null ? "" : d.total)) +
     (d.total == null ? "" : (d.total === 1 ? " row" : " rows")) + "</span>" +
     '<span class="rr-note' + (recRetain.err ? " bad" : "") + '">' +
-    recE(recRetain.err || note) + "</span>";
+    recE(recRetain.err || note) + "</span>" +
+    '<span class="rr-note' + (d.last_sweep && d.last_sweep.ok === false ? " bad" : "") +
+    '">' + recE(recLastSweepNote(d.last_sweep)) + "</span>";
 }
 
 function recRenderRetention(){

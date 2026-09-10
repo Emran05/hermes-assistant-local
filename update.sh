@@ -152,6 +152,33 @@ on_exit() {
 trap on_exit EXIT
 
 # ---------------------------------------------------------------------------
+# process lock (2026-09-10 audit A08) — this script had no lock of its own,
+# so a terminal-run update.sh and a dashboard-triggered one (or two of
+# either) could race over git, installed files, services, logs and this
+# very state file. The dashboard (dashboard/aux_update.py _upd_apply) takes
+# an fcntl.flock on update.lock BEFORE spawning us and hands this process the
+# already-locked fd, so there is nothing to do here in that case — a second,
+# independent flock attempt from THIS SAME process tree on a freshly opened
+# fd to the same file would only fail against the one the dashboard already
+# holds. A bare terminal run has no such parent, so it takes the identical
+# lock itself, right here, on fd 9, for this script's entire remaining
+# lifetime — released automatically the moment this process and everything
+# it has exec'd (git, curl, rsync, install-services.sh...) finally exits.
+# --dry-run changes nothing on disk, so it is exempt and may run alongside a
+# real update.
+# ---------------------------------------------------------------------------
+if [ "$DRY" != "1" ] && [ "${HERMES_UPDATE_FROM:-}" != "dashboard" ]; then
+  LOCK_FILE="$STATE_DIR/update.lock"
+  exec 9>"$LOCK_FILE" || die "could not open $LOCK_FILE for the update lock"
+  python3 -c 'import fcntl, sys
+try:
+    fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError:
+    sys.exit(1)
+' || die "an update is already running (lock held on $LOCK_FILE) — wait for it to finish, or check Settings > System & Data in the dashboard"
+fi
+
+# ---------------------------------------------------------------------------
 # channel
 # ---------------------------------------------------------------------------
 if [ -z "$CHANNEL" ]; then

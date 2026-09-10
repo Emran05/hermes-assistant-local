@@ -195,13 +195,15 @@ def evals_settings():
 
 
 def evals_set_settings(patch):
-    """Merge + clamp + persist.  Fresh read-modify-write under _state_lock.
+    """Merge + clamp + persist through server.py's settings_update() — one
+    locked read-modify-write of settings.json touching only `evals`
+    (2026-09-10 audit A01).
 
-    The clamp happens HERE, before write_json — clamping only on read left
+    The clamp happens HERE, before the write — clamping only on read left
     settings.json holding values the module would never honour."""
     patch = patch if isinstance(patch, dict) else {}
-    with _state_lock:                                        # noqa: F821
-        s = get_settings() or {}                             # noqa: F821
+
+    def _apply(s):
         cur = s.get("evals")
         cur = dict(cur) if isinstance(cur, dict) else {}
         for k in EV_DEFAULTS:
@@ -209,7 +211,8 @@ def evals_set_settings(patch):
                 cur[k] = (_ev_clamp_key(k, patch[k]) if k in EV_INT_BOUNDS
                           else bool(patch[k]))
         s["evals"] = cur
-        write_json(SETTINGS_FILE, s)                         # noqa: F821
+
+    settings_update(_apply)                                  # noqa: F821
     return evals_settings()
 
 

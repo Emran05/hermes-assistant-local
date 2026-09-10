@@ -409,7 +409,10 @@ def _onb_prefs():
         "idle_min": _call("_idle_min", 10),
         "idle_enabled": _call("idle_suspend_enabled", True),
         "prewarm": _call("prewarm_enabled", True),
-        "claude_escalation": _call("claude_escalation_enabled", True),
+        # 2026-09-10 audit A02: an absent/unavailable helper must read as OFF,
+        # not on — outbound inference is opt-in, so "we couldn't tell" must
+        # never be presented to the sheet as "it's already enabled".
+        "claude_escalation": _call("claude_escalation_enabled", False),
         # "lean" | "full" | "custom"; read straight off config.yaml, no
         # subprocess (aux_promptbudget.py, resolved by name at call time)
         "prompt_budget": _call("prompt_budget_profile", "full"),

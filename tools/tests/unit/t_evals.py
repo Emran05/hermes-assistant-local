@@ -57,12 +57,31 @@ def _write_json(p, obj):
         json.dump(obj, f)
 
 
+_STATE_LOCK = threading.Lock()
+
+
+def settings_update(mutate_fn):
+    """Stand-in for server.py's settings_update() — ONE locked
+    read-modify-write of settings.json, the only way an aux module is allowed
+    to write it since the 2026-09-10 audit (A01)."""
+    with _STATE_LOCK:
+        s = _read_json(SETTINGS, {})
+        if not isinstance(s, dict):
+            s = {}
+        out = mutate_fn(s)
+        if isinstance(out, dict):
+            s = out
+        _write_json(SETTINGS, s)
+        return json.loads(json.dumps(s))
+
+
 G.update({
     "DATA": TMP,
     "MODEL_URL": "http://127.0.0.1:8080/v1/models",
     "SETTINGS_FILE": SETTINGS,
     "CHAT_JOBS": CHAT_JOBS,
-    "_state_lock": threading.Lock(),
+    "_state_lock": _STATE_LOCK,
+    "settings_update": settings_update,
     "get_settings": lambda: _read_json(SETTINGS, {}) or {},
     "write_json": _write_json,
     "read_json": _read_json,

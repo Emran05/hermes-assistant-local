@@ -33,8 +33,38 @@ import random as _br_random
 import time as _br_time
 import urllib.parse as _br_urlparse
 
+import re as _br_re
+
 _BR_MAX_DEPTH = 24          # lineage walk cap — a cycle can only ever be a bug
 _BR_TITLE_CAP = 48
+
+# Same rule as aux_convos._cv_clean_title (80 chars, control chars stripped,
+# whitespace runs collapsed) — used to sanitise a user-supplied branch title
+# before it lands in a chat file. Resolved BY NAME at call time in
+# _br_sanitize_title rather than imported: aux modules exec in sorted order
+# and "aux_branch.py" runs before "aux_convos.py", so at THIS module's own
+# exec time _cv_clean_title does not exist yet as a global — but _br_branch()
+# itself only runs from a request handler, long after every aux module has
+# loaded, the same discipline aux_index/aux_onboarding document. The literal
+# regex/cap below is a local fallback for the (unlikely) case aux_convos.py
+# itself failed to load.
+_BR_CTRL_RE = _br_re.compile(r"[\x00-\x1f\x7f]")
+_BR_TITLE_SANITIZE_MAX = 80
+
+
+def _br_clean_title_fallback(t):
+    t = _BR_CTRL_RE.sub(" ", str(t if t is not None else ""))
+    return " ".join(t.split())[:_BR_TITLE_SANITIZE_MAX].strip()
+
+
+def _br_sanitize_title(t):
+    fn = globals().get("_cv_clean_title")
+    if callable(fn):
+        try:
+            return fn(t)
+        except Exception:
+            pass
+    return _br_clean_title_fallback(t)
 
 
 def _br_log(msg):
@@ -191,7 +221,11 @@ def _br_branch(ctx):
     msgs = src_chat.get("messages") or []
     try:
         at = int(body.get("at_index"))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: json permits Infinity/-Infinity/NaN by default, and
+        # int(float("inf")) raises OverflowError rather than ValueError — an
+        # uncaught one here would surface as a generic 500 instead of the
+        # same clean 400 every other bad at_index gets.
         return ({"ok": False, "error": "at_index must be a number"}, 400)
     # at_index is a COUNT of leading messages to carry, so 1..len (0 would be
     # an empty branch, which is just a new conversation).
@@ -201,7 +235,10 @@ def _br_branch(ctx):
     now = _br_time.time()
     new_id = _br_new_id()
     base = _br_title_of(src, src_chat)
-    title = str(body.get("title") or "").strip() or (base[:40] + " (branch)")
+    # A caller-supplied title is untrusted input — sanitise the same way a
+    # rename does (aux_convos._cv_clean_title) so a huge/control-char-laden
+    # title can't bloat the chat file or break the sidebar row.
+    title = _br_sanitize_title(body.get("title")) or (base[:40] + " (branch)")
 
     # 1. the child, written first — deep-copied so nothing aliases the source
     #    list, timestamps kept verbatim (a branch is the same history, not a
@@ -218,17 +255,17 @@ def _br_branch(ctx):
         _br_log("child write failed: %r" % e)
         return ({"ok": False, "error": "could not write the branch"}, 500)
 
-    # 2. append one row to the source. Re-read under a short retry: another
-    #    thread may have appended a turn since we loaded, and save_chat's
-    #    monotonic guard turns that race into a retryable error instead of a
-    #    lost message.
+    # 2. append one row to the source. save_chat_update holds one lock across
+    #    the read, the append and the write, so the retry loop below is now
+    #    belt-and-braces (a transient write error) rather than the mechanism
+    #    that made this safe — the old load/append/save pair could lose the
+    #    registration to a turn that landed in between (2026-09-10 audit A03).
     row = {"child": new_id, "at_index": at, "ts": now}
     linked = False
     for _ in range(3):
         try:
-            cur = load_chat(src)                              # noqa: F821
-            cur.setdefault("branches", []).append(row)
-            save_chat(src, cur)                               # noqa: F821
+            save_chat_update(                                 # noqa: F821
+                src, lambda cur: cur.setdefault("branches", []).append(row))
             linked = True
             break
         except Exception as e:                                # pragma: no cover
@@ -270,6 +307,11 @@ def _br_node(sid, at_index=None):
         "turn": (br_turn_count(msgs[:at_index]) if at_index is not None else None),
         "branches": len(chat.get("branches") or []),
         "pinned": bool(chat.get("pinned")),
+        # None until this branch's first turn actually runs (hermes_rpc.
+        # run_turn only stamps it once a session.create for a forked chat
+        # happens); False means SEED_HOOK ran but seeded no messages
+        # (context lost — see hermes_rpc's SEED_HOOK log line for why).
+        "seeded": chat.get("seeded"),
     }
 
 

@@ -973,9 +973,19 @@ register_get("/api/search", _ix_search)              # noqa: F821
 register_get("/api/search/status", _ix_status)       # noqa: F821
 register_post("/api/notes", _ix_notes_post)          # noqa: F821
 
-# save_chat wrap — runtime override, no file edit (the pattern aux_shortcuts
-# uses for access_preamble).  The touch runs AFTER the real save returns, so
-# it never holds _state_lock, and it only queues work for the drain thread.
+# save_chat / save_chat_update wrap — runtime override, no file edit (the
+# pattern aux_shortcuts uses for access_preamble).  The touch runs AFTER the
+# real save returns, so it never holds _state_lock, and it only queues work for
+# the drain thread.
+#
+# BOTH entry points have to be wrapped.  save_chat_update() (server.py's
+# load+mutate+save under one lock) calls _save_chat_locked directly and so
+# never went through this wrapper — every writer converted to it during the
+# 2026-09-10 audit fixes (A03: the chat POST's user append, _finish_chat_job's
+# reply, aux_convos' rename/pin, aux_autoroute's deep answer, aux_branch's
+# parent link, aux_needsyou's draft) would otherwise have stopped re-indexing
+# its conversation, and the 30-minute sweep would have been the only thing
+# keeping search current.
 try:
     _ix_prev_save_chat                                # noqa: B018 — rewrap guard
 except NameError:
@@ -994,6 +1004,23 @@ if _ix_prev_save_chat is not None:
             index_touch("chat", session)
         except Exception:
             pass
+
+try:
+    _ix_prev_save_chat_update                         # noqa: B018 — rewrap guard
+except NameError:
+    try:
+        _ix_prev_save_chat_update = save_chat_update  # noqa: F821
+    except NameError:
+        _ix_prev_save_chat_update = None
+
+if _ix_prev_save_chat_update is not None:
+    def save_chat_update(session, mutate_fn):
+        out = _ix_prev_save_chat_update(session, mutate_fn)
+        try:
+            index_touch("chat", session)
+        except Exception:
+            pass
+        return out
 
 if not globals().get("_IX_BG_STARTED"):
     _IX_BG_STARTED = True

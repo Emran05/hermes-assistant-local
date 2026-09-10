@@ -512,4 +512,5 @@ print("  PASS %d   FAIL %d" % (PASS, FAIL))
 if FAILED:
     print("  failed:", FAILED)
 print("=========================================")
+print("TESTS %d passed %d failed" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

@@ -36,6 +36,11 @@ try:                       # shared P1.3 policy engine (one lock / one sidecar)
 except Exception:          # never let a missing dep take the hub down
     _cfg_pm = None
 
+try:                       # Python 3.9+; this repo requires 3.12+ (CLAUDE.md)
+    from zoneinfo import available_timezones as _cfg_available_timezones
+except Exception:          # pragma: no cover — defensive only
+    _cfg_available_timezones = None
+
 # --------------------------------------------------------------------------
 # constants
 # --------------------------------------------------------------------------
@@ -58,6 +63,10 @@ CFG_SECTIONS = ("layout", "settings", "models", "permissions", "agent_config")
 CFG_TICKER_RE = re.compile(r"^[A-Za-z0-9.^=:-]{1,16}$")
 CFG_URL_RE = re.compile(r"^https?://", re.I)
 CFG_CTX_MIN, CFG_CTX_MAX = 1024, 262144
+# Loose "Area/City" (or bare "UTC"/"GMT") shape — the fallback validator when
+# zoneinfo's own database is unavailable (2026-09-10 audit A10).
+CFG_TZ_LOOSE_RE = re.compile(r"^[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+)*$")
+_CFG_TZ_CACHE = {"zones": None}
 
 # hard-refuse patterns (export AND import) — defense-in-depth over the allowlist
 CFG_SECRET_PATTERNS = [
@@ -131,6 +140,29 @@ def _cfg_clean_layout(lay):
     return order[:64], unknown
 
 
+def _cfg_valid_tz(tz):
+    """Is `tz` a real-looking IANA timezone id? (2026-09-10 audit A10)
+
+    Prefers the real database via zoneinfo.available_timezones() — cached
+    after the first call, since it scans the tzdata directory — and falls
+    back to a loose Area/City (or bare UTC/GMT) shape when zoneinfo is
+    unavailable for some reason. Either way this is validation, not
+    normalization: a value that fails is DROPPED, never rewritten."""
+    if not isinstance(tz, str) or not tz:
+        return False
+    if _cfg_available_timezones is not None:
+        zones = _CFG_TZ_CACHE["zones"]
+        if zones is None:
+            try:
+                zones = _cfg_available_timezones()
+            except Exception:
+                zones = None
+            _CFG_TZ_CACHE["zones"] = zones if zones else set()
+        if _CFG_TZ_CACHE["zones"]:
+            return tz in _CFG_TZ_CACHE["zones"]
+    return bool(CFG_TZ_LOOSE_RE.match(tz))
+
+
 def _cfg_clean_settings(raw):
     out = {}
     if not isinstance(raw, dict):
@@ -150,7 +182,28 @@ def _cfg_clean_settings(raw):
             out[k] = [x.strip()[:400] for x in v
                       if isinstance(x, str) and CFG_URL_RE.match(x.strip())][:20]
         elif k == "timezones":
-            out[k] = [x.strip()[:64] for x in v if isinstance(x, str) and x.strip()][:20]
+            # The world-clock widgets (expand_worldclock/w_worldclock in
+            # server.py) store ["label", "tz"] PAIRS, not bare strings — this
+            # used to accept only strings, so a real configuration such as
+            # [["Paris", "Europe/Paris"]] silently became [] on export and an
+            # import restored the defaults over the owner's chosen clocks
+            # (2026-09-10 audit A10). Pairs are the real shape and are
+            # validated (non-empty label, a real-looking IANA zone); a bare
+            # string is still accepted for backward compatibility in case
+            # some other widget iteration ever reads that shape directly.
+            zones = []
+            for it in v[:20]:
+                if isinstance(it, list) and len(it) == 2:
+                    label, tz = it
+                    if isinstance(label, str) and isinstance(tz, str):
+                        label, tz = label.strip()[:60], tz.strip()[:64]
+                        if label and tz and _cfg_valid_tz(tz):
+                            zones.append([label, tz])
+                elif isinstance(it, str):
+                    s = it.strip()[:64]
+                    if s:
+                        zones.append(s)
+            out[k] = zones[:20]
         elif k == "quicklinks":
             ql = []
             for it in v[:20]:
@@ -521,13 +574,12 @@ def snapshot_apply(clean, sections, apply_active, dropped):
         applied["layout"] = True
 
     if "settings" in sections and "settings" in dash:
-        with _state_lock:
-            s = get_settings() or {}
-            touched = []
-            for k, v in dash["settings"].items():
-                s[k] = v
-                touched.append(k)
-            write_json(SETTINGS_FILE, s)
+        # settings_update() re-reads settings.json inside _state_lock, so an
+        # import only overwrites the keys the snapshot actually carries and
+        # cannot revert a concurrent write of an unrelated key
+        # (2026-09-10 audit A01).
+        touched = list(dash["settings"].keys())
+        settings_update(lambda s: s.update(dash["settings"]))
         _widget_cache.clear()
         applied["settings"] = touched
 

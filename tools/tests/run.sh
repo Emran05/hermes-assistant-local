@@ -115,6 +115,12 @@ run_tier() {
 
     if grep -qE '^SKIP' "$log" && [ "$rc" -eq 0 ]; then
       status="SKIP"
+    elif [ -z "$line" ]; then
+      # no canonical summary line at all: a suite that silently produced zero
+      # assertions must never count as PASS, whatever its exit code was.
+      status="FAIL"
+      fl=1
+      FAILED_SUITES+=("$tier/$name (no TESTS summary line)")
     elif [ "$rc" -eq 0 ] && [ "$fl" -eq 0 ]; then
       status="PASS"
     else
@@ -138,20 +144,41 @@ SKIPPED_TIERS=()
 do_unit() {
   bold "== unit =="
   local pp_before="${PYTHONPATH:-}"
+  local no_before="${NODE_OPTIONS:-}"
   export HERMES_TESTS_OFFLINE=1
   export PYTHONPATH="$HERE/lib${PYTHONPATH:+:$PYTHONPATH}"
   # a closed port, for anything that reads a base URL from the environment
   export HERMES_DASH_BASE="http://127.0.0.1:9"
   export HERMES_MCP_DASHBOARD="http://127.0.0.1:9"
+  # Node has no usercustomize equivalent, so preload the same guard's JS
+  # sibling — see lib/offline-guard.js and the README's "node guard" note.
+  export NODE_OPTIONS="--require $HERE/lib/offline-guard.js${no_before:+ $no_before}"
   if python3 -c 'import usercustomize,sys; sys.exit(0 if getattr(usercustomize,"HERMES_OFFLINE_GUARD",False) else 1)' 2>/dev/null; then
     echo "  offline guard active (ports ${HERMES_TESTS_BLOCKED_PORTS:-7788,8080,9119} refused)"
   else
     echo "  WARNING: this python3 did not load tools/tests/lib/usercustomize.py —"
     echo "           the unit tier is running WITHOUT the offline guard."
+    if [ "${CI:-}" = "true" ] || [ "${HERMES_TESTS_STRICT:-}" = "1" ]; then
+      die "the offline guard did not load — refusing to run the unit tier
+  unguarded (CI=true or HERMES_TESTS_STRICT=1 requires it).  Check that
+  tools/tests/lib is really on PYTHONPATH and that no other sitecustomize/
+  usercustomize shadows it."
+    fi
+  fi
+  if node -e 'require(process.argv[1])' "$HERE/lib/offline-guard.js" 2>/dev/null; then
+    echo "  node offline guard preloaded (http/https/fetch refused on the same ports)"
+  else
+    echo "  WARNING: node did not load tools/tests/lib/offline-guard.js —"
+    echo "           Node unit suites are running WITHOUT the offline guard."
+    if [ "${CI:-}" = "true" ] || [ "${HERMES_TESTS_STRICT:-}" = "1" ]; then
+      die "the node offline guard did not load — refusing to run the unit
+  tier unguarded (CI=true or HERMES_TESTS_STRICT=1 requires it)."
+    fi
   fi
   run_tier unit
   unset HERMES_TESTS_OFFLINE HERMES_DASH_BASE HERMES_MCP_DASHBOARD
   if [ -n "$pp_before" ]; then export PYTHONPATH="$pp_before"; else unset PYTHONPATH; fi
+  if [ -n "$no_before" ]; then export NODE_OPTIONS="$no_before"; else unset NODE_OPTIONS; fi
 }
 
 do_live() {

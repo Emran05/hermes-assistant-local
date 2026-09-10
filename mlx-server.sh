@@ -3,16 +3,33 @@
 # Run this FIRST (in its own terminal / as a service), then start Hermes.
 set -euo pipefail
 
-# --- On-demand gate (2026-09-01) --------------------------------------------
-# When ~/.hermes/dashboard/model-autostart-off exists, this script refuses to
-# load the model unless the dashboard minted a FRESH start token (written by
-# _mlx_start on an explicit wake/resume/switch — i.e. the user actually asked).
-# This blocks login autostart, the app's blind `launchctl kickstart` at launch,
-# and any stray poke, so the ~18GB model never burns battery uninvited.
-# Delete the marker file to restore always-on behavior.
+# --- On-demand gate (2026-09-01, tightened 2026-09-10 audit A09) -----------
+# Before this fix, this script refused an unsolicited start ONLY when
+# ~/.hermes/dashboard/model-autostart-off already existed — but no installer
+# ever created that file, so a FRESH install (no marker, no state at all) fell
+# through to the old always-on behavior: `app/main.swift`'s blind
+# `launchctl kickstart` of com.hermes.mlx-server at every app launch loaded
+# the ~18GB model with no chat request behind it. On-demand is now the
+# default REGARDLESS of whether the marker exists: any launch without a FRESH
+# (<=180s) start token — minted only by the dashboard's own
+# wake/resume/switch/restart path (server.py's `_mlx_start`, called when the
+# user actually asked for the model) — is refused. `install.sh` and
+# `install-services.sh` still create the marker file on a fresh install (and
+# it is still read below, for logging only) so existing tooling that reports
+# on its presence (`doctor.py`) keeps meaning the same thing; it is simply no
+# longer what DECIDES the gate. `HERMES_MODEL_ALWAYS_ON=1` is the one
+# deliberate opt-out — baked into this plist's EnvironmentVariables by
+# `install-services.sh` when the owner asks for it at install time, or
+# exported by hand before running this script from a terminal — and skips the
+# gate entirely, restoring pre-2026-09-01 always-on behavior. Existing
+# machines are unaffected either way: the gate's pass/fail outcome for a
+# marker that is already present, or a token that is already fresh, is
+# byte-identical to before.
 GATE_FILE="$HOME/.hermes/dashboard/model-autostart-off"
 START_TOKEN="$HOME/.hermes/dashboard/model-start-ok"
-if [ -f "$GATE_FILE" ]; then
+if [ "${HERMES_MODEL_ALWAYS_ON:-0}" = "1" ]; then
+  echo "[mlx-server] HERMES_MODEL_ALWAYS_ON=1 — skipping the on-demand gate"
+else
   fresh=0
   if [ -f "$START_TOKEN" ]; then
     now="$(date +%s)"
@@ -22,7 +39,11 @@ if [ -f "$GATE_FILE" ]; then
   if [ "$fresh" = 1 ]; then
     rm -f "$START_TOKEN"
   else
-    echo "[mlx-server] on-demand mode: no fresh start token — not loading the model"
+    if [ -f "$GATE_FILE" ]; then
+      echo "[mlx-server] on-demand mode: no fresh start token — not loading the model"
+    else
+      echo "[mlx-server] on-demand mode (default — no model-autostart-off marker, but none is required anymore): no fresh start token — not loading the model"
+    fi
     exit 0
   fi
 fi

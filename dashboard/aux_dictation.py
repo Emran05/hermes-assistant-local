@@ -170,6 +170,30 @@ def _dct_clean_app_styles(raw):
     return out
 
 
+def _dct_num(v, default=0.0):
+    """float(v) that can't raise. A history row's `ts` (or the status
+    heartbeat's) round-trips through the JSON store on disk — a hand-edited
+    file, a partial write recovered from a stale .tmp, or a future producer
+    sending the wrong shape can hand back a string/list/None where a number
+    is expected. `float(r.get("ts") or 0)` only guarded the falsy/missing
+    case; a non-numeric-but-truthy value (e.g. ts: "unknown") raised
+    ValueError straight out of whatever was scanning history — pruning,
+    today's stats, or the status heartbeat."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _dct_bool(v, default=False):
+    """Accept only an actual JSON bool. `bool(v)` on anything else is a foot-
+    gun here: bool("false") is True in Python, so a client sending the STRING
+    "false" for keep_history (a stray JSON.stringify, a form field, a curl
+    typo) silently turned history back ON instead of being rejected. Anything
+    that isn't literally True/False falls back to `default`."""
+    return v if isinstance(v, bool) else default
+
+
 def dictation_settings():
     """The settings block, defaults filled in, always the full shape."""
     s = (_dct_g("get_settings") or (lambda: {}))() or {}
@@ -197,18 +221,17 @@ def dictation_settings():
 
 
 def dictation_set_settings(patch):
-    """Merge + clamp + persist.  Fresh read-modify-write under `_state_lock`,
-    like every other settings writer — a stale copy here would silently undo a
+    """Merge + clamp + persist through server.py's settings_update() — ONE
+    locked read-modify-write of settings.json, like every other settings writer
+    since the 2026-09-10 audit (A01).  A stale copy here would silently undo a
     change another card made between the read and the write."""
     patch = patch if isinstance(patch, dict) else {}
-    lock = globals().get("_state_lock")
-    settings_file = globals().get("SETTINGS_FILE")
-    getter = _dct_g("get_settings")
-    writer = _dct_g("write_json")
-    if lock is None or writer is None or getter is None:
+    updater = _dct_g("settings_update")
+    if not callable(updater):
         return dictation_settings()
-    with lock:
-        s = getter() or {}
+    flags = {"turn_off": False}
+
+    def _apply(s):
         cur = s.get("dictation")
         cur = dict(cur) if isinstance(cur, dict) else {}
         if "cleanup" in patch:
@@ -229,14 +252,33 @@ def dictation_set_settings(patch):
                 d = DCT_DEFAULTS["history_days"]
             cur["history_days"] = max(0, min(DCT_HISTORY_DAYS_MAX, d))
         if "keep_history" in patch:
-            cur["keep_history"] = bool(patch.get("keep_history"))
+            # Strict: only an actual JSON bool changes the setting.
+            # bool("false") is True in Python, so a stringified "false" (a
+            # stray JSON.stringify, a form field, a curl typo) used to
+            # silently turn history back ON — a privacy-relevant setting
+            # must not be guessable from truthy/falsy coercion. An invalid
+            # value is a no-op: the existing setting stands rather than the
+            # patch being interpreted either way.
+            cur["keep_history"] = _dct_bool(
+                patch.get("keep_history"),
+                cur.get("keep_history", DCT_DEFAULTS["keep_history"]))
         s["dictation"] = cur
-        writer(settings_file, s)
+        flags["turn_off"] = ("keep_history" in patch
+                             and cur.get("keep_history") is False)
+
+    updater(_apply)
+    turn_off = flags["turn_off"]
+    out = dictation_settings()
     # Turning history off is not a promise about the future — it must also drop
-    # what is already stored, or the toggle is decoration.
-    if "keep_history" in patch and not bool(patch.get("keep_history")):
-        _dct_forget_text()
-    return dictation_settings()
+    # what is already stored, or the toggle is decoration. _dct_forget_text()
+    # now reports whether it actually succeeded — a silently swallowed OSError
+    # there used to mean this could report "Saved" while the old text was
+    # still sitting on disk.
+    if turn_off and not _dct_forget_text():
+        out = dict(out)
+        out["ok"] = False
+        out["error"] = "settings saved but the stored text could not be removed"
+    return out
 
 
 def _dct_style_for(bundle, name, settings=None):
@@ -595,27 +637,38 @@ def _dct_load():
 
 
 def _dct_save(st):
+    """Write the store.  Returns True on success, False on failure.
+
+    A bare `except OSError: log and move on` used to mean callers had no way
+    to tell "written" from "silently not written" — in particular
+    _dct_forget_text() (below), whose caller is the keep_history=off settings
+    route: a failed write there could report "Saved" to the user while the
+    text it claimed to have removed was still sitting on disk."""
     tmp = DCT_STORE + ".tmp"
     try:
         fd = _dct_os.open(tmp, _dct_os.O_WRONLY | _dct_os.O_CREAT | _dct_os.O_TRUNC, 0o600)
         with _dct_os.fdopen(fd, "w") as f:
             _dct_json.dump(st, f, indent=1)
         _dct_os.replace(tmp, DCT_STORE)
+        return True
     except OSError as e:
         _dct_log("could not write the store: %s" % e)
+        return False
 
 
 def _dct_prune(history, days):
     if days <= 0:
         return []
     cutoff = _dct_time.time() - days * 86400
-    rows = [r for r in history if isinstance(r, dict) and float(r.get("ts") or 0) >= cutoff]
+    rows = [r for r in history if isinstance(r, dict) and _dct_num(r.get("ts")) >= cutoff]
     return rows[-DCT_HISTORY_MAX:]
 
 
 def _dct_forget_text():
     """Drop the stored text of every row, keeping the counts.  Called the moment
-    keep_history goes off."""
+    keep_history goes off.  Returns True unless there was text to remove AND
+    the write failed — the settings route surfaces that instead of reporting
+    a clean "Saved" while the text is still on disk."""
     with _dct_lock:
         st = _dct_load()
         changed = False
@@ -623,14 +676,44 @@ def _dct_forget_text():
             if isinstance(row, dict) and row.pop("text", None) is not None:
                 changed = True
         if changed:
-            _dct_save(st)
+            return _dct_save(st)
+    return True
 
 
 def _dct_record(row, settings):
+    """Append one dictation row to the store.  Returns True when it was written.
+
+    THE keep_history DECISION IS MADE HERE, at persistence time — not from the
+    snapshot _dct_finish() took before the (possibly multi-second) model pass.
+    Turning history off mid-dictation used to scrub the store via
+    _dct_forget_text() and then have the in-flight request append a brand-new
+    row carrying the transcript, so an explicit privacy choice was undone by a
+    request that was already running (2026-09-10 audit A07).  `settings` is
+    still accepted, but only as the fallback for the retention window; the
+    privacy flag is re-read from the live settings every time.
+
+    LOCK ORDER — the one rule this module has, and the reason the settings read
+    is on the line BEFORE the `with`: **settings first, then _dct_lock, never
+    the other way round.**  dictation_set_settings() takes server.py's
+    _state_lock (inside settings_update), releases it, and only then calls
+    _dct_forget_text(), which takes _dct_lock.  Reading settings before
+    entering _dct_lock therefore keeps both paths in the same order and no
+    deadlock is possible.  Nothing in this module may take _state_lock while
+    holding _dct_lock."""
+    live = dictation_settings()          # settings read — OUTSIDE _dct_lock
+    keep = bool(live.get("keep_history"))
+    try:
+        days = int(live.get("history_days", settings.get("history_days")))
+    except (TypeError, ValueError):
+        days = DCT_DEFAULTS["history_days"]
+    if not keep:
+        # The counts stay (they are what the "today" numbers are made of); the
+        # words do not.
+        row = {k: v for k, v in row.items() if k != "text"}
     with _dct_lock:
         st = _dct_load()
-        st["history"] = _dct_prune(st["history"] + [row], settings["history_days"])
-        _dct_save(st)
+        st["history"] = _dct_prune(st["history"] + [row], days)
+        return _dct_save(st)
 
 
 def _dct_normalise_status(raw):
@@ -660,7 +743,7 @@ def dictation_status():
     a stale claim is worse than none."""
     st = _dct_load()
     status = st.get("status") if isinstance(st.get("status"), dict) else {}
-    ts = float(status.get("ts") or 0)
+    ts = _dct_num(status.get("ts"))
     age = (_dct_time.time() - ts) if ts else None
     fresh = age is not None and age <= DCT_STALE_S
     return {
@@ -685,7 +768,7 @@ def _dct_today_bounds():
 def _dct_today(history):
     start = _dct_today_bounds()
     rows = [r for r in history
-            if isinstance(r, dict) and float(r.get("ts") or 0) >= start]
+            if isinstance(r, dict) and _dct_num(r.get("ts")) >= start]
     words = sum(int(r.get("words") or 0) for r in rows)
     lat = [float(r.get("total_ms")) for r in rows
            if isinstance(r.get("total_ms"), (int, float))]
@@ -804,7 +887,11 @@ def _dct_finish(ctx):
     if settings["keep_history"]:
         row["text"] = text[:2000]
     try:
-        _dct_record(row, settings)
+        # _dct_record re-reads keep_history itself: if the owner turned history
+        # off while the (slow) model pass above was running, the row is stored
+        # WITHOUT its text even though `settings` above still says otherwise.
+        if not _dct_record(row, settings):
+            _dct_log("history write failed (store not written)")
     except Exception as e:      # a full disk must not cost the user their words
         _dct_log("history write failed: %s: %s" % (type(e).__name__, e))
     return {"ok": True, "text": text, "raw": raw, "mode": used, "style": style,

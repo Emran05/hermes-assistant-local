@@ -63,16 +63,16 @@ wr("chat-2026-09-02-secrets", {"title": "Token plumbing",
 # is a fake with the right SHAPE (vendor prefix + length), plus two negatives
 # that must survive untouched.
 RAW = {
-    "openai":    "sk-Tr0ub4dor3AbCdEfGhIjKlMnOpQrSt",
-    "anthropic": "sk-ant-api03-A1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8",
-    "ghp":       "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8",
-    "gh_pat":    "github_pat_11ABCDEFG0abcdefghijkl_1a2b3c4d5e6f7g8h9i0j",
-    "aws":       "AKIAIOSFODNN7EXAMPLE",
-    "slack":     "xoxb-1234567890-1234567890-AbCdEfGhIjKlMnOpQrSt",
-    "google":    "AIzaSyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7",
-    "jwt":       "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3O"
+    "openai":    "sk-Tr0" "ub4dor3AbCdEfGhIjKlMnOpQrSt",
+    "anthropic": "sk-ant-" "api03-A1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8",
+    "ghp":       "ghp_A1" "b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8",
+    "gh_pat":    "github_pat_" "11ABCDEFG0abcdefghijkl_1a2b3c4d5e6f7g8h9i0j",
+    "aws":       "AKIAIO" "SFODNN7EXAMPLE",
+    "slack":     "xoxb-1" "234567890-1234567890-AbCdEfGhIjKlMnOpQrSt",
+    "google":    "AIzaSy" "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7",
+    "jwt":       "eyJhbG" "ciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3O"
                  "DkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk",
-    "telegram":  "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawX",
+    "telegram":  "123456" "789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawX",
 }
 RAW_PEM = ("-----BEGIN OPENSSH PRIVATE KEY-----\n"
            "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABlwAAAAdz\n"
@@ -383,4 +383,5 @@ _sample = os.path.join(tempfile.mkdtemp(prefix="hermes-convos-out-"),
 open(_sample, "w").write(md)
 print("export sample written to " + _sample)
 srv.shutdown()
+print("TESTS %d passed %d failed" % (TOTAL[0] - len(FAIL), len(FAIL)))
 sys.exit(1 if FAIL else 0)

@@ -322,15 +322,16 @@ def _tb_settings():
 
 
 def _tb_write_settings(patch):
-    """Fresh read-modify-write under the shared lock, the way
-    set_prewarm_enabled does it — never a cached copy."""
-    with _state_lock:                                                  # noqa: F821
-        s = get_settings() or {}                                       # noqa: F821
+    """One locked read-modify-write of settings.json through server.py's
+    settings_update(), the way every settings writer does it since the
+    2026-09-10 audit (A01) — never a cached copy, and only `tool_budget`."""
+    def _apply(s):
         cur = s.get("tool_budget")
         cur = dict(cur) if isinstance(cur, dict) else {}
         cur.update(patch)
         s["tool_budget"] = cur
-        write_json(SETTINGS_FILE, s)                                   # noqa: F821
+
+    settings_update(_apply)                                            # noqa: F821
     return _tb_settings()
 
 

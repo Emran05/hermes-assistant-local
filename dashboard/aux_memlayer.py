@@ -454,34 +454,53 @@ _ML_QCOLS = ", ".join("facts." + c for c in _ML_COLS.split(", "))
 # --------------------------------------------------------------------------
 # settings — settings.json `memory_layer`, read fresh on every turn
 # --------------------------------------------------------------------------
+def _ml_norm_settings(cfg):
+    """The stored `memory_layer` sub-dict, normalised onto ML_DEFAULTS.  Shared
+    by the reader below and by memlayer_set_settings(), which merges the user's
+    patch onto THIS (read inside the settings lock) rather than onto a copy it
+    took earlier."""
+    out = dict(ML_DEFAULTS)
+    if isinstance(cfg, dict):
+        if "enabled" in cfg:
+            out["enabled"] = bool(cfg.get("enabled"))
+        if "episodic" in cfg:
+            out["episodic"] = bool(cfg.get("episodic"))
+        if "budget_chars" in cfg:
+            try:
+                n = int(cfg.get("budget_chars"))
+                out["budget_chars"] = max(0, min(_ML_BUDGET_MAX, n))
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
 def memlayer_settings():
     """{enabled, budget_chars, episodic}.  Never raises; a corrupt or missing
     settings file yields the defaults, so the layer degrades to its documented
     behaviour instead of to an exception."""
-    out = dict(ML_DEFAULTS)
     try:
         getter = _ml_g("get_settings")
         cfg = (getter() or {}).get("memory_layer") if callable(getter) else None
-        if isinstance(cfg, dict):
-            if "enabled" in cfg:
-                out["enabled"] = bool(cfg.get("enabled"))
-            if "episodic" in cfg:
-                out["episodic"] = bool(cfg.get("episodic"))
-            if "budget_chars" in cfg:
-                try:
-                    n = int(cfg.get("budget_chars"))
-                    out["budget_chars"] = max(0, min(_ML_BUDGET_MAX, n))
-                except (TypeError, ValueError):
-                    pass
+        return _ml_norm_settings(cfg)
     except Exception:
-        pass
-    return out
+        return dict(ML_DEFAULTS)
 
 
 def memlayer_set_settings(patch):
-    """Merge a partial {enabled, budget_chars, episodic} into settings.json."""
-    cur = memlayer_settings()
-    if isinstance(patch, dict):
+    """Merge a partial {enabled, budget_chars, episodic} into settings.json.
+
+    The merge basis used to come from memlayer_settings() read OUTSIDE the
+    lock and then be written back wholesale, so a concurrent change to another
+    memory_layer key was lost. server.py's settings_update() re-reads the file
+    inside _state_lock and this merges against THAT (2026-09-10 audit A01)."""
+    patch = patch if isinstance(patch, dict) else {}
+    updater = _ml_g("settings_update")
+    if not callable(updater):
+        raise RuntimeError("settings unavailable")
+    out = {}
+
+    def _apply(s):
+        cur = _ml_norm_settings(s.get("memory_layer"))
         if "enabled" in patch:
             cur["enabled"] = bool(patch.get("enabled"))
         if "episodic" in patch:
@@ -492,22 +511,11 @@ def memlayer_set_settings(patch):
             except (TypeError, ValueError):
                 raise ValueError("budget_chars must be a number")
             cur["budget_chars"] = max(0, min(_ML_BUDGET_MAX, n))
-    lock = _ml_g("_state_lock")
-    writer = _ml_g("write_json")
-    getter = _ml_g("get_settings")
-    path = _ml_g("SETTINGS_FILE")
-    if not (callable(writer) and callable(getter) and path):
-        raise RuntimeError("settings unavailable")
-    if lock is not None:
-        with lock:
-            s = getter() or {}
-            s["memory_layer"] = dict(cur)
-            writer(path, s)
-    else:                                                     # pragma: no cover
-        s = getter() or {}
         s["memory_layer"] = dict(cur)
-        writer(path, s)
-    return cur
+        out.update(cur)
+
+    updater(_apply)
+    return out
 
 
 # --------------------------------------------------------------------------

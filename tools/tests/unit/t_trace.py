@@ -38,7 +38,7 @@ CHATS = os.path.join(DATA, "chats")
 for d in (DATA, MET, CHATS, os.path.join(DATA, "spill")):
     os.makedirs(d, exist_ok=True)
 
-SECRET = "sk-ant-api03-DEADBEEFdeadbeef0123456789ABCDEFabcdef"
+SECRET = "sk-ant-" "api03-DEADBEEFdeadbeef0123456789ABCDEFabcdef"   # split so the source never holds a token-shaped literal
 TG_SECRET = "1234567890:AAHfakefakefakefakefakefakefakefake1"
 
 # A fixed local noon today, so day bucketing is unambiguous.

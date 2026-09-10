@@ -821,6 +821,24 @@ def _gc_trash():
 #     business (a pruned one is discovered at undo time and the row is marked
 #     `reversible='no', undo_note='snapshot pruned'`); keeping such a row costs
 #     one row, deleting a row whose checkpoint IS still there costs the undo.
+#   * reversible IN ('yes','partial') for kind IN ('write','shell') even with
+#     an EMPTY snapshot_ref. Two ways a row can be in that state: (1)
+#     recorder_record_local()'s `reversible="yes"` default lets a caller log a
+#     dashboard-local mutation before it has a snapshot_ref to hand over —
+#     /api/undo's lazy re-association (recorder_undo_handler, the "if not
+#     snap: re-attempt association once" branch) is exactly the path meant to
+#     fill that in later, so the row must survive long enough to reach it; (2)
+#     a row synced from state.db (leg 2) whose ORIGINAL event `ts` was already
+#     more than 30 min old the moment it was inserted — _finalize_pass() below
+#     only ever looks at `ts > now - 1800`, so a backlog import (cursor reset,
+#     recorder down for a while) never gets a single finalize attempt and is
+#     stuck wherever it started. Widening the predicate (retention-side) was
+#     chosen over widening _finalize_pass's window (reconciler-side): removing
+#     _finalize_pass's age cap would mean every sweep re-running `_ckpt list`
+#     subprocess calls against a potentially unbounded backlog of ancient
+#     rows, which is a live-thread cost every 5s tick pays forever, versus
+#     this predicate, which only ever costs one extra OR clause on a query
+#     that already runs once a day.
 #
 # The floor comes from the undo trash.  `_gc_trash` keeps everything under
 # ~/.hermes/dashboard/undo-trash for UNDO_TRASH_TTL (14 days) regardless of how
@@ -836,15 +854,25 @@ REC_RETAIN_EVERY_S  = 86400                          # one sweep a day
 
 # The rows retention must never touch, as one SQL predicate. Kept in one place
 # so the count, the preview and the DELETE cannot drift apart.
-_REC_KEEP_SQL = "status='undone' OR (snapshot_ref IS NOT NULL AND snapshot_ref!='')"
+_REC_KEEP_SQL = ("status='undone' OR (snapshot_ref IS NOT NULL AND snapshot_ref!='') "
+                 "OR (reversible IN ('yes','partial') AND kind IN ('write','shell'))")
 
 
 def _rec_retain_clamp(v):
     """days -> the window actually used.  0 (or a negative) means keep forever;
     anything else is clamped into [REC_RETAIN_MIN_DAYS, REC_RETAIN_MAX_DAYS];
     an absent or unparsable value falls back to the default.  PURE, so the whole
-    policy is testable without a database."""
-    if v is None:
+    policy is testable without a database.
+
+    bool is rejected even though it's an int subclass in Python: True/False
+    passing silently as 1/0 would mean a settings.json `"retain_days": false`
+    (hand-edited, or written by a future bug) turns retention off entirely
+    (0 = keep forever) instead of falling back to the default. The one
+    existing caller reachable from a request (recorder_retention_post) already
+    checks this at the HTTP layer, but _rec_retain_days() reads settings.json
+    straight through this function with no such guard, so the check belongs
+    here too."""
+    if v is None or isinstance(v, bool):
         return REC_RETAIN_DEFAULT
     try:
         n = int(v)
@@ -868,17 +896,19 @@ def _rec_retain_days():
 
 
 def _rec_set_retain_days(v):
-    """Write the window.  Fresh read-modify-write under `_state_lock` — every
-    other key in settings.json has to survive.  Returns the CLAMPED value, which
-    the caller shows back to the user (a typed 7 becomes 14 and the field must
-    say so, the lesson aux_watchtower's time inputs already learned)."""
+    """Write the window through server.py's settings_update() — one locked
+    read-modify-write, so every other key in settings.json survives
+    (2026-09-10 audit A01).  Returns the CLAMPED value, which the caller shows
+    back to the user (a typed 7 becomes 14 and the field must say so, the
+    lesson aux_watchtower's time inputs already learned)."""
     days = _rec_retain_clamp(v)
-    with _state_lock:
-        s = get_settings() or {}
+
+    def _apply(s):
         cfg = s.get("recorder")
         s["recorder"] = {**(cfg if isinstance(cfg, dict) else {}),
                          "retain_days": days}
-        write_json(SETTINGS_FILE, s)
+
+    settings_update(_apply)
     return days
 
 
@@ -908,8 +938,8 @@ def _rec_sweep_retention(days=None, dry=False, now=None, db=None):
     now = time.time() if now is None else float(now)
     if not days:
         out = {"ok": True, "days": 0, "forever": True, "deleted": 0,
-               "kept_undone": 0, "kept_snapshot": 0, "dry": bool(dry),
-               "ts": now, "note": "retention off — nothing is swept"}
+               "would_delete": 0, "kept_undone": 0, "kept_snapshot": 0,
+               "dry": bool(dry), "ts": now, "note": "retention off — nothing is swept"}
         _rec_retain_state = out
         return out
     cutoff = now - days * 86400
@@ -926,7 +956,14 @@ def _rec_sweep_retention(days=None, dry=False, now=None, db=None):
                     con.commit()
             finally:
                 con.close()
-        out = {"ok": True, "days": days, "forever": False, "deleted": doomed,
+        # `deleted` used to report the pre-DELETE count even when dry=True —
+        # nothing was actually deleted on a dry run, so that lied to any
+        # caller reading `deleted` without also checking `dry`. `would_delete`
+        # is always the count either way (matches recorder_retention_get's
+        # own next_sweep.would_delete preview); `deleted` is only ever
+        # nonzero on a real sweep.
+        out = {"ok": True, "days": days, "forever": False,
+               "deleted": 0 if dry else doomed, "would_delete": doomed,
                "kept_undone": kept_undone, "kept_snapshot": kept_snap,
                "cutoff": round(cutoff, 3), "dry": bool(dry), "ts": now}
     except Exception as e:                                   # pragma: no cover
@@ -1173,13 +1210,76 @@ def recorder_undo_handler(ctx):
 
                 target = row["target"]
                 after = _rec_json(row["after_state"])
-                # conflict check (sha256, else size+mtime degrade)
                 tp = os.path.expanduser(target) if target else ""
-                if after.get("sha256") and tp and os.path.isfile(tp):
-                    cur = _sha256_file(tp)
-                    if cur and cur != after["sha256"] and not force:
-                        return {"ok": False, "conflict": True,
-                                "error": "file changed since the agent wrote it"}
+
+                def _conflict():
+                    """None when the target still matches `after`, else details.
+
+                    Audit 2026-09-10 A06: this used to check ONLY the hash, and
+                    `_after_state()` deliberately stores sha256=None above
+                    HASH_CAP_BYTES (32 MiB) — so every edit the owner made to a
+                    large file was restored over with force:false. It degrades
+                    to existence/type/size/mtime, and anything it CANNOT
+                    establish now (stat denied, bytes unreadable) counts as an
+                    unresolved conflict rather than as "unchanged".
+                    """
+                    if not tp or "exists" not in after:
+                        return None          # no recorded state (shell rows): nothing to compare
+                    was = bool(after.get("exists"))
+                    try:
+                        st = os.stat(tp)
+                    except FileNotFoundError:
+                        st = None
+                    except OSError as e:
+                        return {"reason": "unreadable",
+                                "detail": "cannot read the current state of %s (%s)"
+                                          % (target, e.strerror or e)}
+                    if bool(st) != was:
+                        return {"reason": "created" if st else "deleted",
+                                "detail": ("this file was created after the agent "
+                                           "removed it") if st else
+                                          "this file no longer exists"}
+                    if st is None:
+                        return None          # gone then, gone now
+                    was_type = after.get("type") or ("file" if after.get("sha256") else "")
+                    cur_type = ("file" if os.path.isfile(tp)
+                                else "dir" if os.path.isdir(tp) else "other")
+                    if was_type and cur_type != was_type:
+                        return {"reason": "type",
+                                "detail": "this path is now a %s, not a %s"
+                                          % (cur_type, was_type)}
+                    if after.get("sha256"):
+                        cur = _sha256_file(tp)
+                        if not cur:
+                            return {"reason": "unreadable",
+                                    "detail": "could not read %s to compare it" % target}
+                        if cur != after["sha256"]:
+                            return {"reason": "hash",
+                                    "detail": "contents differ from what the agent wrote"}
+                        return None
+                    # No hash (large file, or a non-regular target) — size+mtime.
+                    if "size" in after and st.st_size != after.get("size"):
+                        return {"reason": "size",
+                                "detail": "size is %d bytes, was %s when the agent "
+                                          "finished" % (st.st_size, after.get("size"))}
+                    if after.get("mtime") is not None:
+                        try:
+                            drift = abs(st.st_mtime - float(after["mtime"]))
+                        except (TypeError, ValueError):
+                            return {"reason": "unreadable",
+                                    "detail": "recorded modification time is unusable"}
+                        if drift > 0.001:
+                            return {"reason": "mtime",
+                                    "detail": "modified since the agent finished"}
+                    return None
+
+                clash = _conflict()
+                if clash and not force:
+                    return {"ok": False, "conflict": True,
+                            "error": "file changed since the agent wrote it",
+                            "reason": clash["reason"], "detail": clash["detail"],
+                            "target": target,
+                            "hint": "re-send with force: true to restore anyway"}
 
                 snap = _rec_json(row["snapshot_ref"])
                 if not snap:                     # re-attempt association once

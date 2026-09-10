@@ -45,6 +45,17 @@ SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || true)"
 BUILDVER="$VER${SHA:+ +$SHA}"
 BUILDVER="${BUILDVER// /}"
 
+# Both strings are interpolated into the Info.plist below, and neither is fully
+# ours: VERSION is a file anyone can edit and the sha comes from git.  A stray
+# `&` or `<` would produce a plist that plutil rejects and macOS treats as a
+# bundle with no version at all, so escape the five XML entities first.
+xml_escape() {
+  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' \
+                         -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"
+}
+VER_XML="$(xml_escape "$VER")"
+BUILDVER_XML="$(xml_escape "$BUILDVER")"
+
 # SpeechAnalyzer is macOS 26; SFSpeechRecognizer is the fallback below that, so
 # the deployment target is 14.0 and the availability checks in main.swift decide
 # at runtime.  Without an explicit -target, swiftc would pin the deployment
@@ -74,8 +85,8 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleIdentifier</key><string>local.hermes.dictation</string>
   <key>CFBundleExecutable</key><string>HermesDictation</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>$VER</string>
-  <key>CFBundleVersion</key><string>$BUILDVER</string>
+  <key>CFBundleShortVersionString</key><string>$VER_XML</string>
+  <key>CFBundleVersion</key><string>$BUILDVER_XML</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
@@ -87,13 +98,19 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </dict></plist>
 EOF
 
+# A malformed plist reads as a bundle with no version; fail the build instead.
+plutil -lint "$APP/Contents/Info.plist" >/dev/null
+
 SIGN_ID="${HERMES_SIGN_ID:--}"
 if [ "$SIGN_ID" = "-" ]; then
   echo "→ signing (ad-hoc — permissions reset on every rebuild, see the header)"
 else
   echo "→ signing ($SIGN_ID)"
 fi
-codesign --force --deep -s "$SIGN_ID" "$APP"
+# No --deep: it is deprecated, and it signs whatever it finds INSIDE the bundle
+# with the same identity instead of leaving nested code alone.  This bundle is
+# one binary and one plist — the plain form signs exactly that.
+codesign --force -s "$SIGN_ID" "$APP"
 
 echo "✓ built: $APP"
 echo

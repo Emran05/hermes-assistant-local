@@ -814,4 +814,5 @@ print("PASS %d   FAIL %d" % (PASSES[0], len(FAILS)))
 for f in FAILS:
     print("  - " + f)
 shutil.rmtree(HOME, ignore_errors=True)
+print("TESTS %d passed %d failed" % (PASSES[0], len(FAILS)))
 sys.exit(1 if FAILS else 0)

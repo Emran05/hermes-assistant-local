@@ -717,8 +717,9 @@
     if (det.claude_cli) {
       h += row("claude_escalation", "Claude escalation",
         "Sends only the hard question to Claude, in parallel with the local " +
-        "answer. Off means nothing ever leaves for Anthropic.",
-        p.claude_escalation !== false);
+        "answer. Off by default — nothing leaves for Anthropic until you " +
+        "turn this on.",
+        p.claude_escalation === true);
     }
 
     h += '<div class="onb-h"><h2>Notifications</h2>' +
@@ -1031,7 +1032,7 @@
     if (k === "welcome") {
       body = { briefings: p.briefings !== false, news: p.news !== false };
       if ((S.data || {}).detect && S.data.detect.claude_cli) {
-        body.claude_escalation = p.claude_escalation !== false;
+        body.claude_escalation = p.claude_escalation === true;
       }
     } else if (k === "prefs") {
       body = {
@@ -1043,7 +1044,7 @@
         quiet_hours: p.quiet_hours || undefined
       };
       if ((S.data || {}).detect && S.data.detect.claude_cli) {
-        body.claude_escalation = p.claude_escalation !== false;
+        body.claude_escalation = p.claude_escalation === true;
       }
       // A NEW install starts on the lean prompt budget: the tool schemas are
       // the biggest item in the prefix every fresh conversation prefills, and
@@ -1133,7 +1134,7 @@
         " minutes idle and wakes on your next message.");
     out.push("Prewarm after wake: " + (p.prewarm !== false ? "on" : "off"));
     if ((S.data || {}).detect && S.data.detect.claude_cli) {
-      out.push("Claude escalation: " + (p.claude_escalation !== false ? "on" : "off"));
+      out.push("Claude escalation: " + (p.claude_escalation === true ? "on" : "off"));
     }
     var q = p.quiet_hours || {};
     out.push("Briefings " + (p.briefings !== false ? "on" : "off") +
@@ -1168,7 +1169,7 @@
       idle_min: p.idle_min || 10,
       idle_enabled: p.idle_enabled !== false,
       prewarm: p.prewarm !== false,
-      claude_escalation: p.claude_escalation !== false,
+      claude_escalation: p.claude_escalation === true,
       briefings: p.briefings !== false,
       news: p.news !== false,
       quiet_hours: {

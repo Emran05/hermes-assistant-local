@@ -87,14 +87,31 @@ def build(tmp, memories=None, settings=None, index_rows=None, scrubber=True):
         with io.open(p, "w", encoding="utf-8") as f:
             json.dump(obj, f)
 
+    settings_lock = threading.RLock()
+
+    def settings_update(mutate_fn):
+        """Stand-in for server.py's settings_update() — ONE locked
+        read-modify-write of settings.json, the only way an aux module is
+        allowed to write it since the 2026-09-10 audit (A01)."""
+        with settings_lock:
+            s = read_json(settings_file, {})
+            if not isinstance(s, dict):
+                s = {}
+            out = mutate_fn(s)
+            if isinstance(out, dict):
+                s = out
+            write_json(settings_file, s)
+            return json.loads(json.dumps(s))
+
     g = {
         "__name__": "aux_memlayer_test",
         "HOME": home, "DATA": data, "HERE": os.path.dirname(AUX),
         "SETTINGS_FILE": settings_file,
         "IX_DB": ix_db,
-        "_state_lock": threading.RLock(),
+        "_state_lock": settings_lock,
         "read_json": read_json,
         "write_json": write_json,
+        "settings_update": settings_update,
         "get_settings": lambda: read_json(settings_file, {}),
         "register_get": lambda p, f: None,
         "register_post": lambda p, f: None,

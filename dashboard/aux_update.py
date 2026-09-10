@@ -25,6 +25,7 @@
 # AUX MODULE GOTCHA (CLAUDE.md): never `from datetime import datetime` in an
 # aux module — it rebinds the shared global. Private alias only.
 import datetime as _upd_datetime          # noqa: F401  (aliased per CLAUDE.md)
+import fcntl as _upd_fcntl
 import json as _upd_json
 import os as _upd_os
 import re as _upd_re
@@ -84,6 +85,12 @@ _UPD_DATA = DATA if "DATA" in globals() else _upd_os.path.join(  # noqa: F821
     _upd_os.path.expanduser("~"), ".hermes", "dashboard")
 _UPD_CACHE_FILE = _upd_os.path.join(_UPD_DATA, "update-check.json")
 _UPD_STATE_FILE = _upd_os.path.join(_UPD_DATA, "update-state.json")
+# 2026-09-10 audit A08: the ONE thing that makes check -> spawn -> state one
+# atomic unit. update.sh takes the identical fcntl.flock on the identical
+# path when it is run bare from a terminal (see its own "process lock"
+# section), so a dashboard-triggered apply and a terminal `./update.sh`
+# exclude each other too, not just two dashboard requests.
+_UPD_LOCK_FILE = _upd_os.path.join(_UPD_DATA, "update.lock")
 _UPD_LOG = _upd_os.path.join(_upd_os.path.expanduser("~"), ".hermes", "logs",
                              "update.log")
 _UPD_SCRIPT = _upd_os.path.join(_UPD_ROOT, "update.sh")
@@ -299,15 +306,19 @@ def _upd_set_channel(ch):
         return {"ok": False,
                 "error": "the main channel needs a git checkout (this is a "
                          "tarball install)"}, 400
-    try:
-        s = get_settings()               # noqa: F821
+    def _apply(s):
+        # The read used to sit OUTSIDE _state_lock with only write_json inside
+        # it, so a settings write that landed in between was reverted by this
+        # one (2026-09-10 audit A01). settings_update() holds the lock across
+        # read + merge + write and only `update` is touched.
         u = s.get("update")
         if not isinstance(u, dict):
             u = {}
         u["channel"] = ch
         s["update"] = u
-        with _state_lock:                # noqa: F821
-            write_json(SETTINGS_FILE, s)   # noqa: F821
+
+    try:
+        settings_update(_apply)          # noqa: F821
     except Exception as e:
         return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}, 500
     return {"ok": True, "channel": ch}
@@ -633,11 +644,6 @@ def _upd_apply(ctx):
     target = str(body.get("target") or "latest").strip()
     channel = _upd_channel()
 
-    running, _st = _upd_running()
-    if running:
-        return {"ok": False, "reason": "already_running",
-                "error": "an update is already running", "log": _UPD_LOG}, 409
-
     if not _upd_os.path.exists(_UPD_SCRIPT):
         return {"ok": False, "reason": "no_script",
                 "error": "update.sh is missing from %s" % _UPD_ROOT}, 500
@@ -658,6 +664,46 @@ def _upd_apply(ctx):
                          "terminal)",
                 "dirty": dirty}, 409
 
+    # --------------------------------------------------------------------
+    # the lock (2026-09-10 audit A08). _upd_running() used to be checked
+    # here and the state file's `running: true` written only AFTER a
+    # spawn succeeded, which is two separate steps with a gap between them:
+    # two nearly-simultaneous requests could both read "not running", both
+    # spawn update.sh, and race each other over git/installed files/
+    # services/logs/this very state file. An fcntl.flock reserved BEFORE
+    # spawning closes that gap atomically — only one caller can ever hold
+    # it — and it is held by the DETACHED updater for its whole run (the fd
+    # is inherited across exec via pass_fds; this process closes only its
+    # own copy once the child is confirmed running), so a second request
+    # arriving a minute into a real update is refused exactly the same way
+    # as one arriving a microsecond after the first.
+    # --------------------------------------------------------------------
+    try:
+        _upd_os.makedirs(_UPD_DATA, exist_ok=True)
+        lock_fd = _upd_os.open(_UPD_LOCK_FILE, _upd_os.O_CREAT | _upd_os.O_RDWR, 0o600)
+    except OSError as e:
+        return {"ok": False, "reason": "lock_unavailable",
+                "error": "could not open the update lock: %s" % e}, 500
+    try:
+        _upd_fcntl.flock(lock_fd, _upd_fcntl.LOCK_EX | _upd_fcntl.LOCK_NB)
+    except OSError:
+        try:
+            _upd_os.close(lock_fd)
+        except OSError:
+            pass
+        return {"ok": False, "reason": "already_running",
+                "error": "an update is already running", "log": _UPD_LOG}, 409
+
+    def _release_lock():
+        try:
+            _upd_fcntl.flock(lock_fd, _upd_fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            _upd_os.close(lock_fd)
+        except OSError:
+            pass
+
     env = dict(_upd_os.environ)
     env["PATH"] = (env.get("PATH", "") +
                    ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
@@ -670,6 +716,7 @@ def _upd_apply(ctx):
         _upd_os.makedirs(_upd_os.path.dirname(_UPD_LOG), exist_ok=True)
         logf = open(_UPD_LOG, "ab")
     except OSError as e:
+        _release_lock()
         return {"ok": False, "reason": "log_unwritable", "error": str(e)}, 500
     try:
         # start_new_session detaches it from this process group, so it survives
@@ -677,20 +724,33 @@ def _upd_apply(ctx):
         # VERIFIED against a throwaway launchd job: a nohup + start_new_session
         # child keeps running (to completion) after `launchctl bootout` of the
         # job that spawned it — which is exactly the bootout/bootstrap pair
-        # install-services.sh runs on com.hermes.dashboard.
+        # install-services.sh runs on com.hermes.dashboard. pass_fds keeps the
+        # lock fd open (and therefore the flock held) across the exec into
+        # update.sh and everything IT execs in turn (git, curl, rsync,
+        # install-services.sh...); it is released only when that whole tree
+        # finally exits, closing the kernel's last reference to it.
         proc = _upd_subprocess.Popen(
             cmd, cwd=_UPD_ROOT, stdout=logf, stderr=logf,
-            stdin=_upd_subprocess.DEVNULL, env=env, start_new_session=True)
+            stdin=_upd_subprocess.DEVNULL, env=env, start_new_session=True,
+            pass_fds=(lock_fd,))
     except Exception as e:
         try:
             logf.close()
         except Exception:
             pass
+        _release_lock()
         return {"ok": False, "reason": "spawn_failed",
                 "error": "%s: %s" % (type(e).__name__, e)}, 500
     try:
         logf.close()
     except Exception:
+        pass
+    # The child now holds its own inherited copy of the fd (that is what
+    # keeps the flock held); close ours so a long-lived dashboard process
+    # does not accumulate one open fd per update ever triggered.
+    try:
+        _upd_os.close(lock_fd)
+    except OSError:
         pass
 
     _upd_state_write({"running": True, "pid": proc.pid, "target": target,

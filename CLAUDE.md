@@ -302,10 +302,13 @@ and explicit agent tool calls (web search etc.) touch the internet.
   `auto|suggest|off` in settings.json `auto_route` (`GET/POST /api/claude/autoroute`,
   `POST /api/claude/autoroute/score {q}` dry-run). Verified live: hard question →
   local + Sonnet (21s, parallel) persisted in order; routine → local only.
-- **Claude escalation master switch (2026-09-03)** — `auto_route.mode` only ever
-  gated the auto-router, so the manual Escalate button and For-You kept spending
-  the Max plan with routing off. One global switch now: settings.json
-  `claude_escalation: {enabled}` (default **true**), helper
+- **Claude escalation master switch (2026-09-03; default flipped to OFF and
+  fail-closed 2026-09-10, audit A02)** — `auto_route.mode` only ever gated the
+  auto-router, so the manual Escalate button and For-You kept spending the Max
+  plan with routing off. One global switch now: settings.json
+  `claude_escalation: {enabled}` (default **false**, and requires an explicit
+  boolean `true` — a missing key, a non-boolean value, or a settings.json that
+  fails to parse all read as OFF, never as ON), helper
   `claude_escalation_enabled()` + `GET/POST /api/claude/escalate {enabled}` in
   `aux_claudebridge.py`. Enforced at the CHOKE POINT — the top of
   `claude_think()`, before `_cb_gate` — because that is the only function that
@@ -318,7 +321,21 @@ and explicit agent tool calls (web search etc.) touch the internet.
   first time per process instead. `aux_autoroute._ar_before` also short-circuits
   on it so a disabled bridge spawns no thread and shows no `deep` spinner, WITHOUT
   mutating the stored mode; `GET /api/claude/autoroute` carries `claude_escalation`.
-  Settings read fresh per call (the file is tiny) — no restart, no cache.
+  Settings read fresh per call (the file is tiny) — no restart, no cache. A
+  settings.json that EXISTS but fails to parse (as opposed to simply being
+  absent, which is normal on a fresh install) fails the switch closed and is
+  surfaced as `config_error` on `GET /api/claude/bridge` rather than only a
+  stderr line — `_cb_settings_dict()` reads the file itself instead of going
+  through server.py's `read_json()`, which folds "missing" and "corrupt" into
+  the same silent `{}`. `aux_autoroute.AR_DEFAULT_MODE` is now `"off"` (was
+  `"auto"`) and `_ar_escalation_on()` fails CLOSED on a missing helper or any
+  exception (was fail-open) — belt-and-suspenders so a disabled or
+  not-yet-loaded bridge can never be read as "on" by the router either.
+  `aux_onboarding._onb_prefs()` reads the same helper with a `False` fallback
+  (was `True`), and the first-run sheet's own JS now renders/sends/summarizes
+  the toggle on `=== true` rather than `!== false` — an absent/`undefined`
+  value used to display as "on". None of this touches this Mac's own
+  settings.json, which already has an explicit `true` and keeps working.
 - **Bridge gate rewrite (`_cb_gate`, 2026-08-18)** — the old keyword regexes refused
   5/18 realistic escalations ("memory leak", "password field", ".env approach", "wipe
   the cache", "should I create a component"). Now INTENT-based: secrets = action verb
@@ -445,6 +462,53 @@ and explicit agent tool calls (web search etc.) touch the internet.
   (returns None / raises). Import under a private alias instead:
   `import datetime as _mymod_datetime`. (aux_config/aux_recorder currently do the
   bare import — tolerate it, but new modules must alias.)
+- **NEVER write `settings.json` or a `chats/*.json` directly (2026-09-10, audit
+  A01/A03).** Both files have many writers, and the old habit — read the whole
+  object, do some work, write the whole object back with only the final
+  `write_json` under `_state_lock` — is a lost update, not a transaction.
+  `write_json`'s tmp+`os.replace` is atomic and that is NOT the same thing.
+  * settings.json: `settings_update(mutate_fn)` (read + mutate + write under
+    `_state_lock`; `mutate_fn` mutates in place or returns a replacement) or
+    `settings_set(**fields)` for a flat merge. Touch only the keys you own, and
+    do NOTHING slow inside — no network, no subprocess, no model call; every
+    other settings reader/writer in the process is waiting on that lock. Do the
+    slow part first and pass in the result (`weather()` geocodes, THEN calls
+    `settings_set` with its three keys — it used to write a pre-network
+    snapshot back and that is how a background widget refresh could turn the
+    Claude bridge back on after an explicit opt-out).
+  * conversations: `save_chat_update(session, mutate_fn)` for any
+    read-modify-write; append inside the mutate fn
+    (`chat["messages"].append(...)`), never assign a list built outside it.
+    Every conversation carries a `rev` that each locked save bumps, and the raw
+    `save_chat()` now raises if your snapshot's rev is BEHIND the file on disk
+    (the append-only length guard cannot see that case — two workers each
+    appending one reply to the same N-message copy both save N+1). Messages get
+    a stable `id` on save; `truncate=True` still skips both guards and nothing
+    passes it. `aux_index.py` wraps BOTH `save_chat` and `save_chat_update` for
+    `index_touch`, so a new writer keeps search fresh for free.
+  * a chat job's `done` is set ONLY by `_finish_chat_job`, and only AFTER the
+    reply is persisted; `persisted: true/false` rides with it and the chat view
+    toasts on false. `hermes_rpc.run_turn` sets `state="done"`/`reply`/`ok` and
+    must not set `done` itself.
+  * `hermes_rpc.run_turn` also stamps `submit_sent`/`submitted`/`tool_events`
+    on the job. The one-shot `hermes -z` fallback in `_chat_worker` may run ONLY
+    when none of those are set, and it passes `chat["serve_key"]` (serve's
+    durable `stored_session_id`) to `--continue` — never the dashboard's
+    `chat-…` file key, which the installed CLI cannot resolve. After submission,
+    never re-run: finish the job with the "check the conversation before
+    repeating an action" reply.
+- **Config-as-Code export/import (`dashboard/aux_config.py`) validates
+  `timezones` as `[label, tz]` PAIRS (2026-09-10, audit A10)** —
+  `_cfg_clean_settings()` used to accept only bare strings in `timezones`, but
+  the world-clock widgets (`expand_worldclock`/`w_worldclock` in server.py)
+  have always stored `["label", "Area/City"]` pairs, so a real configuration
+  like `[["Paris", "Europe/Paris"]]` silently became `[]` on export and an
+  import then restored the default clocks over the owner's chosen ones.
+  `_cfg_valid_tz()` now validates the zone against `zoneinfo.available_
+  timezones()` (cached; this repo requires Python 3.12+) and falls back to a
+  loose Area/City shape only if zoneinfo is ever unavailable; a bare string is
+  still accepted for backward compatibility. Invalid pairs (bad zone, empty
+  label, wrong shape) are dropped, never rewritten.
 - **Adding a hub widget from an aux module**: mutate `WIDGETS[id]={title,icon,
   size,cat,provider}` + `EXPANDERS[id]=fn` at module load, append `id` to the
   layout order if absent, and in aux JS set `RENDER[id]` (body), `EXPAND_RENDER[id]`
@@ -512,20 +576,34 @@ and explicit agent tool calls (web search etc.) touch the internet.
   serve are always-on (RunAtLoad + KeepAlive); the MODEL services
   (`com.hermes.mlx-server`, `com.hermes.mlx-bg`) are ON-DEMAND since
   2026-09-01 (battery): RunAtLoad=false, KeepAlive=false, plus a gate at the
-  top of mlx-server.sh / mlx-server-bg.sh — with
-  `~/.hermes/dashboard/model-autostart-off` present the script exits unless a
-  FRESH (<180s) start token exists (`model-start-ok` / `model-start-ok-bg`).
-  Only server.py's `_mlx_start()` mints the primary token (used by
-  agent_wake / resume / switch_model / `_mlx_restart`), so the app's blind
-  `ensureServices()` kickstart at launch and login autostart are inert; a
-  crash stays down until the next chat/Telegram wake. Nothing mints the bg
-  token — start that lane by touching it manually. `main()` marks a down,
-  un-paused model idle-suspended at dashboard start so chat/Telegram/"Wake
-  now" wake it transparently. A pause now genuinely survives reboots (it
-  didn't before — RunAtLoad used to resurrect the model at login). Delete
-  `model-autostart-off` + rerun install-services.sh with true/true to restore
-  always-on. `--uninstall` removes. Telegram gateway separate (`hermes
-  gateway`). Logs in `~/.hermes/logs/`.
+  top of mlx-server.sh / mlx-server-bg.sh. For the background lane
+  (mlx-server-bg.sh, unchanged) the gate is still "with
+  `~/.hermes/dashboard/model-autostart-off` present, exit unless a FRESH
+  (<180s) `model-start-ok-bg` exists". **The primary's gate (mlx-server.sh)
+  was tightened 2026-09-10, audit A09**: nothing ever created that marker, so
+  a fresh install (no marker, no state at all) fell through to always-on —
+  `app/main.swift`'s `ensureServices()` kickstart at every launch could load
+  the ~18GB model with no chat behind it. mlx-server.sh's on-demand check is
+  now unconditional (marker present or not): it always requires a FRESH
+  `model-start-ok`, unless `HERMES_MODEL_ALWAYS_ON=1` is set — which
+  `install-services.sh` bakes into `com.hermes.mlx-server`'s own
+  `EnvironmentVariables` when the owner passes that env at install time (once
+  opted in, `~/.hermes/dashboard/model-always-on` makes the choice sticky
+  across a later reinstall/update that does not re-pass the env). Both
+  `install.sh` and `install-services.sh` create `model-autostart-off` on a
+  genuinely fresh install (no `settings.json` yet, i.e. this Mac has never
+  been set up) purely for `doctor.py` and other tooling that reports on its
+  presence — the primary's gate no longer needs it to enforce on-demand, but
+  it is still what mlx-server-bg.sh keys off. Only server.py's `_mlx_start()`
+  mints the primary token (used by agent_wake / resume / switch_model /
+  `_mlx_restart`), so the app's blind `ensureServices()` kickstart at launch
+  and login autostart are inert; a crash stays down until the next
+  chat/Telegram wake. Nothing mints the bg token — start that lane by
+  touching it manually. `main()` marks a down, un-paused model
+  idle-suspended at dashboard start so chat/Telegram/"Wake now" wake it
+  transparently. A pause now genuinely survives reboots (it didn't before —
+  RunAtLoad used to resurrect the model at login). `--uninstall` removes.
+  Telegram gateway separate (`hermes gateway`). Logs in `~/.hermes/logs/`.
 - **Menu-bar Quick Ask (rebuilt 2026-09-04)** — `dashboard/aux_quickask.js` IS the
   popover: the Swift skeleton is frozen (380px wide; height only via bridge
   `{action:"resize",h}` clamped 320..620; bridges `close`/`openMain`/`openApproval`,
@@ -573,6 +651,26 @@ and explicit agent tool calls (web search etc.) touch the internet.
   drops FDA — see the Message Center note). `install.sh` is the fresh-Mac
   bootstrap; `.github/workflows/{ci,release}.yml` gate syntax + home-path
   hygiene and build/sign/publish on a `v*` tag.
+  **One process lock across both entry points (2026-09-10, audit A08)** —
+  `_upd_apply()` used to check `running` and set it only AFTER spawning, with
+  no lock over the gap, so two near-simultaneous requests could both pass the
+  check and both spawn `update.sh`, racing each other over git/installed
+  files/services/logs/this very state file; the shell script had no lock of
+  its own either. `~/.hermes/dashboard/update.lock` is now an `fcntl.flock`
+  reserved BEFORE spawning (a loser gets `{"ok":false,"error":"an update is
+  already running"}`, 409, immediately) and held by the detached updater for
+  its ENTIRE run: aux_update.py opens+locks the fd and passes it through
+  `Popen(..., pass_fds=(fd,))`, so it stays held across the exec into
+  update.sh and everything update.sh execs in turn, until that whole process
+  tree exits (the kernel releases an flock automatically — no stale-lock
+  cleanup needed, unlike the old PID-based `running` flag `_upd_running()`
+  still reconciles for `/api/update/status` reporting only). `update.sh`
+  takes the SAME lock (same path, fd 9, via a one-line python3 helper since
+  macOS ships no `flock(1)`) at its own top when run bare from a terminal —
+  skipped when `HERMES_UPDATE_FROM=dashboard`, since that process already
+  holds the inherited, already-locked fd — so a terminal `./update.sh` and a
+  dashboard-triggered apply exclude each other too, not just two dashboard
+  requests. `--dry-run` is exempt (changes nothing on disk).
 - **First-run onboarding (1.1.1)** — `dashboard/aux_onboarding.py` +
   `aux_onboarding.js` (one `<script>` tag in index.html, after aux_update.js).
   A four-step full-viewport sheet that auto-opens when

@@ -24,8 +24,8 @@
 # partial write here must never clobber unrelated config (same pattern as
 # aux_claudebridge._cb_set_escalation).
 #
-# Globals used from server.py (exec'd into these): get_settings, read_json,
-# write_json, SETTINGS_FILE, _state_lock, register_get, register_post.
+# Globals used from server.py (exec'd into these): get_settings,
+# settings_update, register_get, register_post.
 #
 # AUX MODULE GOTCHA (CLAUDE.md): never `from datetime import datetime` in an
 # aux module. Not applicable here — this module touches no dates.
@@ -38,20 +38,26 @@ def _aa_get():
 
 
 def _aa_set(patch):
-    """Persist `patch` (a dict with 'reminders' and/or 'notes' keys) as a
-    fresh read-modify-write of the whole settings blob. Always leaves a
-    stderr trace — the owner turning app-launching back on is worth a line in
-    the log, same reasoning as the Claude escalation switch."""
-    with _state_lock:                                              # noqa: F821
-        s = read_json(SETTINGS_FILE, {}) or {}                     # noqa: F821
+    """Persist `patch` (a dict with 'reminders' and/or 'notes' keys) through
+    server.py's settings_update() — one locked read-modify-write of
+    settings.json, touching only the `apple_apps` sub-dict (2026-09-10 audit
+    A01). Always leaves a stderr trace — the owner turning app-launching back
+    on is worth a line in the log, same reasoning as the Claude escalation
+    switch."""
+    seen = {}
+
+    def _apply(s):
         cfg = s.get("apple_apps") if isinstance(s.get("apple_apps"), dict) else {}
-        prev = dict(cfg)
+        seen["prev"] = dict(cfg)
         if "reminders" in patch:
             cfg["reminders"] = bool(patch["reminders"])
         if "notes" in patch:
             cfg["notes"] = bool(patch["notes"])
         s["apple_apps"] = cfg
-        write_json(SETTINGS_FILE, s)                                # noqa: F821
+        seen["cfg"] = cfg
+
+    settings_update(_apply)                                        # noqa: F821
+    prev, cfg = seen.get("prev", {}), seen.get("cfg", {})
     try:
         print("[aux_appleapps] apple_apps %s -> %s" % (prev, cfg), flush=True)
     except Exception:

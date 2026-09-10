@@ -3025,7 +3025,15 @@ async function branchFrom(i){
   if((document.querySelector('.deck').dataset.chat||'')==='full')renderChatSide();
   // Say the one thing that is genuinely lost: `session.create`'s seed carries
   // user/assistant TEXT only, so tool calls and their results stop here.
-  toast('Branched at turn '+(d.turn||0)+' · tool results before this point are not carried into the branch',5200);
+  let brMsg='Branched at turn '+(d.turn||0)+' · tool results before this point are not carried into the branch';
+  // d.linked===false: the child was written fine but the source's back-link
+  // failed (aux_branch's retry gave up) — used to be silently reported as
+  // an unconditional success. d.seeded===false: the branch's first turn ran
+  // with no seeded context (hermes_rpc's SEED_HOOK failed) — not carried in
+  // this response today, checked defensively for if/when it is.
+  if(d.linked===false)brMsg='Branch created, but could not be linked back to this conversation’s branch list — it still works on its own.';
+  else if(d.seeded===false)brMsg='Branch created, but its context could not be seeded — the model here won’t remember what came before.';
+  toast(brMsg,5200);
 }
 function addBubble(text,who,isMd,idx){
   const empty=$('msgs').querySelector('.empty-chat'); if(empty)empty.remove();
@@ -3182,6 +3190,11 @@ async function streamJob(jid,thinking){
       const b=ensureBubble();
       if(d.err){b.classList.add('err');b.querySelector('.md').innerHTML=renderMd(d.reply);}
       else b.querySelector('.md').innerHTML=renderMd(d.reply);
+      // 2026-09-10 audit A03: the server sets done ONLY after it has written
+      // the reply to the transcript, and reports whether that worked. An
+      // explicit false means this bubble is on screen but not in the history,
+      // so say so instead of letting the user find out on the next reload.
+      if(d.persisted===false)toast('This reply could not be saved to the conversation — copy it before reloading.',6000);
       $('msgs').scrollTop=$('msgs').scrollHeight;
       setAgentState(null);
       window.__liveTps=null;   // freeze the live rate; panel reverts to the metrics avg

@@ -34,11 +34,15 @@
 # load-bearing structural control. The Claude Usage widget (aux_claude_usage) is
 # the visible governor of spend.
 #
-# MASTER SWITCH (2026-09-03): settings.json `claude_escalation.enabled`
-# (default true) gates claude_think() itself — see claude_escalation_enabled()
-# and GET/POST /api/claude/escalate. Because claude_think is the only code path
-# that runs `claude -p`, that one check turns the whole second brain off for
-# every caller: the auto-router, the manual Escalate button and For-You.
+# MASTER SWITCH (2026-09-03; default flipped to OFF 2026-09-10, audit A02):
+# settings.json `claude_escalation.enabled` (default false, requires an
+# explicit boolean true) gates claude_think() itself — see
+# claude_escalation_enabled() and GET/POST /api/claude/escalate. Because
+# claude_think is the only code path that runs `claude -p`, that one check
+# turns the whole second brain off for every caller: the auto-router, the
+# manual Escalate button and For-You. A settings.json that exists but fails to
+# parse fails the switch CLOSED (not open) and is surfaced as `config_error`
+# on GET /api/claude/bridge.
 #
 # Every call (including refusals) appends one line to
 # ~/.hermes/dashboard/claude-bridge-log.jsonl (0600) — ts, depth, model, a
@@ -81,18 +85,32 @@ CB_DISALLOWED = "Bash Edit Write NotebookEdit WebFetch WebSearch Task"
 CB_SUMMARY_MAX = 160          # task-summary truncation for the audit log
 CB_LOG_TAIL    = 4000         # bytes of the log to read back for /bridge status
 
-# --- master escalation switch (2026-09-03) ---------------------------------
+# --- master escalation switch (2026-09-03; default flipped 2026-09-10 -----
+# audit A02) ------------------------------------------------------------------
 # Until now there was no single off-switch for "talk to Claude": auto_route.mode
 # only covered the per-turn auto-router, so the manual Escalate button and
 # For-You's _fy_claude_moves kept spending the Max plan even with routing off.
 # claude_think() is the ONLY function that actually shells out to `claude -p`,
 # so one gate at the top of it is the complete, unbypassable off-switch for
-# every caller (router, button, For-You, anything added later). Default ON —
-# the two-brain design is the product; this is the user's brake, not a policy.
-CB_ESC_DEFAULT = True
+# every caller (router, button, For-You, anything added later).
+#
+# Default OFF, and FAIL CLOSED (2026-09-10 audit A02): outbound inference to a
+# hosted model is the one privacy-sensitive thing this app can do on its own,
+# so it must never happen without an explicit, present, boolean `true` in
+# settings.json `claude_escalation.enabled`. A missing file (fresh install), a
+# missing key, a non-boolean value, or a settings.json that fails to parse all
+# resolve to False — see claude_escalation_enabled(). This matches the README
+# ("off unless you turn it on") and closes the gap where a corrupt or absent
+# settings file used to fall open instead.
+CB_ESC_DEFAULT = False
 CB_MSG_ESC_OFF = ("Claude escalation is switched off — turn it on in the model menu "
                   "or Settings › Claude Bridge.")
 _CB_ESC_LOGGED = {"done": False}      # stderr note once per process, not per call
+# Last settings-read failure (corrupt/unreadable settings.json), surfaced on
+# GET /api/claude/bridge as `config_error` so a broken file is visible in the
+# UI rather than only a stderr line. None when the last read was clean (or
+# there simply is no settings file yet — that is not an error).
+_CB_CONFIG_ERROR = {"error": None, "logged": False}
 
 
 # --------------------------------------------------------------------------
@@ -316,38 +334,78 @@ def _cb_recent(n=20):
         return []
 
 
+def _cb_settings_dict():
+    """Read settings.json OURSELVES rather than through server.py's
+    read_json(), which folds a missing OR a corrupt file into the same `{}`
+    default — indistinguishable from "no opinion yet". Distinguishing them is
+    the whole point here: a missing file is normal (nothing has ever written
+    one) and must read as False with no fuss, but a file that exists and fails
+    to parse is a configuration PROBLEM the owner should be told about, not a
+    silent no-op. Returns (dict, error_or_None)."""
+    try:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return (data if isinstance(data, dict) else {}), None
+    except FileNotFoundError:
+        return {}, None
+    except Exception as e:
+        return {}, "%s: %s" % (type(e).__name__, e)
+
+
 def claude_escalation_enabled():
     """Is the Claude bridge allowed to run at all? settings.json
-    `claude_escalation.enabled`, default True.
+    `claude_escalation.enabled` — default False, and requires an explicit
+    boolean `true` (2026-09-10 audit A02: outbound inference must be opt-in,
+    never opt-out).
 
     Read fresh on EVERY call rather than cached: settings.json is a few hundred
-    bytes read through server.py's read_json, so the cost is nil next to a
-    multi-second `claude -p`, and it means the toggle takes effect on the very
-    next call with no restart, no cache invalidation and no cross-thread state
-    (chat worker, For-You thread and the HTTP thread all see the same file).
-    Any read problem fails OPEN (default True) — a corrupt settings file must
-    not silently disable the second brain."""
-    try:
-        s = get_settings() or {}
-        cfg = s.get("claude_escalation")
-        if isinstance(cfg, dict) and "enabled" in cfg:
-            return bool(cfg.get("enabled"))
-    except Exception:
-        pass
+    bytes, so the cost is nil next to a multi-second `claude -p`, and it means
+    the toggle takes effect on the very next call with no restart, no cache
+    invalidation and no cross-thread state (chat worker, For-You thread and
+    the HTTP thread all see the same file).
+
+    Any read problem — the file exists but fails to parse, a permission error,
+    anything but "no file yet" — FAILS CLOSED (returns False) rather than
+    falling back to CB_ESC_DEFAULT, and is logged once per process plus
+    surfaced as `config_error` on GET /api/claude/bridge, so a broken
+    settings.json is visible instead of silently (and invisibly) either
+    disabling or re-enabling outbound calls."""
+    s, err = _cb_settings_dict()
+    if err:
+        _CB_CONFIG_ERROR["error"] = err
+        if not _CB_CONFIG_ERROR["logged"]:
+            _CB_CONFIG_ERROR["logged"] = True
+            print("[aux_claudebridge] settings.json unreadable (%s) — Claude "
+                  "escalation stays OFF until it is fixed" % err, file=sys.stderr)
+        return False
+    _CB_CONFIG_ERROR["error"] = None
+    cfg = s.get("claude_escalation")
+    if isinstance(cfg, dict):
+        return cfg.get("enabled") is True
     return CB_ESC_DEFAULT
 
 
 def _cb_set_escalation(enabled):
-    """Persist the switch. Read-modify-write of the WHOLE settings blob through
-    server.py's write_json (tmp file + os.replace = atomic), matching
-    aux_autoroute._ar_set_mode — settings.json is shared by every module, so a
-    partial write would take unrelated widget config down with it."""
-    s = read_json(SETTINGS_FILE, {}) or {}
-    cfg = s.get("claude_escalation") if isinstance(s.get("claude_escalation"), dict) else {}
-    prev = cfg.get("enabled")
-    cfg["enabled"] = bool(enabled)
-    s["claude_escalation"] = cfg
-    write_json(SETTINGS_FILE, s)
+    """Persist the switch through server.py's settings_update() — ONE locked
+    read-modify-write of settings.json that touches only `claude_escalation`.
+
+    This function used to take no lock at all and write the whole settings blob
+    back from its own read, which is how the 2026-09-10 audit (A01) could show
+    a background weather refresh reverting an explicit opt-out. The switch is
+    the single most privacy-relevant value in the file: it must never be
+    written from a snapshot, and it must never be collateral damage in someone
+    else's write."""
+    seen = {}
+
+    def _apply(s):
+        cfg = s.get("claude_escalation")
+        cfg = cfg if isinstance(cfg, dict) else {}
+        seen["prev"] = cfg.get("enabled")
+        cfg["enabled"] = bool(enabled)
+        s["claude_escalation"] = cfg
+
+    settings_update(_apply)                                        # noqa: F821
+    prev = seen.get("prev")
     # Always leave a trace: the owner turned this off once and later found it
     # back on with nothing in the log to say who did it.
     try:
@@ -553,6 +611,10 @@ def _cb_log_tail(n=10):
 def _cb_bridge_handler(ctx):
     """Status: is the bridge armed, model defaults, recent (auditable) usage."""
     try:
+        # Force a fresh settings read so config_error below reflects THIS
+        # request, not whatever the last unrelated call to
+        # claude_escalation_enabled() happened to leave behind.
+        enabled = claude_escalation_enabled()
         present = os.path.isfile(CB_PROMPT_PATH) and os.path.getsize(CB_PROMPT_PATH) > 0
         mode = None
         if present:
@@ -564,6 +626,7 @@ def _cb_bridge_handler(ctx):
         recent, recent_24h = _cb_log_tail(10)
         return {
             "ok": True,
+            "enabled": enabled,
             "prompt_present": bool(present),
             "prompt_path": CB_PROMPT_PATH,
             "prompt_mode": mode,
@@ -576,6 +639,10 @@ def _cb_bridge_handler(ctx):
             "recent_24h": recent_24h,
             "recent": recent,
             "log_path": CB_LOG_PATH,
+            # 2026-09-10 audit A02: a settings.json that exists but fails to
+            # parse fails escalation CLOSED; this is how that shows up
+            # somewhere a person will actually see it instead of only stderr.
+            "config_error": _CB_CONFIG_ERROR.get("error"),
         }
     except Exception as e:
         return ({"ok": False, "error": "internal: " + str(e)}, 500)

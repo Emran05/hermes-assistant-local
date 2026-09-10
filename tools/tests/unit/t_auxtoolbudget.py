@@ -40,13 +40,33 @@ def write_json(path, obj):
     os.replace(tmp, path)
 
 
+_STATE_LOCK = threading.Lock()
+
+
+def settings_update(mutate_fn):
+    """Stand-in for server.py's settings_update() — ONE locked
+    read-modify-write of settings.json, the only way an aux module is allowed
+    to write it since the 2026-09-10 audit (A01)."""
+    with _STATE_LOCK:
+        s = read_json(SETTINGS, {})
+        if not isinstance(s, dict):
+            s = {}
+        out = mutate_fn(s)
+        if isinstance(out, dict):
+            s = out
+        write_json(SETTINGS, s)
+        return json.loads(json.dumps(s))
+
+
+
 G = {
     "__name__": "aux_toolbudget",
     "HOME": SB,
     "HERE": os.path.join(REPO, "dashboard"),
     "DATA": DATA,
     "SETTINGS_FILE": SETTINGS,
-    "_state_lock": threading.Lock(),
+    "_state_lock": _STATE_LOCK,
+    "settings_update": settings_update,
     "get_settings": lambda: read_json(SETTINGS, {}),
     "read_json": read_json,
     "write_json": write_json,
