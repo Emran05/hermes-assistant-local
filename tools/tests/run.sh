@@ -29,7 +29,7 @@ export HERMES_REPO="$ROOT"
 
 TIER="${1:-unit}"
 BASE="${HERMES_DASH_BASE:-http://127.0.0.1:7788}"
-MODEL_PROCS='mlx-vlm-launch|mlx_lm server'
+MODEL_PROCS='mlx-vlm-launc[h]|mlx_lm[ ]server'   # bracketed so pgrep -f never matches this script's own command line
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 die()  { printf '\n%s\n' "$*" >&2; exit 1; }
