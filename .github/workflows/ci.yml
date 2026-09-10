@@ -98,7 +98,7 @@ jobs:
       - name: Snapshot model processes before the run
         run: |
           set -uo pipefail
-          before="$(pgrep -f 'mlx-vlm-launc[h]|mlx_lm[ ]server' | tr '\n' ' ')"
+          before="$(pgrep -f 'mlx-vlm-launc[h]|mlx_lm[ ]server' | tr '\n' ' ' || true)"   # pgrep exits 1 when nothing matches; the runner's bash -e must not treat that as failure
           echo "MODELS_BEFORE=$before" >> "$GITHUB_ENV"
           if [ -n "$before" ]; then
             echo "::error::a model server is already resident before the run started"
@@ -128,7 +128,7 @@ jobs:
       - name: No model server was started
         run: |
           set -uo pipefail
-          after="$(pgrep -f 'mlx-vlm-launc[h]|mlx_lm[ ]server' | tr '\n' ' ')"
+          after="$(pgrep -f 'mlx-vlm-launc[h]|mlx_lm[ ]server' | tr '\n' ' ' || true)"   # pgrep exits 1 when nothing matches; the runner's bash -e must not treat that as failure
           before="${MODELS_BEFORE:-}"
           if [ "$after" != "$before" ]; then
             echo "::error::a model server's presence changed during the run (before=[${before:-none}] after=[${after:-none}])"
