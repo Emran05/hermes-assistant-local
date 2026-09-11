@@ -48,6 +48,9 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleVersion</key><string>$BUILDVER</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <!-- Dictation. Both prompts fire on FIRST use only, never at launch. -->
+  <key>NSMicrophoneUsageDescription</key><string>Hermes Assistant only uses the microphone for on-device dictation you start yourself.</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>Hermes Assistant transcribes your dictation with on-device speech recognition. Nothing you say leaves this Mac.</string>
   <key>NSAppTransportSecurity</key><dict>
     <key>NSAllowsLocalNetworking</key><true/>
   </dict>

@@ -27,9 +27,84 @@ let QUICKASK_HTML = """
 <script src="/aux_clip.js"></script>
 """
 
+// ==========================================================================
+// The main window has no title bar of its own: .fullSizeContentView plus a
+// hidden, transparent titlebar hands every pixel to this web view, and WebKit
+// ignores Electron's `-webkit-app-region: drag` — so nothing on screen starts a
+// window drag. dashboard/aux_window.js posts the header's geometry over the
+// `hermesWindow` bridge (CSS pixels, top-left origin) and this view does the
+// dragging. Until the page reports anything — the splash, a failed load — the
+// top `defaultBandH` points behave like a real title bar, so the window is
+// always movable.
+// ==========================================================================
+final class HermesWebView: WKWebView {
+    static let defaultBandH: CGFloat = 28          // the native title-bar height
+
+    private var band: CGRect?                      // nil ⇒ fall back to the top strip
+    private var noDrag: [CGRect] = []
+
+    // Main thread only — the script-message handler is the only caller.
+    func setDragRegions(band: CGRect?, noDrag: [CGRect]) {
+        self.band = band
+        self.noDrag = noDrag
+    }
+
+    // We decide per click. Left at the default, AppKit would also move the
+    // window whenever the user drags to select text in the chat.
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    // locationInWindow → this view's space, top-left origin, which is what the
+    // page measures in. isFlipped is read rather than assumed.
+    private func pagePoint(_ event: NSEvent) -> CGPoint {
+        let p = convert(event.locationInWindow, from: nil)
+        return CGPoint(x: p.x, y: isFlipped ? p.y : bounds.height - p.y)
+    }
+
+    private func toPageRect(_ inWindow: NSRect) -> CGRect {
+        let r = convert(inWindow, from: nil)
+        return isFlipped ? r : CGRect(x: r.origin.x, y: bounds.height - r.maxY,
+                                      width: r.width, height: r.height)
+    }
+
+    // The close/minimise/zoom buttons live in the titlebar view above us and
+    // normally take the click first; if they ever do not, a drag started over
+    // one of them would eat it. They are hidden in fullscreen.
+    private func overWindowButton(_ p: CGPoint) -> Bool {
+        guard let w = window else { return false }
+        for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            guard let b = w.standardWindowButton(kind), !b.isHidden else { continue }
+            if toPageRect(b.convert(b.bounds, to: nil)).insetBy(dx: -4, dy: -4).contains(p) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func isDraggable(_ p: CGPoint) -> Bool {
+        let b = band ?? CGRect(x: 0, y: 0, width: bounds.width,
+                               height: HermesWebView.defaultBandH)
+        guard b.contains(p), !overWindowButton(p) else { return false }
+        for r in noDrag where r.contains(p) { return false }
+        return true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let p = pagePoint(event)
+        if isDraggable(p) {
+            if event.clickCount == 2 {          // a real title bar zooms on double-click
+                window?.performZoom(nil)
+                return
+            }
+            window?.performDrag(with: event)
+            return
+        }
+        super.mouseDown(with: event)
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, NSWindowDelegate, WKUIDelegate, WKScriptMessageHandler {
     var window: NSWindow!
-    var webView: WKWebView!
+    var webView: HermesWebView!
     var retryTimer: Timer?
     var loaded = false
 
@@ -78,8 +153,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let ucc = WKUserContentController()
         ucc.add(self, name: "hermesClip")
         ucc.add(self, name: "hermesClipWrite")
+        ucc.add(self, name: "hermesWindow")      // page → title-bar band + no-drag rects
         cfg.userContentController = ucc
-        webView = WKWebView(frame: .zero, configuration: cfg)
+        webView = HermesWebView(frame: .zero, configuration: cfg)
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.setValue(false, forKey: "drawsBackground") // let the page's own bg show, no white flash
@@ -558,9 +634,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         }
     }
 
+    // ---- hermesWindow: drag regions the page reports -----------------------
+    // {x,y,w,h} in CSS pixels, top-left origin.
+    private func cgRect(_ any: Any?) -> CGRect? {
+        guard let d = any as? [String: Any],
+              let x = d["x"] as? NSNumber, let y = d["y"] as? NSNumber,
+              let w = d["w"] as? NSNumber, let h = d["h"] as? NSNumber,
+              w.doubleValue > 0, h.doubleValue > 0 else { return nil }
+        return CGRect(x: CGFloat(x.doubleValue), y: CGFloat(y.doubleValue),
+                      width: CGFloat(w.doubleValue), height: CGFloat(h.doubleValue))
+    }
+
+    // Mirror of what the view is using, so a shell or doctor.py can see "the
+    // page reported a band this tall"; geometry only, no page content.
+    private func writeWindowRegions(band: CGRect?, noDrag: [CGRect]) {
+        func j(_ r: CGRect) -> [String: Any] {
+            return ["x": Int(r.origin.x.rounded()), "y": Int(r.origin.y.rounded()),
+                    "w": Int(r.width.rounded()),    "h": Int(r.height.rounded())]
+        }
+        let fallback = CGRect(x: 0, y: 0, width: webView?.bounds.width ?? 0,
+                              height: HermesWebView.defaultBandH)
+        let obj: [String: Any] = [
+            "v": 1,
+            "updated_at": Date().timeIntervalSince1970,
+            "source": band == nil ? "default" : "page",
+            "band": j(band ?? fallback),
+            "nodrag": noDrag.map(j),
+            "nodrag_count": noDrag.count,
+        ]
+        let dir  = (NSHomeDirectory() as NSString).appendingPathComponent(".hermes/dashboard")
+        let path = (dir as NSString).appendingPathComponent("window-regions.json")
+        DispatchQueue.global(qos: .utility).async {
+            guard let data = try? JSONSerialization.data(withJSONObject: obj,
+                                                        options: [.prettyPrinted, .sortedKeys])
+            else { return }
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        }
+    }
+
     // ---- WKScriptMessageHandler: popover bridge + clipboard read/write -----
     func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
         switch message.name {
+        case "hermesWindow":   // title-bar drag regions, main window only
+            guard message.webView === webView,
+                  let body = message.body as? [String: Any],
+                  (body["action"] as? String) == "dragRegions" else { return }
+            let band = cgRect(body["band"])
+            let rects = (body["nodrag"] as? [[String: Any]] ?? []).compactMap { cgRect($0) }
+            webView.setDragRegions(band: band, noDrag: rects)
+            writeWindowRegions(band: band, noDrag: rects)
         case "hermesClip":   // read tier 1: hand NSPasteboard text back to JS
             let s = NSPasteboard.general.string(forType: .string) ?? ""
             message.webView?.evaluateJavaScript("window.__clipDeliver&&window.__clipDeliver(\(jsString(s)))",

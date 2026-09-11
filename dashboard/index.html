@@ -167,14 +167,14 @@
     border-bottom:1px solid var(--hairline);
     background:linear-gradient(180deg,color-mix(in srgb,var(--ground) 72%,transparent),transparent);
     -webkit-backdrop-filter:blur(18px) saturate(160%);backdrop-filter:blur(18px) saturate(160%)}
-  /* Window drag: the shell is a WKWebView with isMovableByWindowBackground and a
-     hidden, transparent title bar, so the header itself is the only handle. Mark
-     it draggable and carve the controls out, or a header full of chips leaves
-     nothing to grab. */
-  header{-webkit-app-region:drag;app-region:drag;-webkit-user-select:none;user-select:none}
-  header button,header a,header input,header select,header textarea,header [role=button],
-  header [role=tab],header .chip,header .pill,header .seg,header .menu,header .dropdown,
-  header #model-pill,header .ctx-chip{-webkit-app-region:no-drag;app-region:no-drag}
+  /* Window drag: the shell is a WKWebView filling a .fullSizeContentView window.
+     `-webkit-app-region` is an Electron/Chromium property — WebKit ignores it, so
+     the rules that used to live here never did anything. The header is still the
+     handle: aux_window.js posts its rect, and the rect of everything clickable
+     inside it, over the `hermesWindow` bridge and HermesWebView (app/main.swift)
+     calls performDrag itself. Keep aux_window.js's NODRAG selector list in step
+     with whatever lands in the header. */
+  header{-webkit-user-select:none;user-select:none}
   header .mark{margin-left:52px}
   :root[data-fullscreen="1"] header .mark{margin-left:0}
   .hello .greet{font-size:14px;font-weight:640;letter-spacing:-.01em;line-height:1.15}
@@ -3323,5 +3323,8 @@ try{
 <!-- Apple apps card. After aux_google.js so it sits below the Google card in
      #sec-connections. -->
 <script src="/aux_appleapps.js"></script>
+<!-- Native window drag (1.3.2): the header's geometry → the app's HermesWebView.
+     Load order does not matter; it measures on load and on every header change. -->
+<script src="/aux_window.js"></script>
 </body>
 </html>

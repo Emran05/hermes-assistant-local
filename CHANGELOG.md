@@ -6,6 +6,20 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-09-11
+
+### Fixed
+- **The main window could not be moved.** The shell builds the window with
+  `.fullSizeContentView` and a hidden title bar and hands the whole content view to a
+  plain `WKWebView`; the `-webkit-app-region: drag` rule in the header is an
+  Electron-only property WebKit ignores, so no pixel of the window was a handle. The web
+  view is now a `HermesWebView` that performs the drag itself: `dashboard/aux_window.js`
+  posts the header's rect and the rects of everything clickable inside it over a new
+  `hermesWindow` bridge, a mouse-down in the band (outside those rects) drags, a
+  double-click zooms, and until the page reports anything the top 28 px acts as a title
+  bar. `app/build-app.sh` also adds Microphone and Speech usage strings. Rebuilding the
+  app resets its ad-hoc Full Disk Access grant; re-add it if you use the Message Center.
+
 ## [1.3.1] - 2026-09-10
 
 Review release: the combined security and silent-failure pass over 1.3.0 plus all ten

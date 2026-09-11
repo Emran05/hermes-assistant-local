@@ -455,6 +455,10 @@ and explicit agent tool calls (web search etc.) touch the internet.
   * ⚠ REBUILDING THE APP DROPS THE FDA GRANT (ad-hoc cdhash changes) — after any
     build-app.sh run, the user must re-add the app in Full Disk Access. main.swift
     is FROZEN after P2.4 for this reason; batch Swift changes.
+    **Rebuilt 2026-09-11, owner-approved** (Full Disk Access was already denied, so
+    the rebuild cost nothing): `HermesWebView` drag regions + the two dictation
+    usage strings. FDA must be re-granted before the Message Center works again.
+    The file is FROZEN again from here.
 - **AUX MODULE GOTCHA — never `from datetime import datetime` in an aux_*.py.**
   aux modules exec into shared server.py globals; `from datetime import datetime`
   rebinds the global name `datetime` to the CLASS, so any other code that later
@@ -621,7 +625,14 @@ and explicit agent tool calls (web search etc.) touch the internet.
   `window.webkit.messageHandlers`, and MOCK /api/chat + /api/chat/poll + /api/clip/
   transform so tests never wake the 19GB model.
 - **App** — `/Applications/Hermes Assistant.app`, real Swift/AppKit WKWebView
-  shell (source `app/main.swift`, rebuild `app/build-app.sh`).
+  shell (source `app/main.swift`, rebuild `app/build-app.sh`). The window has no
+  native title bar, so `HermesWebView.mouseDown` starts the drag itself from the
+  band the page reports over the `hermesWindow` bridge
+  (`dashboard/aux_window.js`), with every clickable header rect carved out;
+  double-click in the band zooms. Before the page reports, the top 28 px is the
+  band, so the splash and the error page are movable too. The live regions are
+  mirrored to `~/.hermes/dashboard/window-regions.json` for doctor/shell checks.
+  `-webkit-app-region` is Electron-only and has never worked here.
 - **Versioning + self-update (2026-09-03)** — repo-root `VERSION` (currently
   1.0.0) is the single source of truth; `app/build-app.sh` stamps it +
   `git rev-parse --short HEAD` into `CFBundleShortVersionString`/
