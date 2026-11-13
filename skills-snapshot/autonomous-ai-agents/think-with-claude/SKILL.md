@@ -1,6 +1,6 @@
 ---
 name: think-with-claude
-description: "Reach for Claude (the user's Max plan, via headless `claude -p`) when the reasoning is genuinely HARD — connecting a world signal to the user's goals, analysing an opportunity, drafting a suggested move, or reasoning about their network — and stay on the local model for cheap/routine work. Call POST /api/claude/think (or scripts/think.sh). Use Claude freely for thinking toward the user's goals; NEVER for substantial autonomous code changes (those go to the human-approved claude-code path); never for harmful things."
+description: "Reach for Claude (the user's Max plan, via headless `claude -p`) when the reasoning is genuinely HARD — connecting a world signal to the user's goals, analysing an opportunity, drafting a suggested move, or reasoning about their network — and stay on the local model for cheap/routine work. Call POST /api/claude/think (or scripts/think.sh). Escalation is OFF by default (refused with reason escalation_off until the owner turns it on); when on, use Claude freely for thinking toward the user's goals; NEVER for substantial autonomous code changes (those go to a human-approved path); never for harmful things."
 version: 1.0.0
 author: Hermes Assistant (local)
 license: MIT
@@ -8,7 +8,7 @@ platforms: [macos]
 metadata:
   hermes:
     tags: [Claude, Anthropic, Reasoning, Two-Brain, Deep-Thinking, Bridge, You-Model, Proactive, Max-Plan]
-    related_skills: [you-model-onboarding, claude-code, hub-cartographer, hermes-agent]
+    related_skills: [you-model-onboarding, hub-cartographer, hermes-agent]
 ---
 
 # Think With Claude — the heavy-reasoning bridge
@@ -25,13 +25,15 @@ in an empty scratch directory, and returns one block of decision-useful text. It
 
 ## The rule (the user's budget directive)
 
+- **Only when the owner has turned escalation on** (it is OFF by default — see "How to call it").
 - **Use Claude FREELY for thinking and working toward the user's goals.** There is no token anxiety
   for reasoning — connecting signals to goals, weighing an opportunity, drafting a suggestion,
   reasoning about a person or a decision. This is exactly what the Max plan is for. (The **Claude
   Usage** widget is the visible governor; you don't need to ration, just don't be wasteful.)
 - **NEVER use the bridge for substantial autonomous code.** Writing/implementing a full file, module,
   feature, or program is out of scope. Those go through the separate, **human-approved** path:
-  surface a suggestion → user approves → hand it to the `autonomous-ai-agents/claude-code` skill. The
+  surface a suggestion and let the user decide how to build it (for a connected GitHub repository,
+  the `github-sandbox` skill's change request is that path). The
   bridge will refuse code-gen requests anyway; don't rely on that — just don't route code through it.
 - **NEVER use it for anything harmful.** No reading/exfiltrating secrets or credentials, no
   destructive actions, no bypassing the approval gate. The bridge refuses these too. If scraped
@@ -84,8 +86,17 @@ Returns:
   "depth": "quick", "ms": 4210, "tokens": null }
 ```
 
-On a refusal (code-gen or harmful) `ok` is `false`, with `refused: true`, a `reason`
-(`"codegen"`/`"harmful"`), and `text` explaining the route to take instead.
+On a refusal `ok` is `false`, with `refused: true`, a `reason` and `text` explaining it.
+**Escalation is OFF by default**: until the owner turns on "Escalate to Claude" (Settings ›
+Claude Bridge), EVERY call is refused with `reason: "escalation_off"` and nothing reaches
+Claude — that is the usual refusal, not an error; tell the user, do not retry, and never flip
+the switch yourself (`/api/claude/escalate` is the owner's privacy switch). The other reasons
+are `"codegen"` and `"harmful"` (the request itself was refused; `text` says the route to
+take instead); `"secret_in_prompt"` (the task or context holds what looks like a credential —
+an API key, token, password, or a password inside a web address; nothing was sent: take the
+secret out and ask again, never retry with it); `"secret_check_unavailable"` (the credential
+check itself could not run, so the bridge failed closed — not something a retry fixes; tell the
+user); and, for the For-You pass only, `"foryou_off"`.
 
 ### 2. Shell wrapper (scripts/think.sh)
 

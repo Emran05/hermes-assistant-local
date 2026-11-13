@@ -93,6 +93,7 @@ import subprocess as _pb_subprocess
 import threading as _pb_threading
 import time as _pb_time
 import datetime as _pb_datetime
+import sys as _pb_sys
 
 # ---------------------------------------------------------------------------
 # constants
@@ -459,10 +460,59 @@ def _pb_child_indent(lines, start, end):
 
 
 def _pb_find_block(lines):
+    """The `platform_toolsets:` header. A trailing comment is accepted (E17:
+    `platform_toolsets:  # mine` read as "no block", so a second one was
+    appended and YAML last-wins dropped every other platform's list); every
+    other decoration is refused by the guard in `_pb_edit_text`."""
     for i, line in enumerate(lines):
-        if _pb_re.match(r"^platform_toolsets:\s*$", line):
+        if _pb_re.match(r"^platform_toolsets:[ \t]*(#.*)?$", line.rstrip("\r\n")):
             return i
     return None
+
+
+# ---------------------------------------------------------------------------
+# the E16/E17 guard — hermes-plugins/plugin_enable.py's precheck/verify, loaded
+# by path (the way aux_toolbudget.py loads it), so the three config.yaml
+# editors refuse the same forms and verify with the same reader.  Missing or
+# broken helper: every WRITE is refused (fail closed); reads are unaffected.
+# ---------------------------------------------------------------------------
+_PB_YH = {}
+
+
+def _pb_yaml_helper():
+    if "mod" in _PB_YH:
+        return _PB_YH["mod"]
+    import importlib.util as _il
+    try:
+        here = globals().get("HERE") or _pb_os.path.dirname(
+            _pb_os.path.abspath(_pb_sys._getframe(0).f_code.co_filename))
+        path = _pb_os.path.join(_pb_os.path.dirname(here), "hermes-plugins",
+                                "plugin_enable.py")
+        spec = _il.spec_from_file_location("hermes_plugin_enable_pb", path)
+        mod = _il.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _PB_YH["mod"] = mod
+    except Exception as e:
+        raise RuntimeError("hermes-plugins/plugin_enable.py could not be loaded "
+                           "(%s), so config.yaml was not edited — this install "
+                           "looks incomplete; re-run ./update.sh"
+                           % type(e).__name__)
+    return _PB_YH["mod"]
+
+
+def _pb_config_error(text=None):
+    """The guard's refusal for the current file, as text, or "" — for the
+    card, so a section it cannot edit is said BEFORE a click."""
+    try:
+        if text is None:
+            with open(_PB_CFG, encoding="utf-8", newline="") as fh:
+                text = fh.read()
+        _pb_yaml_helper().precheck(text, "platform_toolsets")
+        return ""
+    except OSError:
+        return ""
+    except Exception as e:
+        return str(e)
 
 
 def _pb_parse_toolsets(text):
@@ -487,8 +537,10 @@ def _pb_parse_toolsets(text):
         if _pb_skippable(line):
             continue
         ind = _pb_indent_of(line)
+        if ind == child and plat is not None and _pb_re.match(r"^\s*-(\s|$)", line):
+            ind = child + 1          # E16: an item at its key's OWN indent
         if ind == child:                             # a platform key
-            m = _pb_re.match(r"^\s*([A-Za-z0-9_.-]+):\s*$", line)
+            m = _pb_re.match(r"^\s*([A-Za-z0-9_.-]+):[ \t]*(#.*)?$", line)
             if m:
                 plat = m.group(1)
                 out.setdefault(plat, [])
@@ -501,9 +553,10 @@ def _pb_parse_toolsets(text):
             plat = None
             continue
         if ind > child and plat is not None:
-            m = _pb_re.match(r"^\s+-\s*(.+?)\s*$", line)
+            m = _pb_re.match(r"^\s*-\s*(.+?)\s*$", line)
             if m:
-                out[plat].append(m.group(1).strip().strip('"\''))
+                item = _pb_re.sub(r"\s+#.*$", "", m.group(1))
+                out[plat].append(item.strip().strip('"\''))
     return out
 
 
@@ -515,10 +568,36 @@ def _pb_read_toolsets():
         return {}
 
 
-def _pb_render(platform, items, indent=2):
+def _pb_render(platform, items, indent=2, item_off=2, note=""):
+    """`platform:` and its items. `item_off` is the items' indent relative to
+    the key — 2, or 0 for a file written in the indentless style — and `note`
+    a comment that sat on the key line."""
     pad = " " * indent
-    return ("%s%s:\n" % (pad, platform)) + "".join("%s  - %s\n" % (pad, t)
-                                                   for t in items)
+    return ("%s%s:%s\n" % (pad, platform, note)) + "".join(
+        "%s%s- %s\n" % (pad, " " * item_off, t) for t in items)
+
+
+def _pb_item_off(lines, start, end, key_at=None):
+    """The list style the block already uses: items' indent minus their key's
+    — from `key_at`'s own items first, else any list in the block, else 2."""
+    def scan(lo, hi):
+        key_ind = None
+        for i in range(lo, hi):
+            if _pb_skippable(lines[i]):
+                continue
+            ind = _pb_indent_of(lines[i])
+            if _pb_re.match(r"^\s*-(\s|$)", lines[i]):
+                if key_ind is not None:
+                    return max(0, ind - key_ind)
+                continue
+            key_ind = ind
+        return None
+    off = None
+    if key_at is not None:
+        off = scan(key_at, end)
+    if off is None:
+        off = scan(start + 1, end)
+    return 2 if off is None else off
 
 
 def _pb_apply_text(src, platform, items):
@@ -552,35 +631,138 @@ def _pb_apply_text(src, platform, items):
             return src
         # first key in the block, so the entry a reader is looking for is the
         # one at the top rather than buried under eleven chat platforms
-        out = lines[:start + 1] + [_pb_render(platform, items, ind)] + \
+        out = lines[:start + 1] + [_pb_render(platform, items, ind,
+                                              _pb_item_off(lines, start, end))] + \
             lines[start + 1:]
+        if start + 1 == len(lines) and not lines[start].endswith("\n"):
+            out[start] = lines[start] + "\n"
         return "".join(out)
 
     # One PAST the last line that genuinely belongs to this platform. Comments
     # and blanks are not boundaries, but they are not claimed either: a trailing
     # `# note` after the last item stays outside the replaced range and
     # survives, while the platform's own items are all rewritten.
+    # Items at the key's OWN indent (E16, the indentless style) belong to it
+    # too — but only after a bare `platform:` opener, never after a scalar.
+    opener = _pb_re.match(r"^\s*%s:[ \t]*(#.*)?$" % _pb_re.escape(platform),
+                          lines[p_at].rstrip("\r\n"))
     p_end = p_at + 1
     for i in range(p_at + 1, end):
         if _pb_skippable(lines[i]):
             continue                                 # decide on the next line
-        if _pb_indent_of(lines[i]) <= ind:
+        if _pb_indent_of(lines[i]) <= ind and not (
+                opener and _pb_indent_of(lines[i]) == ind
+                and _pb_re.match(r"^\s*-(\s|$)", lines[i])):
             break                                    # a sibling platform key
         p_end = i + 1
-    repl = [] if items is None else [_pb_render(platform, items, ind)]
+    # keep a comment that sat on the key line (`cli:   # mine`, or after a
+    # one-line flow list `cli: [a, b]  # two`)
+    key_rest = lines[p_at].rstrip("\r\n").split(":", 1)[1]
+    cm = _pb_re.match(r"^([ \t]*)(#.*)$", key_rest) or \
+        _pb_re.match(r"^[ \t]*\[[^\]#]*\]([ \t]*)(#.*)$", key_rest)
+    note = (cm.group(1) or "  ") + cm.group(2) if cm else ""
+    repl = [] if items is None else [
+        _pb_render(platform, items, ind,
+                   _pb_item_off(lines, start, end, p_at), note)]
     return "".join(lines[:p_at] + repl + lines[p_end:])
 
 
+def _pb_edit_text(src, platform, items):
+    """`_pb_apply_text` behind the E16/E17 guard: refuse a form that cannot be
+    edited safely (a quoted, duplicated or flow-style `platform_toolsets`, a
+    tab, an anchor, a second document, a platform that is not a list...),
+    then re-read the result with plugin_enable.py's copy of doctor's reader
+    and refuse it unless platform_toolsets.<platform> is exactly `items`
+    (absent for None) and nothing else in the file moved. Returns the new
+    text (`src` for a no-op); raises the helper's ConfigEditError (a
+    RuntimeError) having written nothing."""
+    if src[:1] == "﻿":
+        # a byte-order mark hid the header from the line editor (review R4)
+        return "﻿" + _pb_edit_text(src[1:], platform, items)
+    yh = _pb_yaml_helper()
+    yh.precheck(src, "platform_toolsets")
+    old = yh.section_value(src, "platform_toolsets").get(platform)
+    if old is not None and not isinstance(old, list):
+        raise yh.ConfigEditError(
+            "platform_toolsets.%s is not a list" % platform,
+            yh.child_line(src, "platform_toolsets", platform))
+    new = _pb_apply_text(src, platform, items)
+    if new == src:
+        return src
+    new = yh.match_newlines(src, new)
+    yh.verify_edit(src, new, "platform_toolsets",
+                   {platform: yh.REMOVE if items is None else list(items)})
+    return new
+
+
+_PB_BACKUP_KEEP = 10      # newest config.yaml.bak-promptbudget-* copies kept (R2-28)
+_PB_BACKUP_RE = _pb_re.compile(r"\.bak-promptbudget-(\d{8}-\d{6})(?:-(\d+))?$")
+
+
 def _pb_backup():
-    """Timestamped copy next to the config, 0600. Returns its path."""
+    """Timestamped copy next to the config, 0600. Returns its path.
+
+    R2-28: every change used to write config.yaml.bak-promptbudget-<ts> and
+    nothing ever pruned them, and two changes in the same second overwrote
+    each other's copy. The name is now reserved with O_EXCL (a second one in
+    the same second is <ts>-2, -3, ...) and only the newest _PB_BACKUP_KEEP
+    of this kind are kept. Called inside the config locks, like the write.
+    """
     stamp = _pb_datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    dst = "%s.bak-promptbudget-%s" % (_PB_CFG, stamp)
-    _pb_shutil.copy2(_PB_CFG, dst)
+    base = "%s.bak-promptbudget-%s" % (_PB_CFG, stamp)
+    dst, n = base, 1
+    while True:
+        try:
+            _pb_os.close(_pb_os.open(
+                dst, _pb_os.O_CREAT | _pb_os.O_EXCL | _pb_os.O_WRONLY, 0o600))
+            break
+        except FileExistsError:
+            n += 1
+            dst = "%s-%d" % (base, n)
+    try:
+        _pb_shutil.copy2(_PB_CFG, dst)
+    except Exception:
+        try:
+            _pb_os.remove(dst)           # never leave an empty "backup"
+        except OSError:
+            pass
+        raise
     try:
         _pb_os.chmod(dst, 0o600)
     except OSError:
         pass
+    _pb_prune_backups(protect=dst)
     return dst
+
+
+def _pb_prune_backups(keep=None, protect=None):
+    """Delete all but the newest `keep` config.yaml.bak-promptbudget-* copies.
+    Only names this module writes are touched, never `protect` (the copy just
+    made, even if a clock step put it out of order); never raises."""
+    keep = _PB_BACKUP_KEEP if keep is None else keep
+    d = _pb_os.path.dirname(_PB_CFG) or "."
+    head = _pb_os.path.basename(_PB_CFG)
+    try:
+        names = _pb_os.listdir(d)
+    except OSError:
+        return
+    found = []
+    for fn in names:
+        if not fn.startswith(head):
+            continue
+        if protect and fn == _pb_os.path.basename(protect):
+            continue
+        m = _PB_BACKUP_RE.match(fn[len(head):])
+        if m:
+            found.append(((m.group(1), int(m.group(2) or 1)), fn))
+    found.sort()
+    if protect:
+        keep -= 1                           # the protected copy counts too
+    for _k, fn in found[:max(0, len(found) - keep)]:
+        try:
+            _pb_os.remove(_pb_os.path.join(d, fn))
+        except OSError:
+            pass
 
 
 @_pb_contextlib.contextmanager
@@ -634,7 +816,7 @@ def _pb_atomic_write(path, text, mode):
                            % (_pb_os.path.basename(path), _pb_os.getpid(), token))
     fd = _pb_os.open(tmp, _pb_os.O_CREAT | _pb_os.O_EXCL | _pb_os.O_WRONLY, 0o600)
     try:
-        with _pb_os.fdopen(fd, "w", encoding="utf-8") as fh:
+        with _pb_os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
             fh.flush()
             _pb_os.fsync(fh.fileno())
@@ -670,9 +852,10 @@ def _pb_write_toolsets(platform, items):
     """
     with _state_lock:                                        # noqa: F821
         with _pb_config_lock():
-            with open(_PB_CFG, encoding="utf-8") as fh:
+            # newline="": a CRLF file stays byte-identical outside the edit
+            with open(_PB_CFG, encoding="utf-8", newline="") as fh:
                 src = fh.read()
-            new = _pb_apply_text(src, platform, items)
+            new = _pb_edit_text(src, platform, items)    # refuses: no write
             if new == src:
                 return False, None
             before = _pb_parse_toolsets(src).get(platform)   # None when absent
@@ -907,6 +1090,8 @@ def _pb_build(fresh=False, selection_override=None):
                          "Conversations already open keep the tools they "
                          "started with until you restart the agent service."),
         "probe_error": probe_err,
+        # E16/E17: non-empty when a change from this card would be refused
+        "config_error": _pb_config_error(),
     }
 
 
@@ -1035,6 +1220,10 @@ def _pb_post(ctx):
     except OSError as e:
         return {"ok": False,
                 "error": "could not write %s — %s" % (_PB_CFG, e)}, 500
+    except RuntimeError as e:
+        # E16/E17: config.yaml is in a form the editor will not touch, or the
+        # edit did not verify — nothing was written, and the card says why
+        return {"ok": False, "config_error": True, "error": str(e)}, 409
 
     restarted, restart_error = False, ""
     if changed and body.get("restart") is True:

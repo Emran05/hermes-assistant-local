@@ -289,7 +289,7 @@
       '#' + CARD_ID + ' button.upd-b{padding:6px 13px;border-radius:9px;font-size:12.5px;cursor:pointer;' +
         'border:1px solid var(--hairline,rgba(255,255,255,.12));background:var(--glass-2,rgba(255,255,255,.05));color:inherit}' +
       '#' + CARD_ID + ' button.upd-b:disabled{opacity:.5;cursor:default}' +
-      '#' + CARD_ID + ' button.upd-go{border:0;background:var(--iris,#6b8afd);color:#fff;font-weight:600}' +
+      '#' + CARD_ID + ' button.upd-go{border:0;background:var(--iris,#6b8afd);color:var(--iris-ink,#fff);font-weight:600}' +
       '#' + CARD_ID + ' .upd-avail{margin-top:12px;padding:11px 13px;border-radius:12px;' +
         'border:1px solid color-mix(in srgb,var(--iris,#6b8afd) 45%,transparent);' +
         'background:color-mix(in srgb,var(--iris,#6b8afd) 12%,transparent)}' +
@@ -394,8 +394,11 @@
     if (ver.dirty) bits.push("local changes present");
     bits.push("checked " + E(fmtWhen(chk.checked_at)));
 
+    // <h2> + .body is the card convention: .body carries the padding (V02);
+    // closed at the end of cardHTML
     var h = CSS() +
       '<h2 style="display:flex;align-items:center;gap:7px">' + GLYPH + "Software update</h2>" +
+      '<div class="body">' +
       '<div class="upd-head"><span class="upd-ver">' + verLine + "</span>" +
       '<span class="upd-sub">' + E(bits.join(" · ")) + "</span></div>";
 
@@ -509,6 +512,7 @@
     if (state.err) h += '<div class="upd-err">' + E(state.err) + "</div>";
     h += '<div class="upd-note upd-sub">Terminal equivalent: ' +
       '<span class="upd-mono">./update.sh</span> in the install directory.</div>';
+    h += "</div>";
     return h;
   }
 
@@ -532,10 +536,28 @@
     return j || { ok: false, error: "HTTP " + r.status };
   }
 
+  // Inside the panel's .set-body (V02): that flex column is what spaces the
+  // panel's cards 15px apart; a card appended to the <section> itself sat
+  // flush against its neighbours.
   function host() {
     var d = D();
     if (!d) return null;
-    return d.getElementById("sec-system") || d.getElementById("view-mind");
+    var sys = d.getElementById("sec-system");
+    if (sys) {
+      var body = null;
+      try { body = sys.querySelector ? sys.querySelector(".set-body") : null; } catch (e) { body = null; }
+      return body || sys;
+    }
+    return d.getElementById("view-mind");
+  }
+
+  // Before the shell's empty [data-legacy-slot] marker: in the gap:15px flex
+  // column a card placed after that empty div is spaced twice (30px).
+  function putIn(h, el) {
+    var anchor = null;
+    try { anchor = h.querySelector ? h.querySelector("[data-legacy-slot]") : null; } catch (e) { anchor = null; }
+    if (anchor && anchor.parentNode === h) h.insertBefore(el, anchor);
+    else h.appendChild(el);
   }
 
   function paint() {
@@ -547,12 +569,14 @@
       if (!h) return;
       el = d.createElement("section");
       el.id = CARD_ID;
-      el.className = "card glass";
-      h.appendChild(el);
+      el.className = "card glass set-legacy";
+      putIn(h, el);
     } else if (el.parentNode && el.parentNode.id === "view-mind") {
       // the shell built its panels after we mounted — move ourselves in
-      var sys = d.getElementById("sec-system");
-      if (sys && sys !== el.parentNode) { try { sys.appendChild(el); } catch (e) {} }
+      var sys = host();
+      if (sys && sys !== el.parentNode) {
+        try { putIn(sys, el); if (el.classList) el.classList.add("set-legacy"); } catch (e) {}
+      }
     }
     try { el.innerHTML = cardHTML(S); } catch (e) { return; }
     wire(el);
@@ -645,10 +669,20 @@
     }
   }
 
-  async function doApply(target) {
+  async function doApply(target, force) {
     S.busy = "apply"; S.err = ""; S.msg = ""; paint();
-    var r = await jpost("/api/update/apply", { target: target });
+    var body = { target: target };
+    if (force === true) body.force = true;
+    var r = await jpost("/api/update/apply", body);
     S.busy = "";
+    // a chat turn is running (E18): say why, and let the owner go ahead
+    if (r && !r.ok && r.reason === "chat_busy" && force !== true) {
+      var why = r.error || "A chat turn is still running.";
+      var go = false;
+      try { go = !!W.confirm(why + "\n\nUpdate anyway?"); } catch (e) { go = false; }
+      if (go) return doApply(target, true);
+      S.err = why; paint(); return;
+    }
     if (!r || !r.ok) {
       var msg = (r && (r.error || r.reason)) || "Could not start the update.";
       if (r && r.dirty && r.dirty.length) {
@@ -745,6 +779,6 @@
     fmtDay: fmtDay, fmtDayLong: fmtDayLong, releaseTouchesApp: releaseTouchesApp,
     bytes: bytes, parseNotes: parseNotes, inlineMD: inlineMD,
     whatsNewHTML: whatsNewHTML, currentNotes: currentNotes,
-    check: doCheck, state: S
+    check: doCheck, apply: doApply, state: S
   };
 })();

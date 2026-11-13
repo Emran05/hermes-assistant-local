@@ -131,6 +131,7 @@
     "white-space:pre-wrap;word-break:break-word;background:var(--glass-2);border:1px solid var(--hairline);color:var(--ink)}",
     "#clip-sheet .res.hint{color:var(--muted);font-style:italic}",
     "#clip-sheet .res.err{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 45%,transparent);background:color-mix(in srgb,var(--bad) 9%,transparent)}",
+    "#clip-sheet .res .cut{margin-top:10px;padding-top:8px;border-top:1px solid var(--hairline);color:var(--bad);font-size:12px;font-weight:550;white-space:normal}",
     "#clip-sheet .shim{height:12px;border-radius:6px;margin:7px 0;background:linear-gradient(90deg,var(--glass-2),var(--hairline),var(--glass-2));",
     "background-size:200% 100%;animation:clipShim 1.1s linear infinite}",
     "@keyframes clipShim{0%{background-position:200% 0}100%{background-position:-200% 0}}",
@@ -149,6 +150,10 @@
   var CAT = null;                 // catalog {order, actions, defaults}
   var STATE = { text: "", action: "summarize", opts: {}, busy: false, result: "" };
   var SHEET = null, els = {};
+  // token of an open whose catalog fetch is still in flight (0 = none): SHEET
+  // is only set once that resolves, so without this a second ⌘⇧V, or the
+  // launcher plus the hotkey, built a second sheet on top of the first (R2-40)
+  var OPENING = 0, openSeq = 0;
   var clipWaiters = [];           // pending Swift-bridge read resolvers
 
   // Swift read bridge delivers here: window.__clipDeliver("<pasteboard text>")
@@ -229,6 +234,9 @@
     };
     return map[err] || ("Something went wrong (" + E(err) + ").");
   }
+  // shown under a result the model cut off at its output cap (C22)
+  var CUT_NOTE = "Cut off: the text was longer than this action can return, " +
+    "so the result is incomplete. Don't paste it over the original.";
 
   // ---- build the sheet ------------------------------------------------------
   function injectCSS() {
@@ -392,7 +400,18 @@
         var j = o.j || {};
         if (j.ok) {
           STATE.result = j.result || "";
-          if (els.res) { els.res.className = "res"; els.res.textContent = STATE.result; anim(els.res, { opacity: [0, 1] }, { duration: 200 }); }
+          if (els.res) {
+            els.res.className = "res"; els.res.textContent = STATE.result;
+            // the model hit its output cap: say so, so a partial proofread is
+            // never pasted over the original as if it were the whole text
+            if (j.truncated_output) {
+              var cut = DOC().createElement("div");
+              cut.className = "cut";
+              cut.textContent = CUT_NOTE;
+              els.res.appendChild(cut);
+            }
+            anim(els.res, { opacity: [0, 1] }, { duration: 200 });
+          }
           if (els.copy) els.copy.disabled = false;
         } else {
           if (els.res) { els.res.className = "res err"; els.res.textContent = errText(j.error); }
@@ -440,8 +459,11 @@
   }
   function openSheet() {
     var d = DOC(); if (!d) return;
-    if (SHEET) return;   // already open
+    if (SHEET || OPENING) return;   // already open, or opening
+    var tok = OPENING = ++openSeq;
     ensureCatalog().then(function () {
+      if (OPENING !== tok) return;  // closed while the catalog loaded
+      OPENING = 0;
       loadLast();
       if (STATE.action && !(CAT.actions && CAT.actions[STATE.action])) STATE.action = (CAT.order && CAT.order[0]) || "summarize";
       SHEET = buildSheet();
@@ -460,12 +482,13 @@
     var d = DOC();
     // remove first: a no-op when it was never added (⌘⇧V toggle, double close)
     if (d) d.removeEventListener("keydown", onEscKey, true);
+    OPENING = 0;                            // a close also cancels an open in flight
     if (els && els.scrim && els.scrim.parentNode) els.scrim.parentNode.removeChild(els.scrim);
     SHEET = null; els = {}; STATE.result = ""; STATE.text = "";
   }
 
   // ---- entry points: bridge object + ⌘⇧V + launcher pill --------------------
-  W.hermesClip = { open: openSheet, close: closeSheet };
+  W.hermesClip = { open: openSheet, close: closeSheet, CUT_NOTE: CUT_NOTE };
 
   function wireHotkey() {
     var d = DOC(); if (!d) return;

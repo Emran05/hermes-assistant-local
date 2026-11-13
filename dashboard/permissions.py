@@ -24,16 +24,28 @@
 #   * Floors are enforced at BOTH write time (the API rejects) and read time
 #     (decide() clamps), so a hand-crafted "credential-write":"auto" line still
 #     resolves as ASK.
+#   * Serve reports only the FIRST dangerous pattern a command matches (E03),
+#     so decide() re-scans the command text against every pattern it knows
+#     and resolves most-restrictive over all matches.  AUTO is returned only
+#     for a command it has fully judged: no command text, a text longer than
+#     SCAN_MAX, a redaction mark serve left in it, or any shell control
+#     operator / substitution (; & | newline ` $( <( >( <<) turns AUTO into ASK.  Never and floors apply to every
+#     match, so a credential write behind an Auto prefix is auto-denied.
+#     So does anything upstream's detector reads differently from this scan:
+#     ( ) { }, a control character, or a command word written with a quote,
+#     a backslash or an expansion ("rm", ${x:-rm}).
 #   * Sidecar-hash mismatch (an out-of-band edit) marks the policy UNTRUSTED and
 #     suspends all AUTO until a human clicks Review & re-trust.
 #
-# Self-contained: stdlib only, and only these five modules.
+# Self-contained: stdlib only, and only these seven modules.
 
 import hashlib
 import json
 import os
+import re
 import threading
 import time
+import unicodedata
 
 # --------------------------------------------------------------------------
 # paths
@@ -43,10 +55,15 @@ HERMES_DIR = os.path.join(HOME, ".hermes")
 DASH_DIR = os.path.join(HERMES_DIR, "dashboard")
 PERM_FILE = os.path.join(HERMES_DIR, "permissions.json")          # mode 600
 SIDECAR = os.path.join(DASH_DIR, "permissions.sha")               # mode 600
+# The bytes the sidecar's hash was taken over (C126): written with every
+# signature, so an out-of-band edit can be reviewed as a DIFF against what was
+# last approved.  Only honoured while its sha256 still equals the sidecar.
+SIGNED_COPY = os.path.join(DASH_DIR, "permissions.signed.json")   # mode 600
 LOG_FILE = os.path.join(DASH_DIR, "permissions-log.jsonl")        # append-only
 
 LOG_MAX = 1024 * 1024        # 1 MB -> rotate to .1 (single generation)
 CMD_TRUNC = 2000             # execute_code scripts can be huge
+CMD_SCRUB_SLACK = 16384      # also scrubbed past the cut: a straddling key (even PEM) fits
 RECENT_WINDOW = 7 * 86400    # per-class "this week" aggregation window
 
 TIERS = ("auto", "ask", "never")
@@ -54,8 +71,9 @@ _RANK = {"auto": 0, "ask": 1, "never": 2}     # most-restrictive wins
 SHIPPED_DEFAULT = "ask"                        # the fail-safe fallback tier
 
 # --------------------------------------------------------------------------
-# class taxonomy — 18 canonical action classes
-# (17 hermes-pattern classes + shortcuts-run, the P3.1 dashboard action bus)
+# class taxonomy — 19 canonical action classes
+# (17 hermes-pattern classes + shortcuts-run, the P3.1 dashboard action bus,
+#  + github-write, the GitHub sandbox change pipeline's pushes and PRs)
 # CLASS_META[id] = {label, risk, default, floor, desc}
 #   * default : the DOCUMENTED per-class default from the spec table (display
 #               reference only — the ACTUAL shipped fallback is _shipped_tier()).
@@ -96,6 +114,10 @@ CLASS_META = {
         "label": "macOS Shortcuts runs", "risk": "med",
         "default": "ask", "floor": "ask",
         "desc": "Runs a user-exposed macOS Shortcut through the dashboard action bus — allowlisted per shortcut, never silent."},
+    "github-write": {
+        "label": "GitHub pushes & pull requests", "risk": "high",
+        "default": "ask", "floor": "ask",
+        "desc": "Pushes a change you approved to a hermes/ branch of a repository you connected and can open a pull request. Never silent."},
     "destructive-delete": {
         "label": "Destructive deletes", "risk": "high",
         "default": "ask", "floor": "ask",
@@ -144,7 +166,7 @@ CLASS_ORDER = [
     "destructive-delete", "sql-destructive", "arbitrary-exec", "execute-code",
     "system-config", "unknown",
     "git-destructive", "file-perms", "project-config", "process-control",
-    "container-lifecycle", "mcp-consent", "shortcuts-run",
+    "container-lifecycle", "mcp-consent", "shortcuts-run", "github-write",
     "read-only",
 ]
 
@@ -258,10 +280,330 @@ for _cid in PATTERN_CLASS.values():
     PATTERN_COUNT[_cid] = PATTERN_COUNT.get(_cid, 0) + 1
 
 # --------------------------------------------------------------------------
+# Command scanner (E03, 2026-11-09 audit).
+#
+# Upstream reports only the FIRST DANGEROUS_PATTERN a command matches, so a
+# compound command — `pkill -9 node; cp k ~/.ssh/authorized_keys` — arrived as
+# one process-control key and an Auto on that class approved the credential
+# write behind it.  decide() therefore re-scans the command text itself against
+# every pattern below and resolves most-restrictive over ALL of them.
+#
+# _DANGER_PATTERNS is a COPY of upstream tools/approval.py DANGEROUS_PATTERNS
+# (Hermes 0.18.0, 19d4174454; comments dropped, helper names prefixed _DP),
+# not an import: this is a stdlib-only sibling module and serve's code is not
+# importable from the dashboard's Python.  Its descriptions are exactly the
+# terminal keys of PATTERN_CLASS (t_e03_compound_auto.py checks that); when
+# upstream adds or edits a pattern, update PATTERN_CLASS and this table
+# together.  The key serve reports is always resolved too and any compound
+# command is held to Ask regardless, but a pattern that is missing or older
+# here IS a gap for one simple command that matches both an Auto pattern and
+# the changed one: re-compare the table after every Hermes upgrade.
+# --------------------------------------------------------------------------
+_DP_SSH_SENSITIVE_PATH = r'(?:~|\$home|\$\{home\})/\.ssh(?:/|$)'
+_DP_HERMES_ENV_PATH = (
+    r'(?:~\/\.hermes/|'
+    r'(?:\$home|\$\{home\})/\.hermes/|'
+    r'(?:\$hermes_home|\$\{hermes_home\})/)'
+    r'\.env\b'
+)
+_DP_HERMES_CONFIG_PATH = (
+    r'(?:~\/\.hermes/|'
+    r'(?:\$home|\$\{home\})/\.hermes/|'
+    r'(?:\$hermes_home|\$\{hermes_home\})/)'
+    r'config\.yaml\b'
+)
+_DP_PROJECT_ENV_PATH = r'(?:(?:/|\.{1,2}/)?(?:[^\s/"\'`]+/)*\.env(?:\.[^/\s"\'`]+)*)'
+_DP_PROJECT_CONFIG_PATH = r'(?:(?:/|\.{1,2}/)?(?:[^\s/"\'`]+/)*config\.yaml)'
+_DP_SHELL_RC_FILES = (
+    r'(?:~|\$home|\$\{home\})/\.'
+    r'(?:bashrc|zshrc|profile|bash_profile|zprofile)\b'
+)
+_DP_CREDENTIAL_FILES = (
+    r'(?:~|\$home|\$\{home\})/\.'
+    r'(?:netrc|pgpass|npmrc|pypirc)\b'
+)
+_DP_MACOS_PRIVATE_SYSTEM_PATH = r'/private/(?:etc|var|tmp|home)/'
+_DP_SYSTEM_CONFIG_PATH = (
+    rf'(?:/etc/|{_DP_MACOS_PRIVATE_SYSTEM_PATH})'
+)
+_DP_SENSITIVE_WRITE_TARGET = (
+    rf'(?:{_DP_SYSTEM_CONFIG_PATH}|/dev/sd|'
+    rf'{_DP_SSH_SENSITIVE_PATH}|'
+    rf'{_DP_HERMES_ENV_PATH}|'
+    rf'{_DP_HERMES_CONFIG_PATH}|'
+    rf'{_DP_SHELL_RC_FILES}|'
+    rf'{_DP_CREDENTIAL_FILES})'
+)
+_DP_USER_SENSITIVE_WRITE_TARGET = (
+    rf'(?:{_DP_SSH_SENSITIVE_PATH}|'
+    rf'{_DP_SHELL_RC_FILES}|'
+    rf'{_DP_CREDENTIAL_FILES})'
+)
+_DP_PROJECT_SENSITIVE_WRITE_TARGET = rf'(?:{_DP_PROJECT_ENV_PATH}|{_DP_PROJECT_CONFIG_PATH})'
+_DP_COMMAND_TAIL = r'(?:\s*(?:&&|\|\||;).*)?$'
+_DP_WRITE_TARGET_BOUNDARY = r'(?=[\s;&|<>"\']|$)'
+_DANGER_PATTERNS = [
+    (r'\brm\s+(-[^\s]*\s+)*/', "delete in root path"),
+    (r'\brm\s+-[^\s]*r', "recursive delete"),
+    (r'\brm\s+--recursive\b', "recursive delete (long flag)"),
+    (r'\bcmd(?:\.exe)?\s+/(?:c|k)\s+.*\b(?:del|erase|rd|rmdir)\b', "Windows cmd destructive delete"),
+    (r'\b(?:powershell|pwsh)(?:\.exe)?\b(?:\s+-\S+)*\s+(?:-(?:command|c)\s+)?["\']?(?:remove-item|rmdir|erase|del|rd|ri|rm)\b', "Windows PowerShell destructive delete"),
+    (r'\b(?:powershell|pwsh)(?:\.exe)?\b.*\s-(?:encodedcommand|enc|e)\b', "PowerShell encoded command execution"),
+    (r'\bchmod\s+(-[^\s]*\s+)*(777|666|o\+[rwx]*w|a\+[rwx]*w)\b', "world/other-writable permissions"),
+    (r'\bchmod\s+--recursive\b.*(777|666|o\+[rwx]*w|a\+[rwx]*w)', "recursive world/other-writable (long flag)"),
+    (r'\bchown\s+(-[^\s]*)?R\s+root', "recursive chown to root"),
+    (r'\bchown\s+--recur[a-z]*\b.*root', "recursive chown to root (long flag)"),
+    (r'\bmkfs\b', "format filesystem"),
+    (r'\bdd\s+.*if=', "disk copy"),
+    (r'>\s*/dev/sd', "write to block device"),
+    (r'\bDROP\s+(TABLE|DATABASE)\b', "SQL DROP"),
+    (r'\bDELETE\s+FROM\b(?![^\n]*\bWHERE\b)', "SQL DELETE without WHERE"),
+    (r'\bTRUNCATE\s+(TABLE)?\s*\w', "SQL TRUNCATE"),
+    (rf'>\s*{_DP_SYSTEM_CONFIG_PATH}', "overwrite system config"),
+    (r'\bsystemctl\s+(-[^\s]+\s+)*(stop|restart|disable|mask)\b', "stop/restart system service"),
+    (r'\bkill\s+-9\s+-1\b', "kill all processes"),
+    (r'\bpkill\s+-9\b', "force kill processes"),
+    (r'\bkillall\s+(-[^\s]*\s+)*-(9|KILL|SIGKILL)\b', "force kill processes (killall -KILL)"),
+    (r'\bkillall\s+(-[^\s]*\s+)*-s\s+(KILL|SIGKILL|9)\b', "force kill processes (killall -s KILL)"),
+    (r'\bkillall\s+(-[^\s]*\s+)*-r\b', "kill processes by regex (killall -r)"),
+    (r':\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:', "fork bomb"),
+    (r'\b(bash|sh|zsh|ksh)\s+-[^\s]*c(\s+|$)', "shell command via -c/-lc flag"),
+    (r'\b(python[23]?|perl|ruby|node)\s+-[ec]\s+', "script execution via -e/-c flag"),
+    (r'\b(curl|wget)\b.*\|\s*(?:[/\w]*/)?(?:ba)?sh(?:\s|$|-c)', "pipe remote content to shell"),
+    (r'\b(bash|sh|zsh|ksh)\s+<\s*<?\s*\(\s*(curl|wget)\b', "execute remote script via process substitution"),
+    (r'(?:\beval\b|\bsource\b|\.)\s*(?:\$\(\s*|`\s*)(?:curl|wget)\b', "execute remote content via command substitution"),
+    (r'\b(base64|base32|base16)\s+(?:-[dD]|--decode)\b.*\|\s*\b(bash|sh|zsh|ksh|dash)\b',
+     "pipe decoded content to shell (possible command obfuscation)"),
+    (r'\bxxd\s+-r\b.*\|\s*\b(bash|sh|zsh|ksh|dash)\b',
+     "pipe xxd-decoded content to shell (possible command obfuscation)"),
+    (r'\becho\b[^|]*\|\s*\btr\b[^|]*\|\s*\b(bash|sh|zsh|ksh|dash)\b',
+     "pipe tr-transformed output to shell (possible command obfuscation)"),
+    (r'\bopenssl\b.*\b(?:base64|enc)\b[^|]*\s+-[dD]\b[^|]*\|\s*\b(bash|sh|zsh|ksh|dash)\b',
+     "pipe openssl-decoded content to shell (possible command obfuscation)"),
+    (rf'\btee\b.*["\']?{_DP_SENSITIVE_WRITE_TARGET}', "overwrite system file via tee"),
+    (rf'>>?\s*["\']?{_DP_SENSITIVE_WRITE_TARGET}', "overwrite system file via redirection"),
+    (rf'\btee\b.*["\']?{_DP_PROJECT_SENSITIVE_WRITE_TARGET}["\']?{_DP_WRITE_TARGET_BOUNDARY}', "overwrite project env/config via tee"),
+    (rf'>>?\s*["\']?{_DP_PROJECT_SENSITIVE_WRITE_TARGET}["\']?{_DP_WRITE_TARGET_BOUNDARY}', "overwrite project env/config via redirection"),
+    (r'\bxargs\s+.*\brm\b', "xargs with rm"),
+    (r'\bfind\b.*-exec(?:dir)?\s+(/\S*/)?rm\b', "find -exec/-execdir rm"),
+    (r'\bfind\b.*-delete\b', "find -delete"),
+    (r'\bhermes\s+(?:-{1,2}\S+(?:\s+\S+)?\s+)*gateway\s+(stop|restart)\b', "stop/restart hermes gateway (kills running agents)"),
+    (r'\bhermes\s+update\b', "hermes update (restarts gateway, kills running agents)"),
+    (r'\bdocker\s+compose\s+(restart|stop|kill|down)\b', "docker compose restart/stop/kill/down (container lifecycle)"),
+    (r'\bdocker\s+(restart|stop|kill)\b', "docker restart/stop/kill (container lifecycle)"),
+    (r'gateway\s+run\b.*(&\s*$|&\s*;|\bdisown\b|\bsetsid\b)', "start gateway outside systemd (use 'systemctl --user restart hermes-gateway')"),
+    (r'\bnohup\b.*gateway\s+run\b', "start gateway outside systemd (use 'systemctl --user restart hermes-gateway')"),
+    (r'\b(pkill|killall)\b.*\b(hermes|gateway|cli\.py)\b', "kill hermes/gateway process (self-termination)"),
+    (r'\bkill\b.*\$\(\s*(pgrep|pidof)\b', "kill process via pgrep/pidof expansion (self-termination)"),
+    (r'\bkill\b.*`\s*(pgrep|pidof)\b', "kill process via backtick pgrep/pidof expansion (self-termination)"),
+    (r'\blaunchctl\s+(stop|kickstart|bootout|unload|kill|disable|remove)\b.*\b(hermes|ai\.hermes)\b', "stop/restart hermes launchd service (kills running agents)"),
+    (rf'\b(cp|mv|install)\b.*\s{_DP_SYSTEM_CONFIG_PATH}', "copy/move file into system config path"),
+    (rf'\b(cp|mv|install)\b.*\s["\']?{_DP_PROJECT_SENSITIVE_WRITE_TARGET}["\']?{_DP_COMMAND_TAIL}', "overwrite project env/config file"),
+    (rf'\b(cp|mv|install)\b.*\s["\']?{_DP_SENSITIVE_WRITE_TARGET}[^\s"\']*["\']?{_DP_COMMAND_TAIL}', "copy/move file into sensitive credential/SSH/shell-rc path"),
+    (rf'\bsed\s+-[^\s]*i.*(?:{_DP_USER_SENSITIVE_WRITE_TARGET})[^\s"\']*', "in-place edit of sensitive credential/SSH/shell-rc path"),
+    (rf'\bsed\s+--in-place\b.*(?:{_DP_USER_SENSITIVE_WRITE_TARGET})[^\s"\']*', "in-place edit of sensitive credential/SSH/shell-rc path (long flag)"),
+    (rf'\b(?:perl|ruby)\b.*(?:^|\s)-[^\s]*i\b.*(?:{_DP_USER_SENSITIVE_WRITE_TARGET})[^\s"\']*', "in-place edit of sensitive credential/SSH/shell-rc path (perl/ruby)"),
+    (rf'\bsed\s+-[^\s]*i.*\s{_DP_SYSTEM_CONFIG_PATH}', "in-place edit of system config"),
+    (rf'\bsed\s+--in-place\b.*\s{_DP_SYSTEM_CONFIG_PATH}', "in-place edit of system config (long flag)"),
+    (rf'\bsed\s+-[^\s]*i.*(?:{_DP_HERMES_CONFIG_PATH}|{_DP_HERMES_ENV_PATH})', "in-place edit of Hermes config/env"),
+    (rf'\bsed\s+--in-place\b.*(?:{_DP_HERMES_CONFIG_PATH}|{_DP_HERMES_ENV_PATH})', "in-place edit of Hermes config/env (long flag)"),
+    (rf'\b(?:perl|ruby)\b.*(?:^|\s)-[^\s]*i\b.*(?:{_DP_HERMES_CONFIG_PATH}|{_DP_HERMES_ENV_PATH})', "in-place edit of Hermes config/env (perl/ruby)"),
+    (r'\b(python[23]?|perl|ruby|node)\s+<<', "script execution via heredoc"),
+    (r'\b(bash|sh|zsh|ksh)\s+<<', "shell execution via heredoc"),
+    (r'\bgit\s+reset\s+--h(?:a(?:r(?:d)?)?)?\b', "git reset --hard (destroys uncommitted changes)"),
+    (r'\bgit\s+push\b.*--forc[a-z]*\b', "git force push (rewrites remote history)"),
+    (r'\bgit\s+push\b.*-f\b', "git force push short flag (rewrites remote history)"),
+    (r'\bgit\s+clean\s+-[^\s]*f', "git clean with force (deletes untracked files)"),
+    (r'\bgit\s+branch\s+-D\b', "git branch force delete"),
+    (r'\bgit\s+branch\b[^;|&\n]*?(?:-d\b|--delete\b)[^;|&\n]*?(?:-f\b|--force\b)', "git branch force delete (long flags)"),
+    (r'\bgit\s+branch\b[^;|&\n]*?(?:-f\b|--force\b)[^;|&\n]*?(?:-d\b|--delete\b)', "git branch force delete (long flags, force-first)"),
+    (r'\bchmod\s+\+x\b.*[;&|]+\s*\./', "chmod +x followed by immediate execution"),
+    (r'\bsudo\b[^;|&\n]*?\s+(?:-s\b|--st[a-z]*\b|-a\b|--a[a-z]*\b)',
+     "sudo with privilege flag (stdin/askpass/shell/list)"),
+    (r'\bsudo\b[^;|&\n]*?\s+-[a-z]*[sa][a-z]*\b',
+     "sudo with combined-flag privilege escalation"),
+]
+
+_DP_RE_FLAGS = re.IGNORECASE | re.DOTALL
+# Two of upstream's fragments are AMBIGUOUS: a run of `.x` after `.env`, or of
+# `--flag` after `hermes`, can be split in exponentially many ways, so a
+# 90-character command (`hermes --a --a … x`, `> .env.a.a.a…/`) kept the regex
+# engine busy for minutes to hours — with the GIL held, i.e. the whole
+# dashboard frozen — and decide() is reachable from GET /api/permissions/test.
+# Each is compiled as an equivalent UNAMBIGUOUS form (the same language:
+# t_e03_scanner_evasion.py compares them exhaustively), so the table above
+# stays a verbatim copy of upstream's.  What is left is polynomial, and
+# SCAN_MAX bounds it.  A new `(…)*` / `(…)+` group in the table must be audited
+# the same way (the same test lists the audited ones).
+_DP_LINEAR = (
+    # `.` is itself in the class, so (\.C+)* == (\.C+)?
+    (r'(?:\.[^/\s"\'`]+)*', r'(?:\.[^/\s"\'`]+)?'),
+    # flag tokens, each optionally followed by one value token: a value that
+    # is itself a flag is read as the next flag (the only reading kept)
+    (r'(?:-{1,2}\S+(?:\s+\S+)?\s+)*', r'(?:-\S+\s+(?:(?:[^-\s]\S*|-)\s+)?)*'),
+)
+
+
+def _dp_linear(rx):
+    for _amb, _lin in _DP_LINEAR:
+        rx = rx.replace(_amb, _lin)
+    return rx
+
+
+_DANGER_COMPILED = [(re.compile(_dp_linear(_rx), _DP_RE_FLAGS), _desc)
+                    for _rx, _desc in _DANGER_PATTERNS]
+
+# Shell control operators and substitutions.  Any of them means the text can
+# run more than one command, which a single-pattern verdict has not judged, so
+# AUTO becomes ASK.  Deliberately NOT quote-aware (an operator inside quotes
+# also asks) — when unsure, ask.  `&` covers `&&` and `2>&1`, `|` covers `||`,
+# `<<` every here-doc / here-string.
+_SHELL_OP_RE = re.compile(r"[;&|`\r\n]|\$\(|<\(|>\(|<<")
+# Serve REDACTS the command before it sends it (agent/redact.py: "***",
+# "head...tail", "[REDACTED PRIVATE KEY]", "«redacted:…»"), and a redacted span
+# can hide an operator and a second command (a PEM-shaped span swallows
+# everything up to its END line).  A command carrying any of these marks was
+# not fully seen, so AUTO becomes ASK.
+_REDACT_MARK_RE = re.compile(r"\*\*\*|\.\.\.|\u2026|\u00abredacted|\[REDACTED", re.I)
+# Longest command the scanner judges; anything longer is not judged, so AUTO
+# becomes ASK.  Bounds the regex work on the approval path: several of
+# upstream's patterns are cubic (`perl -i perl -i …`, `tee tee … a/a/…`), and
+# the regex engine holds the GIL, so the whole dashboard waits.  Measured worst
+# cases on an M5 Max: 512 chars 0.07 s, 1 KB 0.45 s, 2 KB 3 s, 8 KB 40 s.
+SCAN_MAX = 512
+_DP_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?"
+                         r"|\x1b[@-Z\\-_]")
+# Upstream's home-prefix fold (tools/approval.py _home_prefix_fold_regex):
+# the home's components joined by ANY run of separators, with any leading run,
+# then the rest of the path token — `//Users/me/.ssh/x` and `/Users//me/.ssh/x`
+# are the same file to the shell and fold to `~/.ssh/x` like `/Users/me/.ssh/x`.
+_DP_PATH_TAIL = r"""(?P<tail>(?:[/\\][^/\\\s'"`;|&<>()]*)+)"""
+# any user's home, not only this one: more matches can only make it stricter
+_DP_HOME_RE = re.compile(r"""[/\\]+(?:Users|home)[/\\]+[^/\\\s'"`;|&<>()]+"""
+                         + _DP_PATH_TAIL, re.I)
+_DP_FOLD_RX = {}
+
+
+def _dp_fold_rx(path):
+    rx = _DP_FOLD_RX.get(path)
+    if rx is None:
+        comps = [c for c in re.split(r"[/\\]+", path) if c]
+        if len(comps) < 2:
+            rx = False                 # degenerate (/, "", /home) — never fold
+        else:
+            rx = re.compile(r"[/\\]*" + r"[/\\]+".join(re.escape(c) for c in comps)
+                            + _DP_PATH_TAIL)
+        if len(_DP_FOLD_RX) < 64:
+            _DP_FOLD_RX[path] = rx
+    return rx
+
+
+def _dp_fold_tail(to):
+    return lambda m: to + m.group("tail").replace("\\", "/")
+
+
+def _dp_fold(cmd, paths, to):
+    seen = []
+    for path in paths:
+        if not path or not isinstance(path, str):
+            continue
+        for cand in (path, os.path.realpath(path)):
+            if cand not in seen:
+                seen.append(cand)
+    for path in sorted(seen, key=len, reverse=True):
+        rx = _dp_fold_rx(path)
+        if rx:
+            cmd = rx.sub(_dp_fold_tail(to), cmd)
+    return cmd
+
+
+def _dp_normalize(cmd, any_home=False):
+    """A stdlib port of upstream _normalize_command_for_detection: ANSI and
+    NUL stripped, NFKC, line continuations joined, this user's home prefixes
+    folded to ~/, backslash escapes and empty quotes removed, $IFS expanded
+    to a space.  `any_home` also folds /Users/<name>/ and /home/<name>/ for
+    any name — a SECOND variant for the scanner, never a replacement: a fold
+    rewrites the text, so it can remove a match as well as add one."""
+    cmd = _DP_ANSI_RE.sub("", cmd).replace("\x00", "")
+    cmd = unicodedata.normalize("NFKC", cmd)
+    cmd = re.sub(r"\\\r?\n", "", cmd)
+    cmd = _dp_fold(cmd, (os.environ.get("HERMES_HOME"), HERMES_DIR), "~/.hermes")
+    cmd = _dp_fold(cmd, (HOME, os.environ.get("HOME")), "~")
+    if any_home:
+        cmd = _DP_HOME_RE.sub(_dp_fold_tail("~"), cmd)
+    cmd = re.sub(r"\\([^\n])", r"\1", cmd)
+    cmd = re.sub(r"''|\"\"", "", cmd)
+    cmd = re.sub(r"\$\{IFS\b[^}]*\}|\$IFS\b", " ", cmd, flags=re.I)
+    return cmd
+
+
+# Upstream matches its patterns over more than the normalized text: it marks a
+# new command start at every `(` and `{`, strips full ECMA-48 control
+# sequences, and DE-OBFUSCATES each word it takes for a command name — "rm",
+# r'm', ${x:-rm} (tools/approval.py _command_detection_variants).  This scanner
+# does none of that, so a command written that way has not been fully judged
+# and AUTO becomes ASK:  `"cp" k ~/.ssh/authorized_keys "pkill -9"` reached
+# serve's detector as a force-kill and matched no credential pattern here.
+_DP_OPAQUE_RE = re.compile(r"[(){}\x00-\x08\x0b-\x1f\x7f-\x9f]")
+_DP_WORD_SYNTAX_RE = re.compile(r"""['"`$\\]""")
+_DP_WRAPPERS = frozenset(("sudo", "env", "exec", "nohup", "setsid", "time",
+                          "command", "builtin"))
+_DP_OPTS_WITH_ARG = frozenset(("-c", "--close-from", "-g", "--group", "-h", "--host",
+                               "-p", "--prompt", "-u", "--user"))
+_DP_ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
+
+
+def _dp_word_obscured(norm):
+    """True when a word upstream reads as a command name — the first word, and
+    each word after sudo / env / exec / nohup / setsid / time / command /
+    builtin, their options and VAR=value prefixes (upstream
+    _iter_shell_command_word_spans, at most 12 words) — carries a quote, a
+    backslash or an expansion."""
+    n = 0
+    skip_opts = skip_arg = False
+    for word in norm.split():
+        if n >= 12:
+            break
+        if _DP_WORD_SYNTAX_RE.search(word):
+            return True
+        n += 1
+        low = word.lower()
+        if skip_arg:
+            skip_arg = False
+            continue
+        if skip_opts and low.startswith("-"):
+            skip_arg = low in _DP_OPTS_WITH_ARG
+            continue
+        if low in _DP_WRAPPERS:
+            skip_opts = low in ("sudo", "env")
+            continue
+        if _DP_ASSIGN_RE.fullmatch(word):
+            skip_opts = False
+            continue
+        break
+    return False
+
+
+def _scan_command(cmd):
+    """Every _DANGER_PATTERNS key the command matches, in table order, over
+    the raw text and its normalized forms (a union: never fewer keys)."""
+    variants = [cmd.lower()]
+    for any_home in (False, True):
+        norm = _dp_normalize(cmd, any_home).lower()
+        if norm not in variants:
+            variants.append(norm)
+    out = []
+    for rx, desc in _DANGER_COMPILED:
+        if desc not in out and any(rx.search(v) for v in variants):
+            out.append(desc)
+    return out
+
+# --------------------------------------------------------------------------
 # module state
 # --------------------------------------------------------------------------
 _lock = threading.RLock()          # re-entrant: _load/_save may nest under it
-_STATE = {"mtime": None, "policy": {}, "trusted": True, "error": None, "good": {}}
+_STATE = {"mtime": None, "policy": {}, "trusted": True, "error": None, "good": {},
+          "sha": ""}       # sha: sha256 of the bytes `policy` came from (E115)
 
 
 # --------------------------------------------------------------------------
@@ -307,6 +649,11 @@ def _heuristic(key):
 def _class_of(key):
     if key.startswith("shortcuts-run:"):   # dashboard action bus (aux_shortcuts)
         return "shortcuts-run"
+    # the GitHub change pipeline (aux_ghchanges): BEFORE the heuristic, or a
+    # repository named hermes-… or …delete… would be read as hermes-self or
+    # destructive-delete
+    if key.startswith("github-write:"):
+        return "github-write"
     return PATTERN_CLASS.get(key) or _heuristic(key)
 
 
@@ -373,7 +720,7 @@ def _load():
             st = os.stat(PERM_FILE)
         except OSError:
             # File absent: safe defaults, and there is nothing to distrust.
-            _STATE.update(mtime=None, policy={}, trusted=True, error=None)
+            _STATE.update(mtime=None, policy={}, trusted=True, error=None, sha="")
             return ({}, True, None)
         mtime = st.st_mtime
         if mtime == _STATE["mtime"]:
@@ -384,7 +731,7 @@ def _load():
         except OSError as e:
             policy = _STATE.get("good") or {}
             _STATE.update(mtime=mtime, policy=policy, trusted=False,
-                          error="unreadable: " + str(e))
+                          error="unreadable: " + str(e), sha=None)
             return (policy, False, _STATE["error"])
         sha = hashlib.sha256(raw).hexdigest()
         trusted = bool(_read_sidecar()) and (sha == _read_sidecar())
@@ -397,11 +744,61 @@ def _load():
             # a malformed write; mark untrusted so every AUTO clamps to ASK.
             policy = _STATE.get("good") or {}
             _STATE.update(mtime=mtime, policy=policy, trusted=False,
-                          error="malformed: " + str(e))
+                          error="malformed: " + str(e), sha=sha)
             return (policy, False, _STATE["error"])
         _STATE.update(mtime=mtime, policy=parsed, trusted=trusted,
-                      error=None, good=parsed)
+                      error=None, good=parsed, sha=sha)
+        if trusted:
+            _ensure_signed_copy(raw, sha)
         return (parsed, trusted, None)
+
+
+def _write_signed(raw):
+    """Sign `raw` (bytes of the policy file): sidecar hash + signed copy."""
+    _atomic_write(SIDECAR, (hashlib.sha256(raw).hexdigest() + "\n").encode(), 0o600)
+    try:
+        _atomic_write(SIGNED_COPY, raw, 0o600)
+    except OSError:
+        pass   # the copy only feeds the re-trust review; the hash is the trust
+
+
+def _ensure_signed_copy(raw, sha):
+    """A policy signed before SIGNED_COPY existed has no copy to diff against;
+    the first trusted load writes one, so the FIRST out-of-band edit after an
+    upgrade is already reviewable as a diff.  Best-effort, never raises."""
+    try:
+        with open(SIGNED_COPY, "rb") as f:
+            if hashlib.sha256(f.read()).hexdigest() == sha:
+                return
+    except OSError:
+        pass
+    try:
+        _ensure_dirs()
+        _atomic_write(SIGNED_COPY, raw, 0o600)
+    except Exception:
+        pass
+
+
+def _signed_view():
+    """The last signed policy as {classes: {cid: tier}, patterns: {key: tier}}
+    — class tiers resolved like the live rows (shipped default when unset) —
+    or None when there is no copy, or it is not what the sidecar signed."""
+    try:
+        with open(SIGNED_COPY, "rb") as f:
+            raw = f.read()
+        side = _read_sidecar()
+        if not side or hashlib.sha256(raw).hexdigest() != side:
+            return None
+        pol = json.loads(raw.decode("utf-8"))
+        if not isinstance(pol, dict):
+            return None
+    except Exception:
+        return None
+    pats = pol.get("patterns")
+    pats = pats if isinstance(pats, dict) else {}
+    return {"classes": {cid: _class_tier(pol, cid) for cid in CLASS_ORDER},
+            "patterns": {k: v for k, v in pats.items()
+                         if isinstance(k, str) and k and v in TIERS}}
 
 
 def _save(policy):
@@ -411,7 +808,7 @@ def _save(policy):
         norm = _normalize(policy)
         raw = (json.dumps(norm, indent=2, sort_keys=True) + "\n").encode("utf-8")
         _atomic_write(PERM_FILE, raw, 0o600)
-        _atomic_write(SIDECAR, (hashlib.sha256(raw).hexdigest() + "\n").encode(), 0o600)
+        _write_signed(raw)
         _STATE["mtime"] = None        # force a fresh read on next _load()
         return norm
 
@@ -435,6 +832,24 @@ def _class_tier(policy, cid):
         if v in TIERS:
             return v
     return _shipped_tier(cid)
+
+
+REASON_KEY_MAX = 96      # the longest upstream description is 77 characters
+
+
+def _reason_key(key):
+    """A pattern key as decide()'s `reason` shows it: one line, printable,
+    at most REASON_KEY_MAX characters. A key is not always the dashboard's
+    own word — the approval-gate plugin builds `computer_use:<action>` from
+    the AGENT's tool call — and the approval cards print the reason as the
+    Trust policy's voice, so the key part is bounded and the policy's own
+    words ("… is set to Ask") always follow it. The verdict's `pattern_key`
+    stays the full key."""
+    s = " ".join(str(key).split())
+    s = "".join(ch if ch.isprintable() else "\ufffd" for ch in s)
+    if len(s) > REASON_KEY_MAX:
+        s = s[:REASON_KEY_MAX - 1] + "\u2026"
+    return s
 
 
 def decide(payload):
@@ -461,6 +876,32 @@ def decide(payload):
                     "pattern_key": "", "clamped": False,
                     "reason": "no pattern key → unknown is set to Ask"}
 
+        # E03: serve sends only the FIRST pattern the command matched, so the
+        # command is judged here against every pattern this module knows and
+        # each extra match joins the most-restrictive resolution below.  What
+        # cannot be judged — no command text, a text too long to scan, more
+        # than one command — may still be Ask or Never, never Auto (`unjudged`
+        # is applied after the resolution).
+        cmd = payload.get("command")
+        cmd = cmd if isinstance(cmd, str) else ""
+        unjudged = ""
+        if not cmd.strip():
+            unjudged = "no command text to check — asking"
+        elif len(cmd) > SCAN_MAX:
+            unjudged = "command too long to check — asking"
+        else:
+            for k in _scan_command(cmd):
+                if k not in keys:
+                    keys.append(k)
+            norm = _dp_normalize(cmd)
+            if _SHELL_OP_RE.search(cmd) or _SHELL_OP_RE.search(norm):
+                unjudged = "more than one command — asking"
+            elif _REDACT_MARK_RE.search(cmd):
+                unjudged = "part of the command was redacted — asking"
+            elif (_DP_OPAQUE_RE.search(cmd) or _DP_OPAQUE_RE.search(norm)
+                  or _dp_word_obscured(norm)):
+                unjudged = "it is written in a way that cannot be fully checked — asking"
+
         resolved = []   # (rank, tier, cls, key, floor_clamped)
         for key in keys:
             cls = _class_of(key)
@@ -482,19 +923,28 @@ def decide(payload):
             tier = "ask"
             trust_clamped = True
 
+        scope_clamped = False
+        if unjudged and tier == "auto":
+            tier = "ask"
+            scope_clamped = True
+
         classes = []
         for r in resolved:
             if r[2] not in classes:
                 classes.append(r[2])
 
-        reason = "%s → %s is set to %s" % (key, cls, tier.capitalize())
+        shown = _reason_key(key)
+        reason = "%s → %s is set to %s" % (shown, cls, tier.capitalize())
         if trust_clamped:
             reason += " — auto suspended (policy changed outside the dashboard)"
+        elif scope_clamped:
+            reason = "%s → %s is set to Auto, but %s" % (shown, cls, unjudged)
         elif floor_clamped:
             reason += " (safety floor)"
 
         return {"tier": tier, "class": cls, "classes": classes,
-                "pattern_key": key, "clamped": bool(floor_clamped or trust_clamped),
+                "pattern_key": key,
+                "clamped": bool(floor_clamped or trust_clamped or scope_clamped),
                 "reason": reason}
     except Exception as e:
         # Absolute fail-safe: anything unexpected still asks, never auto.
@@ -506,16 +956,185 @@ def decide(payload):
 # --------------------------------------------------------------------------
 # audit log — append-only JSONL, 1 MB single-generation rotation
 # --------------------------------------------------------------------------
+# The audit log keeps the command text of every approval, and an approval is
+# exactly where a command carrying a credential shows up (an `export
+# OPENAI_API_KEY=…`, a curl with a Bearer header).  So every command is scrubbed
+# before it is stored (R2-15), with the same scrubber the chat export and the
+# MCP server use — COPIED VERBATIM from aux_convos.py, not imported: this is a
+# real sibling module that hermes_rpc imports, and aux_convos is exec'd into
+# server.py's globals.  This is a third copy of the block (its own header still
+# says "twice"); tools/tests/unit/t_r2_15_audit_log.py compares these bytes
+# with aux_convos.py's, so change all three or none.  The log runs its value
+# rules through _audit_scrub() below, which leaves out the ~/.hermes path rule.
+
+# ===== BEGIN MIRRORED SECRET BLOCK — KEEP BYTE-IDENTICAL (1.1.5, B21) =====
+# Everything from this line to the END marker is the WHOLE scrubber, and it
+# exists twice: dashboard/aux_convos.py (the export; aux_trace.py, doctor.py
+# and aux_memlayer.py resolve it from there by name) and dashboard/hermes_mcp.py
+# (every MCP result).  Copied, not imported — the MCP server must not pull
+# server.py's globals into its process.  Change one, change the other; the
+# unit tier compares the bytes between the two markers.
+#
+# LABELED secrets: a key that names a credential, `:` or `=`, then the value.
+# B21 (2026-10-08 audit) widened it four ways, each for a reproduced leak:
+#   * a JSON-quoted key, `"api_key": "sk-…"` — the closing quote sat between
+#     the key and the colon, so nothing matched;
+#   * a name that only ENDS in a credential word — OPENAI_API_KEY=,
+#     GITHUB_TOKEN=, client_secret:, authToken:, aws_secret_access_key = .
+#     The keyword is deliberately NOT anchored at a word start (an unanchored
+#     fixed keyword also keeps this linear; a lazy identifier prefix in front
+#     would be quadratic on a long dotted run), while the \b AFTER it is what
+#     keeps max_tokens=4096 and prompt_tokens: 19127 out;
+#   * `Authorization: Basic …` and `Token …`, not only Bearer;
+#   * a value with punctuation in it — `hunter2!x` used to leak its tail.
+# The value must sit on the same line ([ \t], not \s) and cannot start with
+# `[`, so an already-redacted value is never matched twice.  Group 1 (key and
+# separator) is kept, so JSON stays JSON: `"password": "[redacted]"` — and so
+# does JSON quoted inside a string (`{\"api_key\": \"sk-…\"}`, the shape an
+# echoed tool call has): a quote may carry one backslash, and the value stops
+# at a backslash so the closing `\"` survives.
+_CV_SECRET_RE = re.compile(
+    r"((?:serve_sid|serve_key|session_token|token|api[_-]?key|apikey|"
+    r"secret|password|passwd|passphrase|passcode|authorization)"
+    r"(?:[_.-]?(?:access|key|secret|token|value|base)){0,3}\b"
+    r"(?:\\?[\"'])?[ \t]*[:=][ \t]*(?:\\?[\"'])?)"
+    r"(?:(?:Bearer|Basic|Token)[ \t]+)?"
+    r"([^\s\"'`,;(){}\[\]<>\\]{6,})", re.I)
+_CV_BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9_\-.=]{8,}", re.I)
+# PROSE: "my password is hunter22", "the API key was sk-abc123".  Narrower on
+# purpose — the value must carry a digit, or a symbol with more of the word
+# after it, so "the token is expired", "the secret is out" and "the API key
+# was invalid!" survive.  A passphrase of plain words is missed; a redactor that
+# ate ordinary sentences would get switched off.
+_CV_PROSE_SECRET_RE = re.compile(
+    r"(\b(?:password|passwd|passphrase|passcode|api[ _-]?key|secret[ _-]?key|"
+    r"(?:access|auth|bot|api)[ _-]?token|token|secret)"
+    r"[ \t]+(?:is|was)[ \t]*:?[ \t]+[\"'`]?)"
+    r"(?=[^\s\"'`,;(){}\[\]<>]*"
+    r"(?:[0-9]|[!@#$%^*~][^\s\"'`,;(){}\[\]<>]))"
+    r"([^\s\"'`,;(){}\[\]<>]{6,})", re.I)
+_CV_HERMES_PATH_RE = re.compile(
+    r"(?:~|/Users/[A-Za-z0-9._-]+|/home/[A-Za-z0-9._-]+)/\.hermes"
+    r"(?:/[^\s`'\"),;]*)?")
+
+# Raw, UNLABELED secrets.  The key=value rule above only fires when a label
+# ("token:", "api_key=") precedes the value and the Bearer rule only when the
+# scheme does — but an agent that echoes a bare `sk-ant-...`, a PEM block or a
+# Telegram bot token leaks exactly as hard with no label anywhere in sight.
+# Ordered most-specific-first where prefixes overlap (sk-ant- before sk-) so
+# the narrower shape wins the match, and PEM first because its body is base64
+# that a later pattern could nibble at.  Every entry is anchored on a fixed
+# vendor prefix (or a digits-colon shape) plus a minimum length, so ordinary
+# prose and a 40-char git sha — hex only, no prefix, no colon — cannot match.
+# That restraint is the point: a redactor that eats normal text gets switched
+# off, and a switched-off redactor protects nothing.
+_CV_RAW_SECRET_RES = (
+    # PEM private key — multiline; non-greedy so two keys are two matches
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?"
+               r"-----END [A-Z ]*PRIVATE KEY-----"),
+    # JWT: three base64url segments, the first being the `{"alg"...` header
+    re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+    re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}"),                  # Anthropic
+    re.compile(r"\bsk-[A-Za-z0-9_-]{20,}"),                      # OpenAI-style
+    re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}"),   # GitHub PAT
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{30,}"),               # GH fine-grained
+    re.compile(r"\bAKIA[0-9A-Z]{16}"),                           # AWS key id
+    re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{20,}"),               # Slack
+    re.compile(r"\bAIza[0-9A-Za-z_-]{30,}"),                     # Google API key
+    # E82 (2026-11-09 audit): the shapes this app itself handles that used to
+    # pass unlabeled — Google OAuth access/refresh tokens and client secret,
+    # Hugging Face, Stripe (secret + restricted, live + test), npm, GitLab.
+    re.compile(r"\bya29\.[A-Za-z0-9_-]{20,}"),                   # Google access
+    re.compile(r"\b1//0[A-Za-z0-9_-]{20,}"),                      # Google refresh
+    re.compile(r"\bGOCSPX-[A-Za-z0-9_-]{20,}"),                   # Google client
+    re.compile(r"\bhf_[A-Za-z0-9]{30,}"),                         # Hugging Face
+    re.compile(r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}"),        # Stripe
+    re.compile(r"\bnpm_[A-Za-z0-9]{30,}"),                        # npm
+    re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}"),                    # GitLab PAT
+    # a password in a web address, scheme://user:password@host — only the
+    # user:password part goes, so "postgres://[redacted]@db:5432" still says
+    # which database.  The lookbehind pins every match to just after "://",
+    # which keeps it linear; a "user@host" with no password is left alone.
+    re.compile(r"(?<=://)[^\s/:@\[\]]+:[^\s/@]+(?=@)"),
+    # Telegram bot token, <8-10 digit bot id>:<35 chars>.  Deliberately NO \b
+    # in front: the shape this Mac actually leaks is the send URL
+    # ".../bot<id>:<secret>/sendMessage", where "bot" runs straight into the
+    # digits and a word boundary would never match.
+    re.compile(r"[0-9]{8,10}:[A-Za-z0-9_-]{35}"),
+)
+
+
+def _cv_redact_raw(text):
+    """Replace secrets that arrive with no label in front of them.
+
+    Runs LAST, after the labeled and Bearer rules: those already collapsed the
+    values they own, so whatever still matches here genuinely had no label.
+    """
+    for _rx in _CV_RAW_SECRET_RES:
+        text = _rx.sub("[redacted]", text)
+    return text
+
+
+def _cv_redact(text):
+    """Path, key=value, Bearer, prose, then the unlabeled raw shapes."""
+    text = _CV_HERMES_PATH_RE.sub("[redacted path]", text)
+    # key=value FIRST: its value pattern swallows a "Bearer <tok>" whole, so
+    # "Authorization: Bearer hx_..." collapses to one "[redacted]" instead of
+    # the standalone rule leaving a bare "Bearer" for this one to redact again
+    text = _CV_SECRET_RE.sub(lambda m: m.group(1) + "[redacted]", text)
+    text = _CV_BEARER_RE.sub("Bearer [redacted]", text)
+    text = _CV_PROSE_SECRET_RE.sub(lambda m: m.group(1) + "[redacted]", text)
+    return _cv_redact_raw(text)          # unlabeled shapes last (1.1.5)
+# ===== END MIRRORED SECRET BLOCK ==========================================
+
+
+def _audit_scrub(text):
+    """_cv_redact minus its first rule, the ~/.hermes PATH rule.
+
+    That rule exists for an export that leaves the Mac; here it would turn
+    every hermes-self approval ("sed -i ... ~/.hermes/config.yaml") into an
+    unreadable "[redacted path]", and a path is not a secret.  Every VALUE
+    rule runs, in _cv_redact's own order: key=value, Bearer, prose, raw."""
+    text = _CV_SECRET_RE.sub(lambda m: m.group(1) + "[redacted]", text)
+    text = _CV_BEARER_RE.sub("Bearer [redacted]", text)
+    text = _CV_PROSE_SECRET_RE.sub(lambda m: m.group(1) + "[redacted]", text)
+    return _cv_redact_raw(text)
+
+
+_LOG_OLD_FIXED = [False]     # the .1 generation is re-chmodded once per process
+
+
 def _log_append(entry):
+    """Append one JSON line, mode 0600 (R2-15).
+
+    The log was opened with open(..., "a"), i.e. created at the default umask
+    (0644) although it holds command text.  It is now created 0600, an existing
+    live file is tightened on every append (fchmod, one syscall) and the .1
+    generation once per process and after each rotation — os.replace keeps the
+    mode of the file it moves, so a file rotated before this fix stays 0644
+    until something chmods it."""
     try:
         _ensure_dirs()
         line = json.dumps(entry, ensure_ascii=False) + "\n"
+        rotated = False
         try:
             if os.path.getsize(LOG_FILE) > LOG_MAX:
                 os.replace(LOG_FILE, LOG_FILE + ".1")
+                rotated = True
         except OSError:
             pass
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
+        if rotated or not _LOG_OLD_FIXED[0]:
+            _LOG_OLD_FIXED[0] = True
+            try:
+                os.chmod(LOG_FILE + ".1", 0o600)
+            except OSError:
+                pass
+        fd = os.open(LOG_FILE, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            try:
+                os.fchmod(fd, 0o600)
+            except OSError:
+                pass
             f.write(line)
     except Exception:
         pass   # audit must never break a turn
@@ -524,8 +1143,16 @@ def _log_append(entry):
 def audit(job, payload, verdict, action, choice=""):
     """Append one audit entry.  Best-effort; swallows all errors.
 
-    action in auto-approved | auto-denied | asked | user-approve | user-deny |
-    policy-error.  `job` may be the chat-job dict (has id/session) or a string."""
+    action in auto-approved | auto-denied | asked | user-approve | user-deny
+    (the policy and the owner's answers) | expired (serve had already dropped
+    the approval) | timeout (unanswered past its TTL, denied) | desync-denied
+    (denied because the queue fell out of step with serve) | respond-failed
+    (the answer could not be delivered) | stopped-denied (an Approve the
+    owner gave was not sent because they stopped the turn first; denied)
+    — the strings hermes_rpc.py writes;
+    aux_trust.js ACT_BADGE names each one, aux_metrics.py counts them. Older
+    logs may also carry policy-error. `_log_policy_change` writes
+    policy-change. `job` may be the chat-job dict (has id/session) or a string."""
     try:
         if isinstance(job, dict):
             jid = job.get("id") or job.get("job") or ""
@@ -541,7 +1168,13 @@ def audit(job, payload, verdict, action, choice=""):
             ks = payload.get("pattern_keys")
             if isinstance(ks, list) and ks and isinstance(ks[0], str):
                 pk = ks[0]
-        command = str(payload.get("command") or "")[:CMD_TRUNC]
+        # scrub BEFORE the cut: a secret straddling CMD_TRUNC would otherwise
+        # be shortened below the scrubber's minimum length and kept (R2-15).
+        # Only a bounded window is scrubbed, though: this runs on the approval
+        # path, the command can be a whole script, and the PEM rule is
+        # quadratic in BEGIN lines with no END (192 KB of them took ~3 s).
+        command = str(payload.get("command") or "")[:CMD_TRUNC + CMD_SCRUB_SLACK]
+        command = _audit_scrub(command)[:CMD_TRUNC]
         entry = {"ts": round(time.time(), 3), "job": jid, "session": sess,
                  "pattern_key": pk, "class": verdict.get("class", ""),
                  "tier": verdict.get("tier", ""), "action": action,
@@ -605,8 +1238,10 @@ def _recent_stats(entries):
 # HTTP-facing surface (called by aux_permissions.py handlers)
 # --------------------------------------------------------------------------
 def permissions_payload():
-    """GET /api/permissions — 18 classes ordered critical->low + recent audit."""
-    policy, trusted, error = _load()
+    """GET /api/permissions — 19 classes ordered critical->low + recent audit."""
+    with _lock:
+        policy, trusted, error = _load()
+        sha = _STATE.get("sha")        # the bytes this payload was built from (E115)
     entries = _tail_entries(500)
     stats = _recent_stats(entries)
     classes = []
@@ -626,10 +1261,57 @@ def permissions_payload():
     recent = list(reversed(entries[-20:]))
     out = {"ok": True, "trusted": bool(trusted), "path": PERM_FILE,
            "exists": os.path.exists(PERM_FILE), "classes": classes,
-           "patterns": patterns, "recent": recent}
+           "patterns": patterns, "pattern_overrides": _pattern_overrides(policy, patterns, trusted),
+           "recent": recent,
+           # E115: Review & re-trust (and any save over an untrusted policy)
+           # sends this back; the write is refused if the file changed since
+           "sha": sha if isinstance(sha, str) else None}
     if error:
         out["policy_error"] = error
+    if not trusted:
+        signed = _signed_view()
+        if signed is not None:
+            out["signed"] = signed    # aux_trust.js diffs the review against it
     return out
+
+
+def _pattern_overrides(policy, patterns, trusted):
+    """Display rows for every pattern-level tier (C126) — read-only.
+
+    decide() resolves a pattern's own tier BEFORE its class tier, so an entry
+    like {"git force push (rewrites remote history)": "auto"} auto-approves a
+    force-push while the class row still reads Ask. The panel used to render
+    `patterns` nowhere; these rows say what each entry is, which class it
+    overrides and what decide() will actually do with it (`effective`, after
+    the safety floor and the untrusted-policy clamp, the same two clamps
+    decide() applies). Autos sort first."""
+    rows = []
+    for key, tier in patterns.items():
+        if not isinstance(key, str) or not key or tier not in TIERS:
+            continue                    # decide() ignores these too
+        cid = _class_of(key.strip())
+        eff, why, bad = tier, "", ""
+        if key != key.strip():
+            # A hand-edited key with stray spaces: no approval ever carries
+            # that key, so decide() never matches it and its class tier is
+            # what actually runs.  Shown (so Clear can remove it), never
+            # counted as an override (C126).
+            eff, bad = _class_tier(policy, cid), "whitespace"
+            why = "never matches: the key has spaces at its start or end"
+        elif tier == "auto" and _floor(cid) == "ask":
+            eff, why = "ask", "safety floor"
+        elif tier == "auto" and not trusted:
+            eff, why = "ask", "auto suspended until the policy is re-trusted"
+        row = {"pattern": key, "tier": tier, "class": cid,
+               "class_label": CLASS_META.get(cid, {}).get("label", cid),
+               "class_tier": _class_tier(policy, cid), "effective": eff, "clamped_by": why,
+               "known": key in PATTERN_CLASS}
+        if bad:
+            row["invalid"] = bad
+        rows.append(row)
+    order = {c: i for i, c in enumerate(CLASS_ORDER)}
+    rows.sort(key=lambda r: (_RANK[r["tier"]], order.get(r["class"], 99), r["pattern"]))
+    return rows
 
 
 def permissions_log(n=50):
@@ -655,6 +1337,33 @@ def _floor_error(cid, tier):
             "_status": 403}
 
 
+def _file_sha():
+    """sha256 of permissions.json now; "" when absent, None when unreadable."""
+    try:
+        with open(PERM_FILE, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except FileNotFoundError:
+        return ""
+    except OSError:
+        return None
+
+
+def _stale_error(body):
+    """E115: the request must carry the sha of the file the owner reviewed
+    (GET /api/permissions `sha`) and it must still be the file on disk.
+    Returns None when it is, else the error dict.  Fail closed: no sha, a
+    non-string, or an unreadable file is refused."""
+    given = body.get("sha") if isinstance(body, dict) else None
+    if not isinstance(given, str):
+        return {"ok": False, "error": "sha of the reviewed policy is required",
+                "_status": 400}
+    cur = _file_sha()
+    if cur is None or given != cur:
+        return {"ok": False, "stale": True, "_status": 409,
+                "error": "the policy file changed since you reviewed it — review it again"}
+    return None
+
+
 def permissions_set(body):
     """POST /api/permissions — set_class/set_pattern/clear_pattern/reset/retrust.
 
@@ -676,6 +1385,10 @@ def permissions_set(body):
                 if tier == "auto" and _floor(cid) == "ask":
                     return _floor_error(cid, tier)
                 policy, _t, _e = _load()
+                if not _t:                      # this save re-signs the file
+                    err = _stale_error(body)
+                    if err:
+                        return err
                 classes = dict(policy.get("classes") or {})
                 classes[cid] = tier
                 policy = dict(policy)
@@ -696,6 +1409,10 @@ def permissions_set(body):
                 if tier == "auto" and _floor(cid) == "ask":
                     return _floor_error(cid, tier)
                 policy, _t, _e = _load()
+                if not _t:                      # this save re-signs the file
+                    err = _stale_error(body)
+                    if err:
+                        return err
                 pats = dict(policy.get("patterns") or {})
                 pats[pat] = tier
                 policy = dict(policy)
@@ -706,11 +1423,27 @@ def permissions_set(body):
 
             if op == "clear_pattern":
                 pat = body.get("pattern")
-                if not isinstance(pat, str) or not pat.strip():
+                if not isinstance(pat, str) or not pat:
                     return {"ok": False, "error": "empty pattern", "_status": 400}
-                pat = pat.strip()
                 policy, _t, _e = _load()
+                if not _t:                      # this save re-signs the file
+                    err = _stale_error(body)
+                    if err:
+                        return err
                 pats = dict(policy.get("patterns") or {})
+                # The EXACT stored key first: the panel sends the key as
+                # stored, and a hand-edited " key " used to be stripped here,
+                # pop nothing and save anyway (C126).  A stripped match is
+                # kept for API callers that send a padded copy of a clean key.
+                # A key of spaces only is listed (and offered a Clear) too, so
+                # it is only "empty" when no such key is stored.
+                if pat not in pats:
+                    pat = pat.strip()
+                    if not pat:
+                        return {"ok": False, "error": "empty pattern", "_status": 400}
+                if pat not in pats:
+                    return {"ok": False, "error": "no such pattern override",
+                            "_status": 404}
                 pats.pop(pat, None)
                 policy = dict(policy)
                 policy["patterns"] = pats
@@ -724,21 +1457,142 @@ def permissions_set(body):
                 return {"ok": True, "classes": permissions_payload()["classes"]}
 
             if op == "retrust":
-                # Rewrite the sidecar for the CURRENT file content (if any).
+                # E115: sign only the bytes the owner reviewed — the request
+                # carries their sha (GET `sha`); a file that changed since is
+                # refused (409) and nothing is signed.
+                given = body.get("sha")
+                if not isinstance(given, str):
+                    return {"ok": False, "error": "sha of the reviewed policy is required",
+                            "_status": 400}
                 try:
                     with open(PERM_FILE, "rb") as f:
                         raw = f.read()
+                except FileNotFoundError:
+                    raw = None    # no policy file yet -> nothing to trust; defaults are safe
+                except OSError as e:
+                    return {"ok": False, "error": "policy unreadable: %s" % e, "_status": 500}
+                cur = "" if raw is None else hashlib.sha256(raw).hexdigest()
+                if given != cur:
+                    return {"ok": False, "stale": True, "_status": 409,
+                            "error": "the policy file changed since you reviewed it — review it again"}
+                if raw is not None:
                     _ensure_dirs()
-                    _atomic_write(SIDECAR, (hashlib.sha256(raw).hexdigest() + "\n").encode(), 0o600)
+                    _write_signed(raw)
                     _STATE["mtime"] = None
-                except OSError:
-                    pass   # no policy file yet -> nothing to trust; defaults are safe
                 _log_policy_change("retrust", {})
                 return {"ok": True, "trusted": True}
 
             return {"ok": False, "error": "unknown op", "_status": 400}
     except Exception as e:
         return {"ok": False, "error": "internal: " + str(e), "_status": 500}
+
+
+# --------------------------------------------------------------------------
+# Config-as-Code import (E112) — aux_config.py's restore goes through these.
+#
+# A restore used to REPLACE the policy and SIGN it in one step: the plan said
+# only "policy differs", every Never the owner set after the export vanished,
+# and the imported Auto entries were live at once — the review that an
+# out-of-band edit gets (sidecar mismatch -> untrusted -> Review & re-trust)
+# never ran.  Now an import MERGES (the snapshot's entries win for the keys it
+# names; the owner's other entries are kept, so a Never is only ever changed by
+# an entry the plan lists) and is written UNSIGNED, so the policy lands
+# untrusted and every Auto stays suspended until the owner re-trusts it in the
+# Trust panel, against a diff of the last signed policy.  An Auto the safety
+# floor forbids is not merged at all (the API would refuse it too).
+# --------------------------------------------------------------------------
+def _eff_tier(policy, key):
+    t = _pattern_tier(policy, key)
+    return t if t is not None else _class_tier(policy, _class_of(key))
+
+
+def _import_merge(live, imported):
+    """(merged policy {classes, patterns}, ignored [str]) — pure."""
+    live = live if isinstance(live, dict) else {}
+    imported = imported if isinstance(imported, dict) else {}
+    lc = live.get("classes") if isinstance(live.get("classes"), dict) else {}
+    lp = live.get("patterns") if isinstance(live.get("patterns"), dict) else {}
+    classes = {k: v for k, v in lc.items() if k in CLASS_META and v in TIERS}
+    patterns = {k: v for k, v in lp.items() if isinstance(k, str) and k and v in TIERS}
+    ignored = []
+    ic = imported.get("classes") if isinstance(imported.get("classes"), dict) else {}
+    for cid, tier in ic.items():
+        if cid not in CLASS_META or tier not in TIERS:
+            continue
+        if tier == "auto" and _floor(cid) == "ask":
+            ignored.append("%s: Auto is below its safety floor" % cid)
+            continue
+        classes[cid] = tier
+    ip = imported.get("patterns") if isinstance(imported.get("patterns"), dict) else {}
+    for key, tier in ip.items():
+        if not isinstance(key, str) or not key.strip() or tier not in TIERS:
+            continue
+        key = key.strip()
+        if tier == "auto" and _floor(_class_of(key)) == "ask":
+            ignored.append("%s: Auto is below its safety floor" % key)
+            continue
+        patterns[key] = tier
+    return {"classes": classes, "patterns": patterns}, ignored
+
+
+def _import_rows(live, merged):
+    """One row per class / pattern whose tier the import would change, with
+    the EFFECTIVE tier before and after; `loosened` when it gets less strict."""
+    rows = []
+    for cid in CLASS_ORDER:
+        f, t = _class_tier(live, cid), _class_tier(merged, cid)
+        if f != t:
+            rows.append({"kind": "class", "id": cid,
+                         "label": CLASS_META[cid]["label"], "from": f, "to": t,
+                         "loosened": _RANK[t] < _RANK[f]})
+    lp = live.get("patterns") if isinstance(live.get("patterns"), dict) else {}
+    mp = merged.get("patterns") or {}
+    for key in sorted(set(lp) | set(mp)):
+        if not isinstance(key, str) or lp.get(key) == mp.get(key):
+            continue
+        f, t = _eff_tier(live, key), _eff_tier(merged, key)
+        rows.append({"kind": "pattern", "id": key, "label": key,
+                     "class": _class_of(key.strip()), "from": f, "to": t,
+                     "loosened": _RANK[t] < _RANK[f]})
+    rows.sort(key=lambda r: (not r["loosened"],))       # loosened first, stable
+    return rows
+
+
+def import_plan(imported):
+    """Dry run of import_policy(): {changed, rows, ignored, loosened}."""
+    policy, _t, _e = _load()
+    live = policy if isinstance(policy, dict) else {}
+    merged, ignored = _import_merge(live, imported)
+    rows = _import_rows(live, merged)
+    changed = (merged["classes"] != {k: v for k, v in (live.get("classes") or {}).items()
+                                     if k in CLASS_META and v in TIERS}
+               or merged["patterns"] != {k: v for k, v in (live.get("patterns") or {}).items()
+                                         if isinstance(k, str) and k and v in TIERS})
+    return {"changed": bool(changed), "rows": rows, "ignored": ignored,
+            "loosened": sum(1 for r in rows if r["loosened"])}
+
+
+def import_policy(imported):
+    """Merge `imported` into the live policy and write it UNSIGNED (it lands
+    untrusted: Auto suspended until Review & re-trust).  Nothing is written
+    when the merge changes nothing.  Returns import_plan()'s dict + trusted."""
+    with _lock:
+        plan = import_plan(imported)
+        if not plan["changed"]:
+            _p, trusted, _e = _load()
+            plan["trusted"] = bool(trusted)
+            return plan
+        policy, _t, _e = _load()
+        merged, _ign = _import_merge(policy if isinstance(policy, dict) else {}, imported)
+        _ensure_dirs()
+        norm = _normalize(merged)
+        norm["updated_by"] = "config-import"
+        raw = (json.dumps(norm, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        _atomic_write(PERM_FILE, raw, 0o600)    # deliberately NOT _write_signed
+        _STATE["mtime"] = None
+        _log_policy_change("import", {})
+        plan["trusted"] = False
+        return plan
 
 
 def _save_view():

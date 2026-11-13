@@ -7,11 +7,16 @@ Obsidian's own graph view renders the repo's architecture.
 Usage:  obsidian_sync.py <vault_dir> [graph_json]
 Writes ONLY under "<vault_dir>/Hermes Code Graph/" (a folder this tool owns and
 is the only thing it ever clears). Idempotent: safe to re-run on every rebuild.
+Every note is built in memory first and an empty or unreadable graph is
+refused (exit 1) with the previous notes left in place; notes are written
+tmp + os.replace, and only notes the new graph no longer has are removed.
 """
 import json
 import os
 import re
 import sys
+import tempfile
+import unicodedata
 
 SUBFOLDER = "Hermes Code Graph"
 COMM_DIR = "communities"
@@ -27,9 +32,39 @@ def _script_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def _atomic_write(path, text):
+    """tmp in the same folder + os.replace: Obsidian never sees half a note."""
+    d = os.path.dirname(path)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix="." + os.path.basename(path) + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _fold(name):
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+class GraphError(Exception):
+    """The graph cannot be synced; the vault is left exactly as it was."""
+
+
 def _load(graph_json):
-    with open(graph_json) as f:
-        g = json.load(f)
+    try:
+        with open(graph_json) as f:
+            g = json.load(f)
+    except (OSError, ValueError) as e:
+        raise GraphError("graph.json unreadable: %s" % e)
+    if not isinstance(g, dict):
+        raise GraphError("graph.json is not a graph object")
     labels = {}
     try:
         labels = json.load(open(os.path.join(os.path.dirname(graph_json),
@@ -41,8 +76,14 @@ def _load(graph_json):
 
 def build(vault, graph_json):
     g, labels = _load(graph_json)
-    nodes = g.get("nodes", [])
-    links = g.get("links", [])
+    nodes = g.get("nodes") if isinstance(g.get("nodes"), list) else []
+    nodes = [n for n in nodes if isinstance(n, dict)]
+    links = g.get("links") if isinstance(g.get("links"), list) else []
+    links = [lk for lk in links if isinstance(lk, dict)]
+    if not nodes:
+        raise GraphError("graph.json has no nodes (run: graphify update .)")
+    if not isinstance(labels, dict):
+        labels = {}
     byid = {n.get("id"): n for n in nodes}
 
     members = {}                       # community -> [nodes]
@@ -61,19 +102,17 @@ def build(vault, graph_json):
         cadj.setdefault(ct, set()).add(cs)
 
     def cname(cid):
-        return "%s (c%s)" % (_safe(labels.get(str(cid), "Community %s" % cid)), cid)
+        # The note's NAME — its filename and every [[link]] to it.  The label
+        # is cut to leave room for the " (cN)" suffix: cutting the whole name
+        # at 80 afterwards dropped the suffix from the filename only, so a
+        # long label's links were dead and two long labels shared one file.
+        suffix = " (c%s)" % re.sub(r'[\\/:*?"<>|\[\]#^]', "-", str(cid))
+        label = _safe(labels.get(str(cid), "Community %s" % cid))
+        return _safe(label[:max(1, 80 - len(suffix))].rstrip() + suffix)
 
     out = os.path.join(vault, SUBFOLDER)
     cdir = os.path.join(out, COMM_DIR)
-    os.makedirs(cdir, exist_ok=True)
-    for fn in os.listdir(cdir):        # clear only OUR prior notes
-        if fn.endswith(".md"):
-            try:
-                os.remove(os.path.join(cdir, fn))
-            except OSError:
-                pass
-
-    written = 0
+    notes = {}                         # filename -> text, built before any write
     for cid, mem in members.items():
         title = cname(cid)
         files = {}
@@ -92,9 +131,7 @@ def build(vault, graph_json):
         if neigh:
             lines += ["", "## Connected subsystems", ""]
             lines += ["- [[%s]]" % cname(nc) for nc in neigh]
-        with open(os.path.join(cdir, _safe(title) + ".md"), "w") as fh:
-            fh.write("\n".join(lines) + "\n")
-        written += 1
+        notes[title + ".md"] = "\n".join(lines) + "\n"
 
     deg = {}
     for lk in links:
@@ -112,10 +149,22 @@ def build(vault, graph_json):
     moc += ["", "## Subsystems", ""]
     for cid in sorted(members, key=lambda c: -len(members[c])):
         moc.append("- [[%s]] — %d nodes" % (cname(cid), len(members[cid])))
-    with open(os.path.join(out, "Hermes Code Graph.md"), "w") as fh:
-        fh.write("\n".join(moc) + "\n")
 
-    return written, len(nodes), len(links)
+    os.makedirs(cdir, exist_ok=True)
+    for fn, text in notes.items():
+        _atomic_write(os.path.join(cdir, fn), text)
+    _atomic_write(os.path.join(out, "Hermes Code Graph.md"), "\n".join(moc) + "\n")
+    # then drop only OUR notes the graph lost (compared the way APFS compares
+    # names, so a note whose label only changed case is not deleted)
+    keep = {_fold(fn) for fn in notes}
+    for fn in os.listdir(cdir):
+        if fn.endswith(".md") and _fold(fn) not in keep:
+            try:
+                os.remove(os.path.join(cdir, fn))
+            except OSError:
+                pass
+
+    return len(notes), len(nodes), len(links)
 
 
 def main():
@@ -132,7 +181,11 @@ def main():
         print("graph.json not found: %s (run: graphify update .)" % graph_json,
               file=sys.stderr)
         return 1
-    w, nn, ne = build(vault, graph_json)
+    try:
+        w, nn, ne = build(vault, graph_json)
+    except GraphError as e:
+        print("%s — nothing synced, the vault is unchanged" % e, file=sys.stderr)
+        return 1
     print("Synced %d subsystem notes + index -> %s/%s (%d nodes, %d edges)" % (
         w, vault, SUBFOLDER, nn, ne))
     return 0

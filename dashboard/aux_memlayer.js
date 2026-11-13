@@ -183,7 +183,7 @@
         "transition-timing-function:ease-out}" +
       SEL + " button.mlb2:hover{border-color:var(--iris)}" +
       SEL + " button.mlb2.is-primary{border-color:transparent;background:var(--iris);" +
-        "color:#fff}" +
+        "color:var(--iris-ink,#fff)}" +
       SEL + " button.mlb2:disabled{opacity:.45;cursor:default}" +
       // list
       SEL + " ul.mllist{list-style:none;margin:0;padding:0}" +
@@ -400,6 +400,7 @@
       var bits = [E(num(im.added)) + " new", E(num(im.updated)) + " updated",
                   E(num(im.same)) + " unchanged"];
       if (Number(im.stale)) bits.push(E(num(im.stale)) + " archived as stale");
+      if (Number(im.restored)) bits.push(E(num(im.restored)) + " restored");
       if (Number(im.needs_review)) {
         bits.push(E(num(im.needs_review)) + " waiting for review");
       }
@@ -528,11 +529,18 @@
   }
 
   var prevTimer = null;
+  // R2-29: the debounce only spaced the REQUESTS out; whichever response
+  // landed last still painted, so a slow preview for "tea" could overwrite
+  // the one for "tea with milk" typed after it. Each runPreview() takes a
+  // number and only the newest may paint.
+  var prevSeq = 0;
 
   async function runPreview(text, now) {
     S.preview.text = text;
     if (prevTimer) { clearTimeout(prevTimer); prevTimer = null; }
+    var seq = ++prevSeq;
     var go = async function () {
+      if (seq !== prevSeq) return;
       if (!String(text || "").trim()) {
         S.preview.ran = false;
         S.preview.block = "";
@@ -540,6 +548,7 @@
         return;
       }
       var j = await jget("/api/memory/preview?text=" + encodeURIComponent(text));
+      if (seq !== prevSeq) return;        // newer text was typed meanwhile
       if (!j || j.ok === false) {
         S.preview.ran = true;
         S.preview.block = "";
@@ -812,7 +821,7 @@
     cardHTML: cardHTML, CSS: CSS, listHTML: listHTML, factHTML: factHTML,
     previewHTML: previewHTML, budgetHTML: budgetHTML, visible: visible,
     num: num, toks: toks, ago: ago,
-    mount: mount, paint: paint, state: S,
+    mount: mount, paint: paint, state: S, runPreview: runPreview,
     refresh: async function () { S.loaded = false; await mount(); }
   };
 })();

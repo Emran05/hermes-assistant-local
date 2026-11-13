@@ -3,6 +3,10 @@ name: CI
 on:
   push:
   pull_request:
+  # release.yml calls this whole workflow as a required job before it builds,
+  # signs or publishes anything (B30), so a tag can never ship a tree that
+  # fails these checks.
+  workflow_call:
 
 permissions:
   contents: read
@@ -11,6 +15,7 @@ jobs:
   static-checks:
     name: Syntax + hygiene
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -41,11 +46,18 @@ jobs:
           set -euo pipefail
           rc=0
           while IFS= read -r f; do
-            case "$f" in dashboard/motion.min.js) echo "skip  $f"; continue ;; esac
             echo "node --check $f"
             node --check "$f" || rc=1
           done < <(git ls-files 'dashboard/*.js')
           exit $rc
+
+      # index.html's inline <script> is the whole app shell (~140 KB); the step
+      # above only sees the .js files, so a syntax error there used to pass CI
+      # and blank the UI (C85).
+      - name: Parse every inline script in the HTML
+        run: |
+          set -euo pipefail
+          python3 tools/tests/lib/check_inline_scripts.py
 
       # A home directory path in a tracked file means the tree only works on one
       # person's Mac (and leaks their username). Placeholders are fine.
@@ -72,6 +84,9 @@ jobs:
   unit-tests:
     name: Unit tests (macOS, Python ${{ matrix.python-version }})
     runs-on: macos-latest
+    # run.sh also stops any one suite after HERMES_TESTS_SUITE_TIMEOUT (600 s)
+    # and reports it as FAIL by name; this caps the job (E137)
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -79,9 +94,10 @@ jobs:
         # CLAUDE.md — so CI must cover the version actually in use, not
         # whatever was newest when this file was written. 3.13 stays in the
         # matrix as the previous stable series; drop it once 3.14 has been
-        # green here for a while. Confirmed both are published in
-        # actions/setup-python's version manifest as of this writing.
-        python-version: ["3.13", "3.14"]
+        # green here for a while. 3.12 is the oldest Python the repo supports
+        # (aux_config's zoneinfo validation and the framework Python the
+        # launchd scripts fall back to), so it is tested too (C85).
+        python-version: ["3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
 
@@ -116,9 +132,25 @@ jobs:
       # instead of a warning — GitHub Actions already sets CI=true, which
       # run.sh treats the same way, but this is explicit in case that ever
       # changes or the job runs somewhere else.
+      # Skips are counted, never credited (C83): with FAIL_ON_SKIP every skip
+      # that is not listed here fails the job, so CI cannot quietly run a
+      # smaller suite than the owner's Mac. Each entry is a check that needs
+      # the owner's own ~/.hermes, which a fresh runner does not have. A new
+      # suite that skips here adds its line in the same change (see
+      # tools/tests/README.md "Skips and CI").
       - name: Run the unit tier
         env:
           HERMES_TESTS_STRICT: "1"
+          HERMES_TESTS_FAIL_ON_SKIP: "1"
+          HERMES_TESTS_EXPECTED_SKIPS: |
+            t_132_branch.py: no ~/.hermes/hermes-agent
+            t_c111_approval_gate.py: no Hermes install
+            t_c130_model_server_lockdown.py: no mlx-vlm venv
+            t_c130_model_server_lockdown.py: no python with mlx_lm
+            t_c36_unattended_toolsets.py: no Hermes checkout
+            t_r3_roster_catalog.py: no mlx-vlm venv
+            t_r3_roster_launcher.py: no mlx-vlm venv
+            t_r3_roster_launcher.py: no python with mlx_lm
         run: |
           set -euo pipefail
           node --version
@@ -136,3 +168,33 @@ jobs:
             exit 1
           fi
           echo "clean"
+
+  # The Swift shell (app/main.swift) and its helpers are only ever compiled by
+  # app/build-app.sh on the owner's Mac or by release.yml at tag time, so a
+  # type error used to surface for the first time inside a release (C85).
+  # -typecheck builds nothing and signs nothing.
+  swift-typecheck:
+    name: Swift typecheck (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Typecheck the app and its helpers
+        run: |
+          set -euo pipefail
+          swiftc --version
+          sdk="$(xcrun --sdk macosx --show-sdk-version)"
+          echo "macOS SDK $sdk"
+          echo "swiftc -typecheck app/main.swift"
+          swiftc -typecheck app/main.swift
+          echo "swiftc -typecheck app/render-icon.swift"
+          swiftc -typecheck app/render-icon.swift
+          # the dictation helper uses SpeechAnalyzer (macOS 26 SDK), behind
+          # availability checks for its 14.0 deployment target
+          if [ "${sdk%%.*}" -ge 26 ]; then
+            echo "swiftc -typecheck app/dictation/main.swift"
+            swiftc -typecheck -target "$(uname -m)-apple-macosx14.0" app/dictation/main.swift
+          else
+            echo "::warning::app/dictation/main.swift needs the macOS 26 SDK (SpeechAnalyzer); this runner has $sdk, so it was not typechecked"
+          fi

@@ -10,7 +10,10 @@
 //                                 ≈ API-equivalent cost, soft-cap setter).
 //
 // Reuses global helpers from index.html (esc, kfmt, fmtNum, statGrid, barRows,
-// animate) — all typeof-guarded so a headless render harness never throws.
+// animate, HA) — all typeof-guarded so a headless render harness never throws.
+// Motion (docs/plans/motion-system-2026-10.md §8.11): the pop-out's token
+// totals count up once per open; the compact body, which the hub refreshes
+// every 60 s, never moves. Gauge fills scale from the left, never a width.
 // CLAUDE.md laws: zero emoji, bespoke SVG only, 12-hour time, esc() coercion.
 
 (function () {
@@ -49,15 +52,55 @@
     return sec + "s";
   }
   function sub(t) {
-    return '<div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;' +
+    return '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;' +
       'color:var(--muted);font-weight:600;margin:12px 0 6px">' + E(t) + "</div>";
+  }
+  // a gauge fill: full width, scaled from the left (compositor only); the
+  // track's radius + overflow:hidden shape both ends
+  function fill(pct, color) {
+    return '<i style="display:block;height:100%;transform:scaleX(' + (pct / 100) + ');' +
+      'transform-origin:left center;background:' + color + '"></i>';
   }
   function gaugeBar(pct, label, color) {
     pct = Math.max(2, Math.min(100, pct || 0));
     return '<div style="height:8px;border-radius:5px;background:var(--hairline);overflow:hidden;margin:2px 0 5px">' +
-      '<i style="display:block;height:100%;width:' + pct + '%;border-radius:5px;background:' + color + '"></i></div>' +
-      '<div class="w-sub" style="font-size:10.5px;margin-bottom:10px">' + E(label) + "</div>";
+      fill(pct, color) + '</div>' +
+      '<div class="w-sub" style="font-size:12px;margin-bottom:10px">' + E(label) + "</div>";
   }
+  // ---- motion: the pop-out's count-ups ---------------------------------------
+  // index.html's HA() is window.HermesAnim, or ANIM_NULL without aux_anim.js
+  function ha() {
+    try { if (typeof HA === "function") return HA(); } catch (e) {}
+    return (typeof window !== "undefined" && window.HermesAnim) || null;
+  }
+  // KF in the FINAL value's unit on every frame ("0.4M" ... "1.2M", never a
+  // "999.9k" on the way), so a counting number keeps one width; the last frame
+  // is exactly KF(n), the text the pop-out renders when nothing moves
+  function kfIn(n) {
+    var fin = KF(n);
+    var unit = n >= 1e6 ? function (v) { return (v / 1e6).toFixed(1) + "M"; }
+             : n >= 1e3 ? function (v) { return (v / 1e3).toFixed(1) + "k"; }
+             : function (v) { return "" + Math.round(v); };
+    return function (v) { return v === n ? fin : unit(v); };
+  }
+  // up from 0, once per open: openPop builds a fresh body each time, and
+  // nothing re-renders an open pop-out. Instant (the final text) whenever the
+  // runtime is not live: either reduce switch, a hidden window, no anime yet.
+  function countUp(items) {
+    var H = ha();
+    if (!H || typeof H.count !== "function") return;
+    items.forEach(function (x, i) {
+      if (!x.el || !(x.n > 0)) return;
+      var f = kfIn(x.n);
+      try {
+        // the start value now, so no frame shows the final number first; any
+        // instant path inside count() writes the final text before a paint
+        if (typeof H.live === "function" && H.live()) x.el.textContent = f(0);
+        H.count(x.el, x.n, { fmt: f, from: 0, delay: i * 0.06 });
+      } catch (e) { x.el.textContent = f(x.n); }
+    });
+  }
+
   function famName(f) {
     f = String(f || "");
     return f ? (f.charAt(0).toUpperCase() + f.slice(1)) : "Other";
@@ -112,20 +155,20 @@
       var h = "";
       h += '<div style="display:flex;align-items:baseline;gap:8px;margin:2px 0 1px">' +
         '<span class="num" style="font-size:26px;font-weight:720;line-height:1;color:' + accent + '">' + KF(w.total || 0) + "</span>" +
-        '<span class="w-sub" style="font-size:11px">tok this 5h</span>' +
+        '<span class="w-sub" style="font-size:12px">tok this 5h</span>' +
         '<span class="num" style="margin-left:auto;font-weight:640;font-size:12.5px">' + money(w.cost) + "</span></div>";
-      h += '<div class="w-sub" style="font-size:11px;display:flex;align-items:center;gap:6px;margin-bottom:8px">' +
+      h += '<div class="w-sub" style="font-size:12px;display:flex;align-items:center;gap:6px;margin-bottom:8px">' +
         (w.active ? '<span class="livedot"></span>' : "") + E(resetLine) +
         (w.cache ? '<span style="margin-left:auto;opacity:.7" title="Cached context re-served each message — not new work, mostly free">+' + KF(w.cache) + " cache</span>" : "") + "</div>";
 
       if (capPct != null) {
         var cc = capPct >= 90 ? "var(--bad)" : capPct >= 70 ? "var(--warn)" : accent;
         h += '<div style="height:6px;border-radius:4px;background:var(--hairline);overflow:hidden;margin-bottom:4px">' +
-          '<i style="display:block;height:100%;width:' + capPct + '%;border-radius:4px;background:' + cc + '"></i></div>' +
-          '<div class="w-sub" style="font-size:10.5px;margin-bottom:8px">' + capPct + "% of your " + KF(d.cap) + " soft cap</div>";
+          fill(capPct, cc) + '</div>' +
+          '<div class="w-sub" style="font-size:12px;margin-bottom:8px">' + capPct + "% of your " + KF(d.cap) + " soft cap</div>";
       }
 
-      h += '<div style="display:flex;gap:14px;font-size:11px;margin-bottom:6px">' +
+      h += '<div style="display:flex;gap:14px;font-size:12px;margin-bottom:6px">' +
         '<span class="w-sub">Today <b class="num" style="color:var(--ink)">' + KF(t.total || 0) + "</b></span>" +
         '<span class="w-sub">7-day <b class="num" style="color:var(--ink)">' + KF(d.week_total || 0) + "</b></span>" +
         '<span class="w-sub" style="margin-left:auto">≈' + money(t.cost || 0) + " today</span></div>";
@@ -154,7 +197,7 @@
         resetLine = "No active window — your next prompt opens a fresh 5-hour block.";
       }
       h += '<div style="display:flex;align-items:baseline;gap:10px;margin:2px 0 3px">' +
-        '<span class="num" style="font-size:40px;font-weight:730;line-height:1;color:' + accent + '">' + KF(w.total || 0) + "</span>" +
+        '<span class="num" data-cu-count="window" style="font-size:40px;font-weight:730;line-height:1;color:' + accent + '">' + KF(w.total || 0) + "</span>" +
         '<span style="font-size:13px;color:var(--muted)">tokens · 5-hour window</span>' +
         '<span class="num" style="margin-left:auto;font-weight:660;font-size:15px">' + money(w.cost) + "</span></div>";
       h += '<div class="w-sub" style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:10px">' +
@@ -182,10 +225,12 @@
       // --- today vs 7-day ---
       h += sub("Today vs last 7 days");
       if (typeof statGrid === "function") {
-        h += statGrid([
+        // wrapped so the two token totals can be found again for the count-up:
+        // statGrid renders one .num per pair, in this order (0 today, 3 7-day)
+        h += '<div class="cu-totals">' + statGrid([
           ["Today tok", KF(t.total || 0)], ["Today ≈", money(t.cost)], ["Today msgs", NF(t.msgs || 0)],
           ["7-day tok", KF(wk.total || 0)], ["7-day ≈", money(wk.cost)], ["7-day msgs", NF(wk.msgs || 0)],
-        ]);
+        ]) + "</div>";
       }
 
       // --- 7-day daily bar chart ---
@@ -205,7 +250,7 @@
         days.forEach(function (x) {
           var dt = new Date((x.date || "") + "T00:00");
           var lab = isNaN(dt.getTime()) ? "" : dt.toLocaleDateString([], { weekday: "short" });
-          h += '<div style="flex:1;text-align:center;font-size:9.5px;color:var(--faint)">' + E(lab) + "</div>";
+          h += '<div style="flex:1;text-align:center;font-size:12px;color:var(--muted)">' + E(lab) + "</div>";
         });
         h += "</div>";
       }
@@ -239,15 +284,15 @@
             (b.active ? '<span class="livedot"></span>' : '<span style="width:7px;flex:0 0 7px"></span>') +
             '<span class="num" style="width:126px;color:var(--muted)">' + E(day + " · " + t12(b.start) + "–" + t12(b.end)) + "</span>" +
             '<span class="num" style="font-weight:640;min-width:52px;text-align:right">' + KF(b.total) + "</span>" +
-            '<span class="w-sub" style="flex:1;text-align:right;font-size:11px">' + NF(b.msgs) + " msgs · " + money(b.cost) + "</span></div>";
+            '<span class="w-sub" style="flex:1;text-align:right;font-size:12px">' + NF(b.msgs) + " msgs · " + money(b.cost) + "</span></div>";
         });
       }
 
       // --- totals + cost caveat ---
-      h += '<div class="w-sub" style="margin:11px 0 4px;font-size:11px">' +
+      h += '<div class="w-sub" style="margin:11px 0 4px;font-size:12px">' +
         NF(d.sessions || 0) + " sessions · " + NF(d.messages || 0) +
         " assistant messages in the last " + (d.scan_days || 8) + " days</div>";
-      h += '<div class="w-sub" style="font-size:10.5px;color:var(--faint);line-height:1.5;margin-bottom:10px">' +
+      h += '<div class="w-sub" style="font-size:12px;color:var(--muted);line-height:1.5;margin-bottom:10px">' +
         "Cost is <b>≈ API-equivalent</b> (published per-token prices) — your Max plan is a flat subscription, " +
         "so this is what the same tokens would bill on the API, not a charge. Max publishes no hard token limit; the " +
         "5-hour window above is the rolling reset Claude enforces.</div>";
@@ -258,7 +303,7 @@
         'style="flex:1;padding:7px 10px;border-radius:9px;border:1px solid var(--hairline);background:var(--glass-2);color:var(--ink);font:inherit" ' +
         'value="' + (d.cap ? E(d.cap) : "") + '">' +
         '<button class="primary" id="cu-cap-go" style="padding:7px 14px">Save</button></div>';
-      h += '<div class="w-sub" id="cu-cap-msg" style="font-size:10.5px;min-height:14px"></div>';
+      h += '<div class="w-sub" id="cu-cap-msg" style="font-size:12px;min-height:14px"></div>';
 
       el.innerHTML = h;
 
@@ -285,7 +330,17 @@
         };
       }
 
-      // subtle reveal on the daily bars (Motion One, fully guarded)
+      // the token totals: the 5-hour window, today, the last 7 days
+      try {
+        var tot = el.querySelectorAll ? el.querySelectorAll(".cu-totals .num") : [];
+        countUp([
+          { el: el.querySelector ? el.querySelector('[data-cu-count="window"]') : null, n: +w.total || 0 },
+          { el: tot[0] || null, n: +t.total || 0 },
+          { el: tot[3] || null, n: +wk.total || 0 }
+        ]);
+      } catch (e) {}
+
+      // subtle reveal on the daily bars (the legacy animate() shim, fully guarded)
       try {
         if (typeof animate === "function") {
           var bars = el.querySelectorAll(".cu-bar");

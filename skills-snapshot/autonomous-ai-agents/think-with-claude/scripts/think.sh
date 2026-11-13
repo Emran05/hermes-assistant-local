@@ -5,7 +5,8 @@
 #   [context]  compact You-Model (goals / now / looking-for / people) — optional
 #   [depth]    quick (Sonnet, default) or deep (Opus) — optional
 #
-# Prints Claude's reasoning to stdout. On a bridge refusal (code-gen / harmful)
+# Prints Claude's reasoning to stdout. On a bridge refusal (escalation off,
+# code-gen, harmful, a credential in the prompt, ...)
 # it prints the refusal message and exits non-zero. Requires the dashboard hub
 # to be up (POST /api/claude/think). Reasoning only — Claude cannot act here.
 set -u

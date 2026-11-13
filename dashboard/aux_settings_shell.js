@@ -7,7 +7,7 @@
 // What it does — WITHOUT editing any existing aux module or expand.js:
 //   1. Injects #set-shell INSIDE the existing #view-mind: a 236px sticky glass
 //      nav rail (5 groups / 12 panels, sliding spring indicator, always-visible
-//      kill switch) + main#set-panels holding the 12 settings panels.
+//      kill switch) + div#set-panels holding the 12 settings panels.
 //   2. THE RELOCATOR — moves every legacy Mind card (the 4 static base sections
 //      + every [id^="mind-base-"] / [id^="mind-extra-"] card the aux modules
 //      render into #view-mind) into its target panel per CARD_MAP.  Unknown ids
@@ -119,7 +119,10 @@
     // System
     { id: "sec-system",      short: "system",      group: "System",       title: "System & Data",       sub: "Services, logs, backups, danger zone",    accent: "#8A93A6" }
   ];
-  var PANEL_BY_ID = {}, PANEL_BY_SHORT = {};
+  // Prototype-free: the keys come from location.hash, and on a plain object
+  // #settings/__proto__ (or /constructor) resolved to Object.prototype — a
+  // "panel" with no id, so every panel was hidden and Settings went blank.
+  var PANEL_BY_ID = Object.create(null), PANEL_BY_SHORT = Object.create(null);
   PANELS.forEach(function (p) { PANEL_BY_ID[p.id] = p; PANEL_BY_SHORT[p.short] = p; });
   var DEFAULT_SEC = "sec-overview";
 
@@ -157,25 +160,33 @@
       "padding:10px 10px 8px;border-radius:16px;overflow:hidden}",
       "#set-rail>*{flex:none}",
       ".set-searchwrap{position:relative;margin-bottom:8px}",
-      ".set-searchwrap .set-sicon{position:absolute;left:9px;top:50%;transform:translateY(-50%);width:14px;height:14px;color:var(--faint);pointer-events:none}",
-      "#set-search{width:100%;box-sizing:border-box;padding:7px 10px 7px 30px;font-size:12.5px;border-radius:10px}",
+      ".set-searchwrap .set-sicon{position:absolute;left:9px;top:50%;transform:translateY(-50%);width:14px;height:14px;color:var(--muted);pointer-events:none}",
+      // a visible field: its own fill and an edge mixed off --muted (3:1 on
+      // the rail in both themes), and a placeholder at the meta-text colour
+      "#set-search{width:100%;box-sizing:border-box;padding:7px 10px 7px 30px;font-size:13px;border-radius:10px;",
+      "background:var(--field);color:var(--ink);border:1px solid color-mix(in srgb,var(--muted) 62%,transparent)}",
+      "#set-search::placeholder{color:var(--muted);opacity:1}",
+      "#set-search:focus{border-color:var(--iris)}",
       ".set-hits{position:absolute;left:0;right:0;top:calc(100% + 5px);z-index:40;max-height:300px;overflow:auto;",
       "padding:5px;border-radius:12px;background:var(--glass);-webkit-backdrop-filter:blur(18px) saturate(160%);backdrop-filter:blur(18px) saturate(160%);",
       "border:1px solid var(--hairline);box-shadow:0 12px 32px -12px var(--cast)}",
       ".set-hits[hidden]{display:none}",
       ".set-hit{display:flex;flex-direction:column;gap:1px;padding:6px 9px;border-radius:8px;cursor:pointer}",
       ".set-hit .h-t{font-size:12.5px;color:var(--ink);font-weight:560}",
-      ".set-hit .h-s{font-size:10.5px;color:var(--faint)}",
+      ".set-hit .h-s{font-size:12px;color:var(--muted)}",
       ".set-hit.on,.set-hit:hover{background:color-mix(in srgb,var(--iris) 14%,transparent)}",
       ".set-nohit{padding:8px 9px;font-size:12px;color:var(--muted)}",
       // ---- nav ----
       ".set-nav{position:relative;flex:1 1 auto;min-height:0;overflow-y:auto;padding:2px 0;margin:0 -2px}",
-      ".set-glab{font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);font-weight:640;padding:12px 10px 4px}",
+      ".set-glab{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);font-weight:600;padding:12px 10px 4px}",
       ".set-item{position:relative;z-index:1;display:flex;align-items:center;gap:9px;width:100%;box-sizing:border-box;",
       "padding:7px 10px;border:1px solid transparent;background:transparent;border-radius:10px;cursor:pointer;",
       "font-size:13px;font-weight:540;color:var(--muted);text-align:left;-webkit-backdrop-filter:none;backdrop-filter:none;transition:color .18s}",
       ".set-item:hover{color:var(--ink);transform:none;border-color:transparent;background:transparent}",
-      ".set-item .set-gly{width:15px;height:15px;flex:0 0 auto;color:var(--faint);transition:color .18s}",
+      // the glyph's stroke is the label's own colour (it was --faint, ~2:1),
+      // 16px so its strokes read at the 13px label's weight; the accent
+      // still takes over on hover and on the active item
+      ".set-item .set-gly{width:16px;height:16px;flex:0 0 auto;color:currentColor;transition:color .18s}",
       ".set-item:hover .set-gly,.set-item.on .set-gly{color:var(--sac)}",
       ".set-item.on{color:var(--ink)}",
       ".set-item .set-ilbl{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
@@ -189,11 +200,13 @@
       ".set-kill .set-gly{width:17px;height:17px;flex:0 0 auto;color:var(--muted)}",
       ".set-killtext{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}",
       ".set-killttl{font-size:12.5px;font-weight:600;color:var(--ink)}",
-      ".set-killcap{font-size:10.5px;color:var(--faint)}",
+      ".set-killcap{font-size:12px;color:var(--muted)}",
       ".set-killdot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 22%,transparent)}",
       ".set-kill.paused{border-color:color-mix(in srgb,var(--bad) 48%,transparent);background:color-mix(in srgb,var(--bad) 12%,transparent)}",
       ".set-kill.paused .set-gly{color:var(--bad)}",
       ".set-kill.paused .set-killdot{background:var(--bad);box-shadow:0 0 0 3px color-mix(in srgb,var(--bad) 22%,transparent)}",
+      // idle-suspended: not running, not paused — wakes on the next message
+      ".set-kill.asleep .set-killdot{background:var(--muted);box-shadow:0 0 0 3px color-mix(in srgb,var(--muted) 22%,transparent)}",
       ".set-kill.busy .set-killdot{background:var(--warn);box-shadow:0 0 0 3px color-mix(in srgb,var(--warn) 22%,transparent)}",
       // ---- panels ----
       "#set-panels{min-width:0;display:block}",
@@ -216,9 +229,26 @@
       ".set-row+.set-row{border-top:1px solid var(--hairline)}",
       ".set-row-text{flex:1 1 auto;min-width:0}",
       ".set-row-label{font-size:13px;font-weight:620;color:var(--ink)}",
-      ".set-row-sub{font-size:11.5px;color:var(--muted);line-height:1.45;margin-top:2px;text-wrap:pretty}",
+      ".set-row-sub{font-size:12px;color:var(--muted);line-height:1.45;margin-top:2px;text-wrap:pretty}",
       ".set-row.is-busy{opacity:.55;pointer-events:none}",
-      ".set-row-err{font-size:11px;color:var(--bad);margin-top:3px}",
+      ".set-row-err{font-size:12px;color:var(--bad);margin-top:3px}",
+      // Overview > At a glance: one row per fact, each a button to its panel
+      "#set-glance .body{padding:4px 14px 6px}",
+      ".sg-row{position:relative;display:grid;grid-template-columns:132px minmax(0,1fr) 14px;align-items:center;gap:12px;width:100%;",
+      "box-sizing:border-box;min-height:44px;padding:9px 6px;margin:0;border:0;border-radius:10px;background:transparent;",
+      "color:var(--ink);font:inherit;text-align:left;cursor:pointer;-webkit-backdrop-filter:none;backdrop-filter:none;",
+      "box-shadow:none;transition:background-color .18s}",
+      ".sg-row+.sg-row{border-top:1px solid var(--hairline);border-radius:0}",
+      ".sg-row:hover{background:color-mix(in srgb,var(--iris) 8%,transparent);transform:none;border-color:var(--hairline)}",
+      ".sg-row:first-child:hover{border-color:transparent}",
+      ".sg-row:focus-visible{outline:2px solid var(--iris);outline-offset:-2px}",
+      ".sg-k{font-size:12px;font-weight:600;color:var(--muted)}",
+      ".sg-v{font-size:13px;color:var(--ink);min-width:0;overflow-wrap:anywhere}",
+      ".sg-v .sg-m{color:var(--muted)}",
+      ".sg-v .sg-warn{color:var(--warn)}.sg-v .sg-bad{color:var(--bad)}",
+      ".sg-vh{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}",
+      ".sg-row .set-gly{width:14px;height:14px;color:var(--muted)}",
+      "@media (max-width:880px){.sg-row{grid-template-columns:104px minmax(0,1fr) 14px}}",
       // empty placeholder
       ".set-empty{display:flex;flex-direction:column;align-items:center;gap:10px;padding:46px 20px;text-align:center;",
       "border:1px dashed var(--hairline);border-radius:16px;color:var(--muted)}",
@@ -292,7 +322,7 @@
     shell.id = "set-shell";
     shell.innerHTML =
       '<nav id="set-rail" class="glass" aria-label="Settings">' + railInner + "</nav>" +
-      '<main id="set-panels">' + panelsInner + "</main>";
+      '<div id="set-panels">' + panelsInner + "</div>";   // the deck is the page's <main> (C104)
     host.appendChild(shell);
 
     wireRail(shell);
@@ -314,7 +344,11 @@
     if (kill) {
       kill.addEventListener("click", onKill);
       kill.addEventListener("keydown", function (ev) {
-        if (ev && (ev.key === "Enter" || ev.key === " ")) { if (ev.preventDefault) ev.preventDefault(); onKill(); }
+        if (ev && (ev.key === "Enter" || ev.key === " ")) {
+          if (ev.preventDefault) ev.preventDefault();
+          if (ev.repeat) return;                 // a held key pauses/resumes once
+          onKill();
+        }
       });
     }
     var search = shell.querySelector("#set-search");
@@ -356,6 +390,7 @@
       var d = doc(); if (!d) return;
       var p = PANEL_BY_ID[secOrShort] || PANEL_BY_SHORT[secOrShort];
       var sec = p ? p.id : DEFAULT_SEC;
+      var wasSec = curSec;
       curSec = sec;
 
       each(d.querySelectorAll(".set-panel"), function (pan) {
@@ -387,6 +422,8 @@
       setTimeout(function () { hashLock = false; }, 0);
 
       if (rowId) flashRow(sec, rowId);
+      // Overview shown (from another panel, or not read yet this showing)
+      if (sec === "sec-overview" && (wasSec !== sec || !glance.at)) glanceMaybe();
     } catch (e) {}
   }
 
@@ -556,7 +593,7 @@
   // ==========================================================================
   // Kill switch — pauses/resumes the agent via the existing endpoints.
   // ==========================================================================
-  var killPaused = false, killBusy = false, pausedAt = null;
+  var killPaused = false, killBusy = false, pausedAt = null, killAsleep = false;
 
   function settingsActive() {
     var v = byId("view-mind");
@@ -570,6 +607,7 @@
       var p = !!(d && d.paused);
       if (p && !killPaused && !pausedAt) pausedAt = new Date();
       if (!p) pausedAt = null;
+      killAsleep = !p && !!(d && d.idle_suspended);
       killPaused = p; killBusy = false; paintKill();
     }).catch(function () { paintKill(); });
   }
@@ -579,6 +617,7 @@
     var ttl = byId("set-killttl"), cap = byId("set-killcap");
     kill.classList.toggle("paused", killPaused && !killBusy);
     kill.classList.toggle("busy", killBusy);
+    kill.classList.toggle("asleep", killAsleep && !killPaused && !killBusy);
     kill.setAttribute("aria-pressed", killPaused ? "true" : "false");
     if (killBusy) { if (ttl) ttl.textContent = killPaused ? "Waking…" : "Pausing…"; if (cap) cap.textContent = "Reloading the model"; return; }
     if (killPaused) {
@@ -586,7 +625,7 @@
       if (cap) cap.textContent = pausedAt ? ("Paused " + t12(pausedAt)) : "Agent is paused";
     } else {
       if (ttl) ttl.textContent = "Pause agent";
-      if (cap) cap.textContent = "Agent is running";
+      if (cap) cap.textContent = killAsleep ? "Asleep — wakes on your next message" : "Agent is running";
     }
   }
 
@@ -699,20 +738,39 @@
     var sub = byId("set-esc-sub");
     if (sub) sub.textContent = on
       ? "Hard questions also go to Claude for deeper reasoning; everything else stays on the local model."
-      : "Local model only — nothing leaves the Mac. Turn this on to let hard questions reach Claude.";
+      : "Local model only — no question goes to Claude. Turn this on to let hard questions reach it.";
   }
 
+  // One flip at a time (E28): a second press, click or key while a write is in
+  // flight is dropped, so a held key or a double click can never race two
+  // POSTs and leave this privacy switch ON. The switch then paints what the
+  // SERVER answered (setClaudeEscalation stores its `enabled`), never what we
+  // asked for.
+  var escBusy = false;
   async function escFlip() {
-    var w = win(), row = byId("set-esc-row"), err = byId("set-esc-err");
+    if (escBusy) return;
+    var w = win(), row = byId("set-esc-row"), err = byId("set-esc-err"), tog = byId("set-esc-tog");
     if (!row || typeof w.setClaudeEscalation !== "function") return;
+    escBusy = true;
     var next = escState() !== true;
     if (row.classList) row.classList.add("is-busy");
+    if (tog) { try { tog.setAttribute("aria-busy", "true"); } catch (e) {} }
     if (err) err.textContent = "";
     var ok = false;
-    try { ok = await w.setClaudeEscalation(next); } catch (e) { ok = false; }
-    if (row.classList) row.classList.remove("is-busy");
-    if (ok) escPaint(next);
-    else { escPaint(escState() === true); if (err) err.textContent = "Could not reach the bridge — nothing changed."; }
+    try {
+      try { ok = await w.setClaudeEscalation(next); } catch (e) { ok = false; }
+      // A failed write may still have landed (its answer lost): re-read the
+      // server, which also tells every other surface (hermes:claude-escalation).
+      if (!ok && typeof w.loadClaudeEscalation === "function") {
+        try { await w.loadClaudeEscalation(); } catch (e) {}
+      }
+    } finally {
+      escBusy = false;
+      if (row.classList) row.classList.remove("is-busy");
+      if (tog) { try { tog.removeAttribute("aria-busy"); } catch (e) {} }
+    }
+    escPaint(escState() === true);
+    if (!ok && err) err.textContent = "Could not reach the bridge — nothing changed.";
   }
 
   function escEnsureRow() {
@@ -746,13 +804,200 @@
       if (tog) {
         tog.addEventListener("click", escFlip);
         tog.addEventListener("keydown", function (ev) {
-          if (ev.key === "Enter" || ev.key === " " || ev.key === "Spacebar") { ev.preventDefault(); escFlip(); }
+          if (ev.key === "Enter" || ev.key === " " || ev.key === "Spacebar") {
+            ev.preventDefault();
+            if (ev.repeat) return;               // a held key flips once (E28)
+            escFlip();
+          }
         });
       }
       try { buildSearchIndex(); } catch (e) {}
     }
     escPaint(st === true);
     markEmpty();
+  }
+
+  // ==========================================================================
+  // Overview > "At a glance": short rows, each one real fact and a way to the
+  // panel that owns it. Read ONCE each time the Overview is shown — no timer,
+  // no polling. Only cheap GETs that never wake a model or run anything heavy
+  // (/api/models, /api/needsyou?mark=0, /api/messages, /api/google/status,
+  // /api/github/status?scan=0, /api/version when the page has not read it),
+  // plus what the page already holds (aux_doctor's last run, aux_update's
+  // check). A fact that is missing or whose read failed is not rendered.
+  // ==========================================================================
+  var glance = { at: 0, seq: 0 };
+  var CHEV = '<path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>';
+  var GLANCE_GLY = '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 7.5V12l3 2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+
+  function glanceMaybe() {
+    if (!settingsActive() || curSec !== "sec-overview") return;
+    glanceLoad();
+  }
+
+  function pageState(name) {
+    try { var o = win()[name]; return (o && o.state) ? o.state : null; } catch (e) { return null; }
+  }
+
+  function glanceLoad() {
+    var f = win().fetch;
+    if (typeof f !== "function") return;
+    var seq = ++glance.seq;
+    glance.at = Date.now();
+    function get(u) {
+      try {
+        return f(u, { cache: "no-store" }).then(function (r) {
+          if (!r || r.ok === false) return null;
+          return r.json();
+        }).then(function (j) { return (j && typeof j === "object") ? j : null; },
+                function () { return null; });
+      } catch (e) { return Promise.resolve(null); }
+    }
+    var up = pageState("hermesUpdate") || {};
+    var verP = (up.ver && up.ver.version) ? Promise.resolve(up.ver) : get("/api/version");
+    Promise.all([get("/api/models"), get("/api/needsyou?mark=0"), get("/api/messages"),
+                 get("/api/google/status"), get("/api/github/status?scan=0"), verP])
+      .then(function (a) {
+        if (seq !== glance.seq) return;           // a newer showing owns the card
+        var doctor = pageState("hermesDoctor");
+        var u = pageState("hermesUpdate") || {};
+        renderGlance(glanceRows({
+          models: a[0], needsyou: a[1], messages: a[2], google: a[3], github: a[4],
+          version: a[5], update: u.check || null, doctor: doctor ? doctor.data : null
+        }));
+      }).catch(function () {});
+  }
+
+  function plural(n, one, many) { return n + " " + (n === 1 ? one : many); }
+  function num(v) { var n = Number(v); return isFinite(n) && n >= 0 ? Math.floor(n) : 0; }
+
+  // PURE: payloads -> [{key, label, html, go}] (html is already escaped)
+  function glanceRows(src) {
+    src = src || {};
+    var rows = [];
+    // the assistant: awake / asleep / paused, and the model in use
+    var m = src.models;
+    if (m && (typeof m.active === "string" || typeof m.paused === "boolean")) {
+      var st = m.paused ? "Paused" : (m.idle_suspended ? "Asleep" : "Awake");
+      var why = m.paused ? "resume from the switch below" : (m.idle_suspended ? "wakes on your next message" : "");
+      var label = "";
+      (Array.isArray(m.models) ? m.models : []).forEach(function (r) {
+        if (r && r.id === m.active && r.label) label = String(r.label);
+      });
+      if (!label && m.active) label = String(m.active).split("/").pop();
+      rows.push({ key: "assistant", label: "Assistant", go: "sec-models",
+        html: '<span class="' + (m.paused ? "sg-warn" : "") + '">' + E(st) + "</span>" +
+          (why ? '<span class="sg-m"> — ' + E(why) + "</span>" : "") +
+          (label ? '<span class="sg-m"> · </span>' + E(label) : "") });
+    }
+    // what needs the owner
+    var ny = src.needsyou;
+    if (ny && ny.ok !== false && !ny.building && Array.isArray(ny.now)) {
+      var n = ny.now.length, t = num(ny.today_count), l = num(ny.later_count);
+      var parts = [];
+      if (n) parts.push(n + " now");
+      if (t) parts.push(t + " today");
+      if (l) parts.push(l + " later");
+      rows.push({ key: "needsyou", label: "Needs you", go: "hub",
+        html: parts.length ? E(parts.join(" · ")) : '<span class="sg-m">Nothing needs you right now</span>' });
+    }
+    // connections that need action
+    var issues = [], known = 0;
+    var msg = src.messages;
+    if (msg && typeof msg.available === "boolean") {
+      known++;
+      if (!msg.available) issues.push(msg.reason && /Full Disk Access/i.test(String(msg.reason))
+        ? "Messages needs Full Disk Access" : "Messages not syncing");
+    }
+    var g = src.google;
+    if (g && typeof g.connected === "boolean") {
+      known++;
+      if (g.needs_reauth) issues.push("Google needs signing in again");
+      else if (!g.connected) issues.push("Google not connected");
+    }
+    var gh = src.github;
+    if (gh && typeof gh.connected === "boolean") {
+      known++;
+      if (!gh.connected) issues.push("GitHub not connected");
+      else if (Array.isArray(gh.attention) && gh.attention.length) issues.push("GitHub needs attention");
+    }
+    if (issues.length)
+      rows.push({ key: "connections", label: "Connections", go: "sec-connections",
+        html: '<span class="sg-warn">' + E(issues.join(" · ")) + "</span>" });
+    else if (known === 3)
+      rows.push({ key: "connections", label: "Connections", go: "sec-connections",
+        html: '<span class="sg-m">Nothing needs action</span>' });
+    // the last health check the page already ran (never run from here)
+    var doc_ = src.doctor;
+    if (doc_ && doc_.summary && typeof doc_.summary === "object") {
+      var s = doc_.summary, fl = num(s.fail), wn = num(s.warn), ps = num(s.pass);
+      var when = "";
+      try {
+        var D = win().hermesDoctor;
+        if (doc_.generated && D && typeof D.fmtWhen === "function") when = D.fmtWhen(doc_.generated);
+      } catch (e) {}
+      rows.push({ key: "health", label: "Health check", go: "sec-system",
+        html: E(ps + " pass") + '<span class="sg-m"> · </span>' +
+          '<span class="' + (wn ? "sg-warn" : "") + '">' + E(wn + " warn") + "</span>" +
+          '<span class="sg-m"> · </span><span class="' + (fl ? "sg-bad" : "") + '">' + E(fl + " fail") + "</span>" +
+          (when ? '<span class="sg-m"> · ' + E("checked " + when) + "</span>" : "") });
+    }
+    // installed version, and whether an update is known
+    var v = src.version;
+    if (v && typeof v.version === "string" && v.version) {
+      var uc = src.update, tail = "";
+      if (uc && !uc.error && uc.update_available === true && uc.latest)
+        tail = '<span class="sg-m"> · </span><span class="sg-warn">' + E(String(uc.latest) + " available") + "</span>";
+      else if (uc && !uc.error && uc.update_available === false)
+        tail = '<span class="sg-m"> · up to date</span>';
+      rows.push({ key: "version", label: "Version", go: "sec-system", html: E(v.version) + tail });
+    }
+    return rows;
+  }
+
+  function glanceTarget(go) {
+    if (go === "hub") return "the Hub";
+    var p = PANEL_BY_ID[go];
+    return p ? p.title : "";
+  }
+
+  function renderGlance(rows) {
+    var d = doc(); if (!d) return;
+    var panel = byId("sec-overview"); if (!panel) return;
+    var body = panel.querySelector(".set-body"); if (!body) return;
+    var card = byId("set-glance");
+    if (!rows || !rows.length) {
+      if (card && card.parentNode) { card.parentNode.removeChild(card); markEmpty(); }
+      return;
+    }
+    if (!card) {
+      card = d.createElement("section");
+      card.className = "card glass span2";
+      card.id = "set-glance";
+      card.setAttribute("aria-labelledby", "set-glance-h");
+    }
+    card.innerHTML = '<h2 id="set-glance-h">' + GLANCE_GLY + "At a glance</h2>" +
+      '<div class="body">' + rows.map(function (r) {
+        return '<button type="button" class="sg-row" data-glance="' + E(r.key) + '" data-go="' + E(r.go) + '">' +
+          '<span class="sg-k">' + E(r.label) + '</span><span class="sg-v">' + r.html +
+          '<span class="sg-vh">, open ' + E(glanceTarget(r.go)) + "</span></span>" +
+          svg(CHEV) + "</button>";
+      }).join("") + "</div>";
+    // right after the Overview's headline card, else first in the panel
+    var hero = byId("mind-base-hero");
+    var after = (hero && hero.parentNode === body) ? hero.nextSibling : body.firstChild;
+    if (card.parentNode !== body || (hero && hero.parentNode === body && card.previousSibling !== hero)) {
+      if (after !== card) body.insertBefore(card, after);
+    }
+    each(card.querySelectorAll(".sg-row"), function (b) {
+      b.addEventListener("click", function () {
+        var go = b.getAttribute("data-go"), w = win();
+        if (go === "hub") { try { if (typeof w.setView === "function") w.setView("hub"); } catch (e) {} return; }
+        settingsShow(go);
+      });
+    });
+    markEmpty();
+    try { buildSearchIndex(); } catch (e) {}
   }
 
   function install() {
@@ -762,6 +1007,9 @@
     w.mindExtras = async function () {
       if (typeof prev === "function") { try { await prev(); } catch (e) {} }
       try { runRelocate(); } catch (e) {}
+      // mindExtras runs once per opening of Settings (loadCapabilities): a new
+      // showing of the Overview reads its facts again
+      try { if (Date.now() - glance.at > 2000) glanceMaybe(); } catch (e) {}
     };
 
     // safety net for async late mounts
@@ -821,6 +1069,7 @@
   W.settingsEnsureShell = function () { var h = byId("view-mind"); if (h) ensureShell(h); };
   W.SETTINGS_CARD_MAP = CARD_MAP;
   W.SETTINGS_PANELS = PANELS;
+  W.settingsGlanceRows = glanceRows;
 
   // boot ---------------------------------------------------------------------
   try {

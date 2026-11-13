@@ -143,7 +143,7 @@ def run(tmp):
     # ...and doctor's scoping logic then finds it
     idx = [i for i, ln in enumerate(lines) if boot_re.match(ln)]
     check("_last_boot_index would return 0", idx and idx[-1] == 0, idx)
-    check("a string marker works too (not only the callable)", True)
+    print("  -- a string marker works too (not only the callable)")
     fill(log, 9)
     g["_log_rotate_once"](log, marker="plain string marker")
     check("string marker written verbatim",

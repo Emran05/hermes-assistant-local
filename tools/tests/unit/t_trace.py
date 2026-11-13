@@ -76,6 +76,11 @@ with open(os.path.join(CHATS, "chat-2099-01-01-test.json"), "w") as f:
         {"role": "bot", "text": "ok", "ts": A_END},
         {"role": "user", "text": "second", "ts": B_START - 0.02},
         {"role": "bot", "text": "no", "ts": B_END}]}, f)
+# the session index skips a chat file whose mtime predates the range, so the
+# file must look written when its last message was (noon), not at the real
+# clock: run before ~11:00 the real mtime is older than NOON - 1 h and the
+# conversation silently vanished from every roll-up
+os.utime(os.path.join(CHATS, "chat-2099-01-01-test.json"), (B_END, B_END))
 
 # recorder db
 REC = os.path.join(DATA, "recorder.db")

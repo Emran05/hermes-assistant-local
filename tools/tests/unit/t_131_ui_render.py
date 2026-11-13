@@ -32,11 +32,10 @@ def check(name, cond, detail=""):
 
 HARNESS = r"""
 // --- the inline helpers these modules expect from index.html -----------------
-globalThis.esc = function (s) {
-  return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
-    return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];
-  });
-};
+// esc() is the REAL one, cut out of index.html's inline script (C84: the
+// stand-in that used to live here also escaped ' — the shipped one does not)
+globalThis.esc = require(require("path").join(process.env.HERMES_REPO,
+  "tools", "tests", "lib", "index_helpers.js")).indexFunction("esc");
 globalThis.relTime = function (ts) { return "just now"; };
 globalThis.REDUCE = true;
 globalThis.setTimeout = function () { return 0; };   // no dangling timers
@@ -145,7 +144,7 @@ CASES = {
 
 def run(tmp):
     if shutil.which("node") is None:
-        print("  --   node not installed; skipped")
+        print("  SKIP node not installed — renderer checks")
         return
     hp = os.path.join(tmp, "harness.js")
     cp = os.path.join(tmp, "cases.json")
@@ -160,7 +159,8 @@ def run(tmp):
 
     p = subprocess.run(["node", hp, os.path.join(DASH, "aux_context.js"),
                         os.path.join(DASH, "aux_recorder.js"), cp],
-                       capture_output=True, text=True, timeout=60)
+                       capture_output=True, text=True, timeout=60,
+                       env=dict(os.environ, HERMES_REPO=REPO))
     if p.returncode != 0:
         check("the harness ran", False, p.stderr.strip()[-600:])
         return
@@ -232,6 +232,9 @@ def run(tmp):
     e = out["retain"]["error"]
     check("an error payload renders as an error", 'class="rr-note bad"' in e, e)
     check("and is escaped", "<script>" not in e, e)
+    check("by the real esc(): every < and > becomes an entity",
+          "&lt;script&gt;bad&lt;/script&gt;" in e and "<script" not in e
+          and "</script" not in e, e)
     check("an empty payload does not throw",
           not out["retain"]["empty"].startswith("THREW"), out["retain"]["empty"][:120])
 

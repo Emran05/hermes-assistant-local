@@ -15,10 +15,17 @@
 //                        Auto removes data-theme so :root color-scheme:light dark
 //                        + the prefers-color-scheme media query drive the palette.
 //       - Reduce motion: sets :root[data-reduce] + injects a CSS rule that kills
-//                        animation/transition/scroll-behavior. Persisted, applied
-//                        on load. NOTE: this covers CSS/aurora motion only —
-//                        Motion One JS honours the OS reduce-motion setting
-//                        separately (the REDUCE const), which we do NOT override.
+//                        animation/transition/scroll-behavior on every element
+//                        AND its ::before/::after (the aurora is body::before —
+//                        `*` alone never matched it). Persisted, applied on load.
+//                        Script motion obeys it too (C03): Element.animate and
+//                        Motion One's animate() are gated here, so while
+//                        EITHER this pref or the OS setting asks for reduced
+//                        motion every Web Animation lands on its end state at
+//                        once, and turning it on settles what is running.
+//                        (index.html's REDUCE const is the OS value at load and
+//                        many callers never consult it; this gate does not
+//                        depend on them.)
 //       - Agent       : Pause / Resume kill switch (POST /api/agent/pause|resume,
 //                        pause gated by confirm()), reflecting .paused polled from
 //                        /api/models while open, with a 12-hour "Paused H:MM AM/PM"
@@ -82,6 +89,7 @@
       pause: '<rect x="6" y="5" width="4" height="14" rx="1.3"/><rect x="14" y="5" width="4" height="14" rx="1.3"/>',
       play: '<path d="M7 4l12 8-12 8z"/>',
       bell: '<path d="M12 3a5 5 0 0 0-5 5c0 5-2 6-2 6h14s-2-1-2-6a5 5 0 0 0-5-5z"/><path d="M10 18.5a2 2 0 0 0 4 0"/>',
+      motion: '<circle cx="15.5" cy="12" r="4.5"/><path d="M3 8.5h5M2 12h6M3 15.5h5"/>',
       chev: '<polyline points="9 6 15 12 9 18"/>'
     };
 
@@ -89,30 +97,42 @@
     function injectCSS() {
       if (byId("aux-prefs-css")) return;
       var css = [
-        // the honest reduce-motion kill switch — active only when data-reduce is set
-        ":root[data-reduce] *{animation:none!important;transition:none!important;scroll-behavior:auto!important}",
+        // the honest reduce-motion kill switch — active only when data-reduce is
+        // set. Pseudo-elements are listed explicitly: `*` does not match them,
+        // and the aurora drift lives on body::before.
+        ":root[data-reduce] *,:root[data-reduce] *::before,:root[data-reduce] *::after" +
+          "{animation:none!important;transition:none!important;scroll-behavior:auto!important}",
         ".prefswrap{position:relative;display:inline-flex}",
         ".prefsbtn{padding:7px;border-radius:10px}",
         ".prefsbtn .ic{width:16px;height:16px}",
         ".prefsmenu{position:absolute;top:calc(100% + 8px);right:0;width:286px;z-index:41;padding:8px;" +
-          "border-radius:14px;background:color-mix(in srgb,var(--ground) 92%,transparent);" +
+          "border-radius:14px;background:color-mix(in srgb,var(--ground) 98%,transparent);" +
           "-webkit-backdrop-filter:blur(40px) saturate(140%);backdrop-filter:blur(40px) saturate(140%);" +
           "border:1px solid var(--edge);box-shadow:0 20px 50px -12px rgba(0,0,0,.6),inset 0 1px 0 var(--specular)}",
         ".prefsmenu[hidden]{display:none}",
-        ".pf-h{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint);font-weight:640;padding:9px 8px 5px}",
+        ".pf-h{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:640;padding:9px 8px 5px}",
         ".pf-seg{display:flex;gap:4px;padding:3px;border-radius:11px;background:var(--chip);border:1px solid var(--hairline)}",
-        ".pf-seg b{flex:1;display:inline-flex;align-items:center;justify-content:center;gap:5px;font-size:11.5px;" +
+        ".pf-seg b{flex:1;display:inline-flex;align-items:center;justify-content:center;gap:5px;font-size:12px;" +
           "font-weight:600;color:var(--muted);padding:6px 4px;border-radius:8px;cursor:pointer;user-select:none;" +
-          "transition:background .15s,color .15s}",
+          "transition-property:background-color,color,scale;transition-duration:.15s,.15s,.38s;" +
+          "transition-timing-function:ease,ease,var(--gel,ease)}",
         ".pf-seg b .ic{width:13px;height:13px}",
         ".pf-seg b:hover{color:var(--ink)}",
         ".pf-seg b.on{background:linear-gradient(180deg,var(--iris-2),var(--iris));color:var(--iris-ink);" +
           "box-shadow:inset 0 1px 0 rgba(255,255,255,.35),0 2px 8px -3px color-mix(in srgb,var(--iris) 70%,transparent)}",
+        // ONE row grid (2026-10-08): every row is [18px glyph slot][10px][label…].
+        // Labels used to start at four different x offsets (17/27/41/43px):
+        // the reduce row had no glyph, the nav glyphs were 14 vs 16px wide, and
+        // the power glyph vanished after the first poll (it was re-filled with
+        // bare <rect>s, no <svg> around them). The slot fixes the column; the
+        // glyph size inside it is free.
+        ".pf-ico{flex:0 0 18px;width:18px;display:flex;align-items:center;justify-content:center}",
+        ".pf-row .pf-ico .ic{width:15px;height:15px;color:var(--muted)}",
         ".pf-row{display:flex;align-items:center;gap:10px;padding:9px 8px;border-radius:10px;cursor:pointer;transition:background .15s}",
         ".pf-row:hover{background:var(--chip)}",
         ".pf-row .txt{min-width:0;flex:1}",
         ".pf-row .nm{font-size:12.5px;font-weight:600}",
-        ".pf-row .rm2{font-size:10.5px;color:var(--faint)}",
+        ".pf-row .rm2{font-size:12px;color:var(--muted)}",
         // .pf-tog geometry/colour/motion now lives in index.html next to
         // .wt-tog — ONE switch, two legacy class names. Re-declaring it here
         // would silently win (an aux <style> is appended after the inline one),
@@ -126,7 +146,7 @@
         ".pf-power.resume{color:var(--ok)}",
         ".pf-power .ic{width:15px;height:15px;flex:none;fill:currentColor;stroke:currentColor}",
         ".pf-power .nm{font-size:12.5px;font-weight:600}",
-        ".pf-power .rm2{font-size:10.5px;color:var(--faint)}",
+        ".pf-power .rm2{font-size:12px;color:var(--muted)}",
         ".pf-div{height:1px;background:var(--hairline);margin:6px 4px}",
         ".pf-nav{display:flex;align-items:center;gap:10px;padding:10px 8px;border-radius:10px;cursor:pointer;transition:background .15s}",
         ".pf-nav:hover{background:var(--chip)}",
@@ -135,12 +155,12 @@
         ".pf-nav .txt{min-width:0;flex:1}",
         ".pf-nav .nm{font-size:12.5px;font-weight:640}",
         ".pf-nav.sub .nm{font-weight:600}",
-        ".pf-nav .rm2{font-size:10.5px;color:var(--faint)}",
+        ".pf-nav .rm2{font-size:12px;color:var(--muted)}",
         ".pf-nav .chev{width:14px;height:14px;color:var(--faint);flex:none;stroke-width:2}",
         ".pf-about{padding:9px 8px 5px}",
         ".pf-about .t{font-size:12px;font-weight:660}",
-        ".pf-about .s{font-size:10.5px;color:var(--faint);margin-top:2px}",
-        ".pf-about .m{font-size:10.5px;color:var(--muted);margin-top:5px;display:flex;align-items:center;gap:6px}"
+        ".pf-about .s{font-size:12px;color:var(--muted);margin-top:2px}",
+        ".pf-about .m{font-size:12px;color:var(--muted);margin-top:5px;display:flex;align-items:center;gap:6px}"
       ].join("");
       var st = mk("style", { id: "aux-prefs-css", html: css });
       (D.head || D.body || HTML).appendChild(st);
@@ -163,11 +183,14 @@
     function reflectSeg(mode) {
       for (var k in segBtns) {
         if (!segBtns[k]) continue;
-        try { segBtns[k].classList.toggle("on", k === mode); } catch (e) {}
+        try {
+          segBtns[k].classList.toggle("on", k === mode);
+          segBtns[k].setAttribute("aria-checked", k === mode ? "true" : "false");
+        } catch (e) {}
       }
     }
 
-    // ---- reduce motion (CSS/aurora only; Motion One JS uses OS REDUCE) ------
+    // ---- reduce motion (CSS above + the script-motion gate below) ----------
     function reduceOn() {
       try { if (HTML && HTML.getAttribute("data-reduce")) return true; } catch (e) {}
       return lsGet("hermes_reduce") === "1";
@@ -175,8 +198,85 @@
     function applyReduce(on) {
       if (HTML) { if (on) HTML.setAttribute("data-reduce", "1"); else HTML.removeAttribute("data-reduce"); }
       lsSet("hermes_reduce", on ? "1" : "0");
-      if (togEl) { try { togEl.classList.toggle("on", on); } catch (e) {} }
+      reflectReduce(on);
+      if (on) settleMotion();
     }
+    function reflectReduce(on) {
+      if (togEl) { try { togEl.classList.toggle("on", !!on); } catch (e) {} }
+      if (reduceRowEl) { try { reduceRowEl.setAttribute("aria-checked", on ? "true" : "false"); } catch (e) {} }
+    }
+
+    // Script motion (C03). CSS cannot reach a Web Animation, and Motion One
+    // drives some of its values from JS, so both entry points are wrapped:
+    // while reduced motion is asked for (this pref OR the OS, read live) an
+    // animation keeps its keyframes and end state but takes no time.
+    var OSMQ = null;
+    try { OSMQ = (typeof matchMedia === "function") ? matchMedia("(prefers-reduced-motion: reduce)") : null; } catch (e) {}
+    function lowMotion() {
+      try { if (HTML && HTML.hasAttribute && HTML.hasAttribute("data-reduce")) return true; } catch (e) {}
+      return !!(OSMQ && OSMQ.matches);
+    }
+    function stillTiming(opt) {
+      var o = {}, k;
+      if (typeof opt === "number") o.duration = opt;
+      else if (opt && typeof opt === "object") for (k in opt) o[k] = opt[k];
+      o.duration = 0; o.delay = 0; o.endDelay = 0; o.iterations = 1;
+      return o;
+    }
+    function gateMotion() {
+      try {
+        var EP = (typeof Element !== "undefined") ? Element.prototype : null;
+        if (EP && typeof EP.animate === "function" && !EP.animate.__hermesStill) {
+          var nativeAnimate = EP.animate;
+          var still = function (kf, opt) {
+            return nativeAnimate.call(this, kf, lowMotion() ? stillTiming(opt) : opt);
+          };
+          still.__hermesStill = true;
+          EP.animate = still;
+        }
+      } catch (e) {}
+      try {
+        var MO = (typeof window !== "undefined") ? window.Motion : null;
+        if (MO && typeof MO.animate === "function" && !MO.animate.__hermesStill) {
+          var motionAnimate = MO.animate;
+          var mstill = function (a, b, c) {
+            if (!lowMotion()) return motionAnimate.apply(this, arguments);
+            // Motion One: duration 0 + delay 0 is its own "instant" path
+            // (onComplete fires, .finished resolves) — same end state, no time
+            var o = {}, k;
+            if (c && typeof c === "object") for (k in c) o[k] = c[k];
+            o.duration = 0; o.delay = 0; o.repeat = 0; o.repeatDelay = 0;
+            return motionAnimate.call(this, a, b, o);
+          };
+          mstill.__hermesStill = true;
+          MO.animate = mstill;
+        }
+      } catch (e) {}
+    }
+    // turning reduced motion ON mid-animation: jump what is running to its end
+    // (CSS animations/transitions are the kill rule's job, so they are left
+    // alone; an infinite one has no end, so it is cancelled)
+    function settleMotion() {
+      try {
+        if (!D.getAnimations) return;
+        D.getAnimations().forEach(function (a) {
+          try {
+            if ((typeof CSSAnimation !== "undefined" && a instanceof CSSAnimation) ||
+                (typeof CSSTransition !== "undefined" && a instanceof CSSTransition)) return;
+            var t = (a.effect && a.effect.getComputedTiming) ? a.effect.getComputedTiming() : null;
+            if (t && t.iterations === Infinity) a.cancel(); else a.finish();
+          } catch (e) {}
+        });
+      } catch (e) {}
+    }
+    gateMotion();
+    try {
+      if (OSMQ) {
+        var onOS = function () { if (OSMQ.matches) settleMotion(); };
+        if (OSMQ.addEventListener) OSMQ.addEventListener("change", onOS);
+        else if (OSMQ.addListener) OSMQ.addListener(onOS);
+      }
+    } catch (e) {}
 
     // ---- agent pause / resume (mirrors the model-menu power row) ------------
     var agentPaused = false;
@@ -184,7 +284,7 @@
       agentPaused = !!paused;
       if (!powerRow) return;
       powerRow.className = "pf-power" + (agentPaused ? " resume" : "");
-      if (powerIcon) powerIcon.innerHTML = agentPaused ? ICON.play : ICON.pause;
+      if (powerIcon) powerIcon.innerHTML = svg(agentPaused ? ICON.play : ICON.pause);
       if (powerName) powerName.textContent = agentPaused ? "Resume agent" : "Pause agent";
       if (powerSub) {
         if (agentPaused) {
@@ -233,33 +333,46 @@
     }
 
     // ---- open / close (Motion One + REDUCE fallback) -----------------------
-    var menuOpen = false, pollTimer = null;
+    var menuOpen = false, pollTimer = null, exitAnim = null;
     function openMenu() {
       if (menuOpen || !menu) return;
       menuOpen = true;
       reflectSeg(currentTheme());
-      if (togEl) { try { togEl.classList.toggle("on", reduceOn()); } catch (e) {} }
+      reflectReduce(reduceOn());
+      if (btnEl) { try { btnEl.setAttribute("aria-expanded", "true"); } catch (e) {} }
+      // The entrance is CSS now (index.html: #prefs-menu:not([hidden]) —
+      // keyframes replay on every unhide, grow out of the gear's corner and
+      // honour both reduce-motion switches). Clear what the Motion One EXIT
+      // below left inline (opacity:0 + its transform), or the keyframes would
+      // end on an invisible menu.
+      // cancel() reverts the exit to ITS first keyframe (opacity 1, identity),
+      // so even a late Motion frame written after the clear below is harmless
+      if (exitAnim) { try { if (exitAnim.cancel) exitAnim.cancel(); } catch (e) {} exitAnim = null; }
+      try { menu.getAnimations().forEach(function (a) { if (!(window.CSSAnimation && a instanceof CSSAnimation)) a.cancel(); }); } catch (e) {}
+      try { menu.style.opacity = ""; menu.style.transform = ""; } catch (e) {}
       menu.hidden = false;
-      if (HAS_ANIM && !LOWMO) {
-        // NB: the end keyframe must be an explicit identity, not "none" —
-        // Motion One decomposes a scale()-carrying pair against "none" into a
-        // ZERO matrix, which rendered this whole menu at 0x0 (the gear looked
-        // dead). Translate-only pairs elsewhere in the app are unaffected.
-        try { animate(menu, { opacity: [0, 1], transform: ["translateY(-6px) scale(.98)", "translateY(0px) scale(1)"] }, { duration: 0.2, easing: SPR }); } catch (e) {}
-      }
       poll();
       try { pollTimer = setInterval(poll, 4000); } catch (e) {}
     }
     function closeMenu() {
       if (!menuOpen || !menu) return;
       menuOpen = false;
+      if (btnEl) { try { btnEl.setAttribute("aria-expanded", "false"); } catch (e) {} }
+      // focus was in the menu (keyboard use, or a row that closes it): hand it
+      // back to the gear rather than to <body> when the menu hides
+      var hadFocus = false;
+      try { hadFocus = !!(D.activeElement && menu.contains(D.activeElement)); } catch (e) {}
+      if (hadFocus && btnEl) { try { btnEl.focus({ preventScroll: true }); } catch (e) {} }
       if (pollTimer) { try { clearInterval(pollTimer); } catch (e) {} pollTimer = null; }
       var hide = function () { try { menu.hidden = true; } catch (e) {} };
       if (HAS_ANIM && !LOWMO) {
         var a;
         try { a = animate(menu, { opacity: [1, 0], transform: ["translateY(0px) scale(1)", "translateY(-6px) scale(.98)"] }, { duration: 0.15, easing: SPR }); } catch (e) {}
+        exitAnim = a || null;
+        // a re-open during the fade must not be hidden by this exit's tail
+        var done = function () { if (!menuOpen) hide(); };
         var fin = a && a.finished ? a.finished : (a && a.then ? a : null);
-        if (fin && fin.then) fin.then(hide, hide); else setTimeout(hide, 160);
+        if (fin && fin.then) fin.then(done, done); else setTimeout(done, 160);
       } else hide();
     }
     function toggleMenu() { menuOpen ? closeMenu() : openMenu(); }
@@ -267,11 +380,52 @@
     // ---- build the dropdown once -------------------------------------------
     var menu, segBtns = { light: null, dark: null, auto: null };
     var togEl, powerRow, powerIcon, powerName, powerSub, aboutModel;
+    var reduceRowEl = null, btnEl = null;
+
+    // ---- keyboard (C93): a real menu, not click-only divs -------------------
+    // Every row is a [role^=menuitem] Tab stop; ArrowUp/Down/Home/End move
+    // between rows (Left/Right between the three theme choices), Enter/Space
+    // activate, Esc closes and gives focus back to the gear. Opening it from
+    // the keyboard puts focus on the first row.
+    function menuItems() {
+      if (!menu) return [];
+      var all = menu.querySelectorAll('[role^="menuitem"]'), out = [];
+      for (var i = 0; i < all.length; i++) {
+        if (all[i].getAttribute("aria-disabled") === "true") continue;
+        out.push(all[i]);
+      }
+      return out;
+    }
+    function focusItem(el) { if (el) { try { el.focus({ preventScroll: false }); } catch (e) {} } }
+    function onMenuKey(e) {
+      var k = e.key, t = e.target;
+      var items = menuItems(), i = items.indexOf(t), n = -1;
+      if (k === "ArrowDown") n = i < 0 ? 0 : (i + 1) % items.length;
+      else if (k === "ArrowUp") n = i < 0 ? items.length - 1 : (i - 1 + items.length) % items.length;
+      else if (k === "Home") n = 0;
+      else if (k === "End") n = items.length - 1;
+      else if ((k === "ArrowRight" || k === "ArrowLeft") && t && t.parentNode &&
+               t.parentNode.classList && t.parentNode.classList.contains("pf-seg")) {
+        var sib = Array.prototype.slice.call(t.parentNode.querySelectorAll('[role^="menuitem"]'));
+        var j = sib.indexOf(t);
+        if (j >= 0) { e.preventDefault(); focusItem(sib[(j + (k === "ArrowRight" ? 1 : sib.length - 1)) % sib.length]); }
+        return;
+      } else if ((k === "Enter" || k === " " || k === "Spacebar") && i >= 0) {
+        e.preventDefault();
+        // once per press: a held Space on Reduce motion flipped the whole
+        // page's motion on and off with every auto-repeat
+        if (!e.repeat) { try { t.click(); } catch (x) {} }
+        return;
+      }
+      if (n < 0 || !items.length) return;
+      e.preventDefault();
+      focusItem(items[n]);
+    }
 
     function segItem(mode, label, icon) {
       // icon + label are display-only (never queried) → innerHTML is fine here.
       var b = mk("b", {
-        attrs: { role: "button", "aria-label": label },
+        attrs: { role: "menuitemradio", "aria-label": label + " appearance", "aria-checked": "false", tabindex: "0" },
         html: svg(icon) + "<span>" + E(label) + "</span>",
         on: function () { applyTheme(mode); }
       });
@@ -280,8 +434,9 @@
     }
 
     function buildMenu() {
-      menu = mk("div", { cls: "prefsmenu glass", id: "prefs-menu", attrs: { role: "menu" } });
+      menu = mk("div", { cls: "prefsmenu glass", id: "prefs-menu", attrs: { role: "menu", "aria-label": "Preferences" } });
       menu.hidden = true;
+      try { menu.addEventListener("keydown", onMenuKey); } catch (e) {}
 
       // Appearance
       menu.appendChild(mk("div", { cls: "pf-h", text: "Appearance" }));
@@ -293,10 +448,14 @@
 
       // General — reduce motion
       menu.appendChild(mk("div", { cls: "pf-h", text: "General" }));
-      togEl = mk("div", { cls: "pf-tog", attrs: { role: "switch" }, kids: [mk("i")] });
+      // the row is the control (menuitemcheckbox + aria-checked); the switch
+      // inside it is its picture, so it is hidden from VoiceOver rather than
+      // announced as a second, nameless switch
+      togEl = mk("div", { cls: "pf-tog", attrs: { "aria-hidden": "true" }, kids: [mk("i")] });
       var reduceRow = mk("div", {
-        cls: "pf-row", attrs: { role: "menuitemcheckbox" },
+        cls: "pf-row", attrs: { role: "menuitemcheckbox", "aria-checked": "false", tabindex: "0" },
         kids: [
+          mk("span", { cls: "pf-ico", html: svg(ICON.motion) }),
           mk("div", { cls: "txt", kids: [
             mk("div", { cls: "nm", text: "Reduce motion" }),
             mk("div", { cls: "rm2", text: "Stills the aurora and UI animation" })
@@ -305,15 +464,16 @@
         ]
       });
       reduceRow.onclick = function () { applyReduce(!reduceOn()); };
+      reduceRowEl = reduceRow;
       menu.appendChild(reduceRow);
 
       // Agent — pause / resume
       menu.appendChild(mk("div", { cls: "pf-h", text: "Agent" }));
-      powerIcon = mk("span", { html: svg(ICON.pause) });
+      powerIcon = mk("span", { cls: "pf-ico", html: svg(ICON.pause) });
       powerName = mk("div", { cls: "nm", text: "Pause agent" });
       powerSub = mk("div", { cls: "rm2", text: "parks the model — chat & Telegram pause too" });
       powerRow = mk("div", {
-        cls: "pf-power",
+        cls: "pf-power", attrs: { role: "menuitem", tabindex: "0" },
         kids: [powerIcon, mk("div", { cls: "txt", kids: [powerName, powerSub] })]
       });
       powerRow.onclick = onPower;
@@ -324,9 +484,9 @@
 
       // System Settings… (the main entry now the tab is hidden)
       var sysRow = mk("div", {
-        cls: "pf-nav",
+        cls: "pf-nav", attrs: { role: "menuitem", tabindex: "0" },
         kids: [
-          mk("span", { html: svg(ICON.gear) }),
+          mk("span", { cls: "pf-ico", html: svg(ICON.gear) }),
           mk("div", { cls: "txt", kids: [
             mk("div", { cls: "nm", text: "System Settings…" }),
             mk("div", { cls: "rm2", text: "All controls · appearance, bridge, autonomy" })
@@ -339,9 +499,9 @@
 
       // Proactive & quiet hours — deep-link into the settings page
       var proRow = mk("div", {
-        cls: "pf-nav sub",
+        cls: "pf-nav sub", attrs: { role: "menuitem", tabindex: "0" },
         kids: [
-          mk("span", { html: svg(ICON.bell) }),
+          mk("span", { cls: "pf-ico", html: svg(ICON.bell) }),
           mk("div", { cls: "txt", kids: [
             mk("div", { cls: "nm", text: "Proactive & quiet hours" }),
             mk("div", { cls: "rm2", text: "Briefings, watchtower, notifications" })
@@ -360,7 +520,7 @@
       menu.appendChild(mk("div", { cls: "pf-div" }));
       aboutModel = mk("b", { text: "…" });
       var about = mk("div", {
-        cls: "pf-about",
+        cls: "pf-about", attrs: { role: "none" },
         kids: [
           mk("div", { cls: "t", text: "Hermes Assistant" }),
           mk("div", { cls: "s", text: "local-first · on your Mac" }),
@@ -390,17 +550,32 @@
       var wrap = mk("div", { cls: "prefswrap" });
       var btn = mk("button", {
         cls: "ghost prefsbtn", id: "prefs-btn",
-        attrs: { type: "button", title: "Preferences", "aria-label": "Preferences", "aria-haspopup": "true" },
+        attrs: { type: "button", title: "Preferences", "aria-label": "Preferences", "aria-haspopup": "menu",
+                 "aria-expanded": "false", "aria-controls": "prefs-menu" },
         html: svg(ICON.gear)
       });
-      btn.onclick = function (e) { try { e.stopPropagation(); } catch (x) {} toggleMenu(); };
+      btnEl = btn;
+      btn.onclick = function (e) {
+        try { e.stopPropagation(); } catch (x) {}
+        toggleMenu();
+        // detail 0 = Enter/Space (or VoiceOver) pressed the gear, not a mouse
+        if (menuOpen && e && e.detail === 0) focusItem(menuItems()[0]);
+      };
       wrap.appendChild(btn);
       wrap.appendChild(buildMenu());
       host.appendChild(wrap);
 
       // reflect current state now (so first open is instant/correct even w/o poll)
       reflectSeg(currentTheme());
-      if (togEl) { try { togEl.classList.toggle("on", reduceOn()); } catch (e) {} }
+      reflectReduce(reduceOn());
+
+      // Tabbing out of the menu closes it, like clicking outside does
+      try {
+        wrap.addEventListener("focusout", function (e) {
+          var to = e && e.relatedTarget;
+          if (menuOpen && to && !wrap.contains(to)) closeMenu();
+        });
+      } catch (e) {}
 
       // click-outside + Esc to close (mirror the model menu)
       try {

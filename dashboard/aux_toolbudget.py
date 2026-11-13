@@ -381,19 +381,53 @@ def _tb_dir_bytes(path):
     return total
 
 
+def _tb_num(v):
+    """A log field as an int: missing/empty -> 0, a finite number (or numeric
+    string) -> int, anything else -> None. R2-26: _tb_stats used to call int()
+    on these with no guard, so ONE row with kept_chars "n/a" (or a list, or
+    NaN) failed the whole /api/tool/budget payload with a 500."""
+    if v is None or v == "":
+        return 0
+    if isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if f != f or f in (float("inf"), float("-inf")):
+        return None
+    return int(f)
+
+
+def _tb_row_nums(r):
+    """(kept, omitted, est_tokens_saved) for one log row, or None when any of
+    them is not a number — the caller skips that row instead of failing."""
+    kept = _tb_num(r.get("kept_chars"))
+    omitted = _tb_num(r.get("omitted_chars"))
+    est = _tb_num(r.get("est_tokens_saved"))
+    if kept is None or omitted is None or est is None:
+        return None
+    return kept, omitted, est
+
+
 def _tb_stats(rows):
     today = _tb_datetime.date.today().isoformat()
     agg = {"calls": 0, "kept_chars": 0, "omitted_chars": 0,
            "est_tokens_saved": 0, "spills": 0, "tools": {}}
+    good, bad = [], 0
     for r in rows:
+        nums = _tb_row_nums(r)
+        if nums is None:
+            bad += 1                       # R2-26: skip it, never fail the card
+            continue
+        good.append((r, nums))
+    for r, (kept, omitted, est) in good:
         if not str(r.get("ts") or "").startswith(today):
             continue
         agg["calls"] += 1
-        agg["kept_chars"] += int(r.get("kept_chars") or 0)
-        agg["omitted_chars"] += int(r.get("omitted_chars") or 0)
-        agg["est_tokens_saved"] += int(
-            r.get("est_tokens_saved")
-            or round((r.get("omitted_chars") or 0) / _TB_CHARS_PER_TOKEN))
+        agg["kept_chars"] += kept
+        agg["omitted_chars"] += omitted
+        agg["est_tokens_saved"] += est or int(round(omitted / _TB_CHARS_PER_TOKEN))
         if r.get("spill_path"):
             agg["spills"] += 1
         t = str(r.get("tool") or "?")
@@ -402,17 +436,18 @@ def _tb_stats(rows):
     agg["orig_chars"] = agg["kept_chars"] + agg["omitted_chars"]
 
     last = None
-    if rows:
-        r = rows[-1]
+    if good:
+        r, (kept, omitted, est) = good[-1]
         last = {
             "ts": r.get("ts") or "",
             "tool": r.get("tool") or "",
-            "kept_chars": int(r.get("kept_chars") or 0),
-            "omitted_chars": int(r.get("omitted_chars") or 0),
-            "est_tokens_saved": int(r.get("est_tokens_saved") or 0),
+            "kept_chars": kept,
+            "omitted_chars": omitted,
+            "est_tokens_saved": est,
             "spill_path": r.get("spill_path") or "",
         }
     return {"today": agg, "last": last, "rows_seen": len(rows),
+            "rows_skipped": bad,
             "spill_bytes": _tb_dir_bytes(_TB_SPILL),
             "log": _TB_LOG, "spill_dir": _TB_SPILL}
 

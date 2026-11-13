@@ -391,7 +391,7 @@
       SEL + " .evbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:14px 0 0;" +
         "padding-top:12px;border-top:1px solid var(--hairline)}" +
       SEL + " button.evb{padding:9px 16px;border-radius:10px;font-size:12.5px;font-weight:600;" +
-        "cursor:pointer;border:0;background:var(--iris);color:#fff;min-height:40px;" +
+        "cursor:pointer;border:0;background:var(--iris);color:var(--iris-ink,#fff);min-height:40px;" +
         "transition-property:opacity;transition-duration:150ms;transition-timing-function:ease-out}" +
       SEL + " button.evb:disabled{opacity:.45;cursor:default}" +
       SEL + " .evwhy{font-size:11.5px;line-height:1.5;color:var(--muted);text-wrap:pretty}" +

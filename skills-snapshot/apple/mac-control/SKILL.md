@@ -9,7 +9,7 @@ metadata:
   hermes:
     tags: [macOS, desktop-control, screenshot, media, apps, automation, gated, computer-use]
     category: apple
-    related_skills: [screen-oracle, osascript-cookbook, remote-computer-control, apple-notes, apple-reminders, imessage]
+    related_skills: [screen-oracle, osascript-cookbook, apple-notes, apple-reminders, imessage]
 ---
 
 # Mac Control
@@ -36,7 +36,7 @@ MC="${HERMES_HOME:-$HOME/.hermes}/skills/apple/mac-control/scripts"
 | A macOS Shortcut already exists for the action | the gated Shortcuts bus (`GET/POST /api/shortcuts*`) | user-curated, already allowlisted + approval-ticketed |
 | Launch an app / open a URL | `open -a` via `$MC/open_app.sh` | recorded, http(s)-only, flag-injection-guarded |
 | Screenshot → send it to me | `$MC/capture_send.sh` | capture + send **hard-locked to the user's own Telegram** |
-| Non-scriptable / pixel-only UI (drag a slider, click an unlabeled button) | **`computer_use`** (see `computer-use/remote-computer-control`) | last resort; slower; every action recorded + irreversible; hard blocklists apply |
+| Non-scriptable / pixel-only UI (drag a slider, click an unlabeled button) | **`computer_use`** (`capture` first, then act by `element` index; section 5 applies) | last resort; slower; every action recorded + irreversible; hard blocklists apply |
 
 Rule of thumb: if you're about to screenshot-and-click a *scriptable* app, stop
 and use an osascript recipe instead.
@@ -77,7 +77,8 @@ card numbers out of a capture.
 "$MC/open_app.sh" "Google Chrome" "https://www.youtube.com/results?search_query=lofi"
 ```
 Then, to click the first result (a pixel action on a non-scriptable page), use
-`computer_use` (destructive → approval; recorded). Prefer the
+`computer_use` (destructive → approval card via the approval-gate plugin;
+recorded — see §5). Prefer the
 `osascript-cookbook/scripts/tabs.jxa` recipe when you only need to open a URL in
 a tab (no click needed).
 
@@ -117,7 +118,17 @@ never sent anywhere. Do not copy a dashboard frame into a reply or a send.
 The `computer_use` type/key blocklist is **defense-in-depth, not a boundary** —
 it is small and bypassable, so the *real* controls are the recorder + the
 approval gate + these rules. Follow them even when the tool would let you
-proceed:
+proceed.
+
+Where the approval comes from: Hermes' own `computer_use` prompt exists only in
+the interactive CLI. Everywhere else it is the **approval-gate** plugin: every
+click / type / key / scroll / drag / set_value (and `focus_app` with
+`raise_window`) raises an approval card in the dashboard (one card per action)
+or the approval prompt in Telegram, and in `hermes -z` or a cron run — where
+nobody can answer — it is **blocked**, so never plan pixel work there.
+`capture`, `wait`, `list_apps` and a plain `focus_app` are not gated. A block
+or a denial is final: do not retry, rephrase, or reach the same result another
+way.
 
 1. **Send target is hard-locked.** Screenshots/messages go to the user's own
    Telegram home channel and nowhere else. Never pass a `--to platform:chat_id`

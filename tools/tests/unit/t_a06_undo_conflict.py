@@ -103,11 +103,19 @@ RESTORES = []
 NS = dict(os=os, json=json, time=time, shutil=shutil, hashlib=hashlib,
           HASH_CAP_BYTES=CAP, SUMMARY_CAP=500, UNDO_WHITELIST={"write"},
           _rec_init=lambda: None, _rec_lock=threading.Lock(),
+          _rec_undo_lock=threading.Lock(),        # C08: undos serialise on their own
+          _no_snapshot_why=lambda source: "",     # C114: the no-snapshot reason
           _rec_json=lambda s: json.loads(s) if s else {},
           _newest_prerollback=lambda wd: {},
           _finish_undo=lambda *a, **kw: None,
           _rec_log=lambda msg: None,
-          _irreversible_detail=lambda kind: "n/a")
+          _irreversible_detail=lambda kind: "n/a",
+          # E01: the handler asks the snapshot about the path before it
+          # restores; this suite is about the conflict check, so the snapshot
+          # always holds the file (the E01 suite drives the real probe)
+          REC_NO_COPY="no earlier copy",
+          _rec_write_verdict=lambda con, row, snap, after: ("in_snapshot", "", {}),
+          _rec_trash_created=lambda *a: {"ok": False, "error": "unexpected"})
 definitions(REC, ["_sha256_file", "_after_state", "recorder_undo_handler"], NS)
 
 
@@ -121,7 +129,8 @@ NS["_ckpt"] = _ckpt
 
 def undo(target, after, force=False):
     """Run the real handler over one fake `write` row. -> (result, restores)."""
-    row = dict(status="done", kind="write", reversible="yes", target=str(target),
+    row = dict(status="done", kind="write", tool="write_file", reversible="yes",
+               target=str(target),
                after_state=json.dumps(after), undo_note="", session="fake", ts=1,
                snapshot_ref=json.dumps({"workdir": TMP, "commit": "fake",
                                         "short": "fake"}))

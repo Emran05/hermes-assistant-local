@@ -4,11 +4,11 @@
 Three parts:
   A. aux_appleapps.py exercised the way server.py execs it (stubbed globals,
      throwaway HOME) — settings read/write + the two HTTP handlers.
-  B. apple_apps_enabled() — server.py's choke point — reimplemented verbatim
-     (it's an 8-line pure function; importing the real 4000-line server.py
-     just to test it would open real sockets/threads) and exercised against
-     every settings shape: absent, explicit true/false, corrupt file,
-     non-dict value.
+  B. apple_apps_enabled() — server.py's choke point — the REAL function,
+     ast-extracted from server.py with the real get_settings (importing the
+     whole server would open sockets/threads), exercised against every
+     settings shape: absent, explicit true/false, corrupt file, non-dict
+     value. (It used to be a re-implemented copy — C84.)
   C. A source-scan regression proof: for every one of the four real
      Reminders/Notes osascript call sites the owner's complaint named, the
      gate check (`apple_apps_enabled(` / the needsyou wrapper) must appear
@@ -31,6 +31,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.environ.get("HERMES_REPO") or os.path.dirname(
     os.path.dirname(os.path.dirname(_HERE)))
 DASH = os.path.join(REPO, "dashboard")
+sys.path.insert(0, os.path.join(REPO, "tools", "tests", "lib"))
+import server_real  # noqa: E402  the REAL settings_update & co (C84)
 
 PASS, FAIL = [], []
 
@@ -71,21 +73,6 @@ def write_json(path, obj):
 _STATE_LOCK = threading.Lock()
 
 
-def settings_update(mutate_fn):
-    """Stand-in for server.py's settings_update() — ONE locked
-    read-modify-write of settings.json, the only way an aux module is allowed
-    to write it since the 2026-09-10 audit (A01)."""
-    with _STATE_LOCK:
-        s = read_json(SETTINGS, {})
-        if not isinstance(s, dict):
-            s = {}
-        out = mutate_fn(s)
-        if isinstance(out, dict):
-            s = out
-        write_json(SETTINGS, s)
-        return json.loads(json.dumps(s))
-
-
 GET_ROUTES, POST_ROUTES = {}, {}
 
 
@@ -99,12 +86,9 @@ G = {
     "HOME": SB,
     "HERE": DASH,
     "DATA": DATA,
-    "SETTINGS_FILE": SETTINGS,
-    "_state_lock": _STATE_LOCK,
-    "get_settings": lambda: read_json(SETTINGS, {}),
-    "read_json": read_json,
-    "write_json": write_json,
-    "settings_update": settings_update,
+    # server.py's own settings_update / settings_set / get_settings /
+    # read_json / write_json, sharing the module's _state_lock (C84)
+    **server_real.settings_api(SETTINGS, _STATE_LOCK),
     "register_get": lambda p, f: GET_ROUTES.__setitem__(p, f),
     "register_post": lambda p, f: POST_ROUTES.__setitem__(p, f),
 }
@@ -142,31 +126,31 @@ check("an unrelated settings key is not clobbered by the read-modify-write",
 check("the other app's flag survives a single-key POST",
       after.get("apple_apps", {}).get("reminders") is False, after)
 
+# C59.5: a JSON boolean only — bool("false") is True, which used to TURN ON
+# Reminders/Notes automation (the app is then launched and scripted)
+for v in ("false", "0", 0, 1, None, "true"):
+    write_json(SETTINGS, {"apple_apps": {"reminders": False, "notes": False}})
+    r = POST_ROUTES["/api/apple_apps"](Ctx({"reminders": v}))
+    check("reminders=%r is refused with 400" % (v,),
+          isinstance(r, tuple) and r[1] == 400 and "reminders" in r[0].get("error", ""), r)
+    check("  and automation stays off",
+          read_json(SETTINGS, {}).get("apple_apps") == {"reminders": False, "notes": False},
+          read_json(SETTINGS, {}))
+r = POST_ROUTES["/api/apple_apps"](Ctx({"reminders": True, "notes": "false"}))
+check("one bad key refuses the whole POST (nothing half-applied)",
+      isinstance(r, tuple) and r[1] == 400
+      and read_json(SETTINGS, {}).get("apple_apps") == {"reminders": False, "notes": False}, r)
+
 
 # ===========================================================================
-# B. apple_apps_enabled() — server.py's choke point, reimplemented verbatim
+# B. apple_apps_enabled() — server.py's choke point, the REAL function
 # ===========================================================================
 print("\n=== B. apple_apps_enabled() (server.py) ===")
 
-_settings_path = [None]
-
-
-def _get_settings_stub():
-    return read_json(_settings_path[0], {})
-
-
-def apple_apps_enabled(kind):
-    try:
-        cfg = _get_settings_stub().get("apple_apps")
-        if isinstance(cfg, dict):
-            return bool(cfg.get(kind))
-    except Exception:
-        pass
-    return False
-
-
 B = os.path.join(SB, "b-settings.json")
-_settings_path[0] = B
+_B_NS = dict(server_real.settings_api(B))
+server_real.server_functions(["apple_apps_enabled"], _B_NS)
+apple_apps_enabled = _B_NS["apple_apps_enabled"]
 
 json.dump({}, open(B, "w"))
 check("no apple_apps key at all -> both default False",
@@ -275,12 +259,38 @@ gated_before_call(
 # `'tell application "..."` , never a line whose stripped text starts with a
 # comment marker.
 import subprocess as _sp
-hits = _sp.run(
-    ["grep", "-rn", "--include=*.py", "--include=*.js",
-     "--exclude-dir=.git", "--exclude-dir=graphify-out",
-     "--exclude-dir=node_modules", "--exclude-dir=__pycache__",
-     "tell application", REPO],
-    capture_output=True, text=True).stdout.splitlines()
+
+
+def _tell_hits():
+    """`path:line:text` for every "tell application" line in the SHIPPED
+    sources: the files git tracks (R2-61).  Walking the tree counted every
+    untracked directory — another agent's scratch copies, mutants, a nested
+    checkout — as call sites.  Outside a git checkout (a tarball install) it
+    falls back to the old walk."""
+    r = _sp.run(["git", "-C", REPO, "ls-files", "-z", "--", "*.py", "*.js"],
+                capture_output=True, text=True)
+    if r.returncode != 0:
+        return _sp.run(
+            ["grep", "-rn", "--include=*.py", "--include=*.js",
+             "--exclude-dir=.git", "--exclude-dir=graphify-out",
+             "--exclude-dir=node_modules", "--exclude-dir=__pycache__",
+             "--exclude-dir=.scratch",
+             "tell application", REPO],
+            capture_output=True, text=True).stdout.splitlines()
+    out = []
+    for rel in sorted(p for p in r.stdout.split("\0") if p):
+        path = os.path.join(REPO, rel)
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                for n, line in enumerate(f, 1):
+                    if "tell application" in line:
+                        out.append("%s:%d:%s" % (path, n, line.rstrip("\n")))
+        except OSError:
+            continue                  # tracked but deleted in the working tree
+    return out
+
+
+hits = _tell_hits()
 targets = []
 for h in hits:
     m = re.match(r"^[^:]+:\d+:(.*)$", h)

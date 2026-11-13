@@ -73,7 +73,9 @@ def server_namespace(scratch):
               _widget_cache={})
     definitions("dashboard/server.py",
                 ["read_json", "write_json", "get_settings",
-                 "settings_update", "settings_set"], ns)
+                 "settings_update", "settings_set",
+                 "read_json_for_update", "_quarantine_corrupt",
+                 "_json_unparsable"], ns)
     return ns
 
 
@@ -172,7 +174,7 @@ def test_write_json_temp():
 
         ns["os"] = SimpleNamespace(
             **{k: getattr(os, k) for k in
-               ("open", "fdopen", "chmod", "stat", "unlink", "getpid",
+               ("open", "fdopen", "fsync", "chmod", "stat", "unlink", "getpid",
                 "O_WRONLY", "O_CREAT", "O_EXCL")}, replace=spy_replace)
         for i in range(3):
             ns["write_json"](path, {"n": i})
@@ -186,11 +188,12 @@ def test_write_json_temp():
               os.listdir(d))
         check("the file itself is correct", json.load(open(path)) == {"n": 2})
 
-        # an existing target's mode survives a rewrite
+        # an existing target keeps its OWNER bits only (2026-10-21 audit
+        # C110 narrowed this from "preserved"): group/other never survive
         os.chmod(path, 0o640)
         ns["write_json"](path, {"n": 9})
-        check("an existing file's permissions are preserved",
-              (os.stat(path).st_mode & 0o777) == 0o640,
+        check("an existing file is never left wider than 0600",
+              (os.stat(path).st_mode & 0o777) == 0o600,
               oct(os.stat(path).st_mode & 0o777))
         fresh = os.path.join(d, "fresh.json")
         ns["write_json"](fresh, {})

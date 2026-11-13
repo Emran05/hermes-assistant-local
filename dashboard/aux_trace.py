@@ -79,6 +79,7 @@ import bisect as _tr_bisect
 import datetime as _tr_datetime
 import hashlib as _tr_hashlib
 import json as _tr_json
+import math as _tr_math
 import os as _tr_os
 import sqlite3 as _tr_sqlite3
 import sys as _tr_sys
@@ -932,7 +933,15 @@ def _tr_range(ctx):
     try:
         until = float(raw_until) if raw_until else now
         since = float(raw_since) if raw_since else until - 86400.0
-    except ValueError:
+        # float() takes "nan"/"inf": nan passes both range tests below, and
+        # it, inf or a year past 9999 then raised in datetime (a 500)
+        if not (_tr_math.isfinite(since) and _tr_math.isfinite(until)):
+            raise ValueError("not finite")
+        _tr_datetime.datetime.fromtimestamp(since)
+        # _tr_days steps to the day AFTER until's, so an until on 9999-12-31
+        # passed a plain fromtimestamp() probe and overflowed there (a 500)
+        _tr_datetime.datetime.fromtimestamp(until) + _tr_datetime.timedelta(days=1)
+    except (ValueError, OverflowError, OSError):
         return None, None, ({"ok": False,
                              "error": "since/until must be epoch seconds"}, 400)
     if until <= since:

@@ -25,6 +25,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.environ.get("HERMES_REPO") or os.path.dirname(
     os.path.dirname(os.path.dirname(_HERE)))
 AUX = os.path.join(REPO, "dashboard", "aux_memlayer.py")
+sys.path.insert(0, os.path.join(REPO, "tools", "tests", "lib"))
+import server_real  # noqa: E402  the REAL settings_update & co (C84)
 
 FAILS = []
 CHECKS = [0]
@@ -76,43 +78,15 @@ def build(tmp, memories=None, settings=None, index_rows=None, scrubber=True):
         con.commit()
         con.close()
 
-    def read_json(p, default):
-        try:
-            with io.open(p, encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return default
-
-    def write_json(p, obj):
-        with io.open(p, "w", encoding="utf-8") as f:
-            json.dump(obj, f)
-
-    settings_lock = threading.RLock()
-
-    def settings_update(mutate_fn):
-        """Stand-in for server.py's settings_update() — ONE locked
-        read-modify-write of settings.json, the only way an aux module is
-        allowed to write it since the 2026-09-10 audit (A01)."""
-        with settings_lock:
-            s = read_json(settings_file, {})
-            if not isinstance(s, dict):
-                s = {}
-            out = mutate_fn(s)
-            if isinstance(out, dict):
-                s = out
-            write_json(settings_file, s)
-            return json.loads(json.dumps(s))
-
     g = {
         "__name__": "aux_memlayer_test",
         "HOME": home, "DATA": data, "HERE": os.path.dirname(AUX),
-        "SETTINGS_FILE": settings_file,
         "IX_DB": ix_db,
-        "_state_lock": settings_lock,
-        "read_json": read_json,
-        "write_json": write_json,
-        "settings_update": settings_update,
-        "get_settings": lambda: read_json(settings_file, {}),
+        # server.py's own settings_update / settings_set / get_settings /
+        # read_json / write_json and ONE plain (non-reentrant) _state_lock,
+        # exactly as in server.py — the stand-in used an RLock, which would
+        # have hidden a re-entrant settings write that deadlocks (C84)
+        **server_real.settings_api(settings_file),
         "register_get": lambda p, f: None,
         "register_post": lambda p, f: None,
     }
@@ -124,19 +98,26 @@ def build(tmp, memories=None, settings=None, index_rows=None, scrubber=True):
     return g
 
 
-# the two real aux_convos.py shapes we depend on (kept minimal on purpose)
-_CV_SECRET_RE = re.compile(
-    r"\b(serve_sid|serve_key|session_token|token|api[_-]?key|apikey|"
-    r"secret|password|passwd|authorization)\b\s*[:=]\s*"
-    r"[\"']?(?:Bearer\s+)?([A-Za-z0-9_\-./+=]{6,})[\"']?", re.I)
-_CV_RAW = (re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}"),
-           re.compile(r"\bghp_[A-Za-z0-9]{30,}"))
+# The two aux_convos.py names the module reuses for its secret check — the
+# REAL ones, ast-extracted (with the raw-secret table they read), not a copy:
+# a copy only proves memlayer works against the copy (C84).
+def _real_convos_scrubber():
+    import ast
+    path = os.path.join(REPO, "dashboard", "aux_convos.py")
+    tree = ast.parse(io.open(path, encoding="utf-8").read(), filename=path)
+    want = {"_CV_SECRET_RE", "_CV_RAW_SECRET_RES", "_cv_redact_raw"}
+    body = [n for n in tree.body
+            if (isinstance(n, ast.FunctionDef) and n.name in want)
+            or (isinstance(n, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id in want for t in n.targets))]
+    ns = {"re": re}
+    exec(compile(ast.Module(body=body, type_ignores=[]), path, "exec"), ns)
+    missing = want - set(ns)
+    assert not missing, "aux_convos.py has no %s" % sorted(missing)
+    return ns["_CV_SECRET_RE"], ns["_cv_redact_raw"]
 
 
-def _cv_redact_raw(text):
-    for rx in _CV_RAW:
-        text = rx.sub("[redacted]", text)
-    return text
+_CV_SECRET_RE, _cv_redact_raw = _real_convos_scrubber()
 
 
 class Ctx:
@@ -480,8 +461,11 @@ def run(tmp):
             check("refused %r" % bad[:18], False, "stored!")
         except ValueError:
             check("refused %r" % bad[:18], True)
-    g["_ml_add"](con, "The codeword is BANANA.")
-    check("ordinary prose is not eaten", True)
+    try:
+        g["_ml_add"](con, "The codeword is BANANA.")
+        check("ordinary prose is not eaten", True)
+    except ValueError as e:
+        check("ordinary prose is not eaten", False, "refused: %r" % (e,))
     con.commit()
     con.close()
 

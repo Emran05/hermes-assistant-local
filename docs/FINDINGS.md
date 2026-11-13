@@ -32,11 +32,15 @@ the old model's RAM before loading the new one. Switching models works properly 
 
 ## Approvals require the model to actually call a tool (by design)
 
-Under `approvals.mode: manual`, a headless `hermes -z` session can't approve, so tool calls that
-need approval don't execute (the model narrates fake success). This is expected. It's why the
-P1.4 live drills run through the *hub chat* surface (where the dashboard/Telegram can approve),
-not `-z`. Also why `--yolo` is refused: it would blanket-disable the approval gate (a safety
-invariant), so it's never used.
+**Corrected 2026-10-21 (audit C36):** a headless `hermes -z` run does NOT fail closed. Hermes'
+one-shot mode sets `HERMES_YOLO_MODE=1` for the whole call (`hermes_cli/oneshot.py`), and
+`tools/approval.py` auto-approves every dangerous command in any process that is neither the
+interactive CLI nor a gateway session; only the hardline floor (rm -rf /, mkfs, shutdown…) is
+still blocked, and `approvals.mode: manual` changes none of that. The P1.4 live drills still run
+through the *hub chat* surface (where the dashboard/Telegram can approve), not `-z`, and the
+dashboard's own one-shot runs now pass an explicit reduced `--toolsets` (`run_agent(...,
+toolsets=...)`; `UNATTENDED_NO_TOOLS` for the legacy briefing) — the tool list is the only
+control `-z` has. `--yolo` stays refused, and the chat no longer falls back to `-z` at all.
 
 ## Shortcuts bus — residual risk R1 (2026-07-05, P3.1)
 `shortcuts run <name>` matches NO hermes DANGEROUS_PATTERN, so a raw terminal

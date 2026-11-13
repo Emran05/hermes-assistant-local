@@ -245,14 +245,17 @@ def _met_finish_turn(job, now):
             if decode_ms > 200:
                 est_tok_per_sec = round(est_tokens_out / (decode_ms / 1000.0), 1)
 
-        # path: the only route to the one-shot fallback is that exact status
-        # string (_chat_worker sets it before run_agent). Everything else is the
-        # serve backend. _submitted_ts (if the optional hook lands) confirms serve.
+        # path: "serve" for every turn that went to the serve backend;
+        # "refused" when serve could not be reached and NOTHING ran. Since
+        # 2026-10-21 (C36/C118) that is _chat_worker's only no-serve outcome
+        # — the one-shot fallback (and the "using one-shot mode" status this
+        # used to match, which made the old "oneshot" bucket dead) is gone.
+        # _submitted_ts confirms serve took the prompt.
         status = job.get("status") or ""
         if job.submitted_ts is not None:
             path = "serve"
-        elif status == "serve backend unavailable, using one-shot mode":
-            path = "oneshot"
+        elif status.startswith("serve backend unavailable") and not job.get("ok"):
+            path = "refused"
         else:
             path = "serve"
 
@@ -479,10 +482,22 @@ def metrics_sampler_loop():
 # --------------------------------------------------------------------------
 # derived reads from the real P1.2 / P1.3 files
 # --------------------------------------------------------------------------
+# How a card that was "asked" can end (hermes_rpc._Approvals): the owner's
+# answer, or one of the dashboard's own endings — serve had already dropped it
+# ("expired"), its TTL ran out ("timeout"), the queues could no longer be
+# trusted ("desync-denied"), the answer's delivery failed ("respond-failed"),
+# or the owner stopped the turn before their Approve left ("stopped-denied").
+# All of them resolve it; counting only the owner's two answers left every
+# other ending "pending" forever (2026-10-21 round 2, R2-14).
+_MET_APPROVAL_ENDINGS = ("expired", "timeout", "desync-denied", "respond-failed",
+                         "stopped-denied")
+
+
 def _met_approval_counts():
     def build():
         c = {"asked": 0, "auto-approved": 0, "auto-denied": 0,
              "user-approve": 0, "user-deny": 0}
+        c.update((a, 0) for a in _MET_APPROVAL_ENDINGS)
         try:
             if os.path.exists(PERM_LOG):
                 with open(PERM_LOG, encoding="utf-8") as f:
@@ -503,9 +518,14 @@ def _met_approval_counts():
         requested = c["asked"] + c["auto-approved"] + c["auto-denied"]
         approved = c["auto-approved"] + c["user-approve"]
         denied = c["auto-denied"] + c["user-deny"]
-        pending = max(0, c["asked"] - c["user-approve"] - c["user-deny"])
+        ended = sum(c[a] for a in _MET_APPROVAL_ENDINGS)
+        pending = max(0, c["asked"] - c["user-approve"] - c["user-deny"] - ended)
         return {"requested": requested, "approved": approved, "denied": denied,
-                "pending": pending, "source": "permissions-log"}
+                "pending": pending,
+                "expired": c["expired"], "timeout": c["timeout"],
+                "desync_denied": c["desync-denied"],
+                "respond_failed": c["respond-failed"],
+                "source": "permissions-log"}
     try:
         return _cached("metrics_approvals", 20, build)
     except Exception:
@@ -587,7 +607,7 @@ def _met_stats_from_turns(T):
                     "p95": _met_pctl(turn, 95), "n": len(turn)},
         "setup_ms": {"p50": _met_pctl(setup, 50), "n": len(setup)},
         "est_tok_per_sec": {"p50": _met_pctl(tps, 50), "n": len(tps)},
-        "paths": {"serve": paths.get("serve", 0), "oneshot": paths.get("oneshot", 0)},
+        "paths": {"serve": paths.get("serve", 0), "refused": paths.get("refused", 0)},
     }
 
 

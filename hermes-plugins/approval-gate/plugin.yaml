@@ -1,0 +1,12 @@
+name: approval-gate
+version: 1.0.0
+description: "Routes computer_use desktop actions (click, type, key, set_value, drag, scroll...) and write_file/patch to sensitive paths (shell rc files, LaunchAgents, ~/.hermes, ~/.claude, the Hermes Assistant install dir) through Hermes' own approval prompt — the dashboard approval card, Telegram's approval prompt, or the CLI prompt — and blocks them where no approval surface exists (hermes -z, cron, background tasks)."
+author: "Hermes Assistant (local)"
+kind: standalone
+# `provides_hooks` is the key hermes_cli/plugins.py::_parse_manifest reads;
+# `hooks` mirrors it, as in tool-budget's manifest. register(ctx) is what
+# actually wires the hook.
+provides_hooks:
+  - pre_tool_call
+hooks:
+  - pre_tool_call

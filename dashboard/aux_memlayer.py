@@ -189,7 +189,11 @@ END;
 CREATE TABLE IF NOT EXISTS ml_meta(k TEXT PRIMARY KEY, v TEXT);
 """
 
-_ml_state = {"ready": False, "error": "", "logged": set()}
+_ml_state = {"ready": False, "error": "", "logged": set(), "retry_at": 0.0}
+_ml_create_lock = threading.Lock()   # one thread recreates a deleted memory.db
+# How often the CHAT path re-tries a failed _ml_init() (C29). The routes retry
+# on every request; a turn must not pay a failing sqlite open each time.
+_ML_RETRY_S = 30.0
 # Written by whichever request thread built the last block, read by the same
 # thread a few lines later in /api/chat.  Thread-local precisely so two
 # concurrent turns cannot report each other's size.
@@ -227,18 +231,63 @@ def _ml_conn():
     first and chmod'ing after leaves a window where it is world-readable.
     """
     if not os.path.exists(ML_DB):
-        try:
-            os.makedirs(os.path.dirname(ML_DB), mode=0o700, exist_ok=True)
-        except OSError:
-            pass
-        try:
-            os.close(os.open(ML_DB, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600))
-        except FileExistsError:
-            pass
+        with _ml_create_lock:
+            if not os.path.exists(ML_DB):
+                try:
+                    os.makedirs(os.path.dirname(ML_DB), mode=0o700,
+                                exist_ok=True)
+                except OSError:
+                    pass
+                # C108: a memory.db deleted under a running dashboard leaves
+                # WAL/shm sidecars that belong to the file that is gone —
+                # replaying them into a new one is how a store comes back
+                # "malformed" (the same fix aux_index's _ix_conn carries).
+                for suffix in ("-wal", "-shm"):
+                    try:
+                        os.remove(ML_DB + suffix)
+                    except OSError:
+                        pass
+                try:
+                    os.close(os.open(ML_DB, os.O_CREAT | os.O_EXCL | os.O_RDWR,
+                                     0o600))
+                except FileExistsError:
+                    pass
     con = sqlite3.connect(ML_DB, timeout=10.0)
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
+    # C108: the schema used to be created once, by _ml_init at import, and
+    # `ready` stayed True — so a memory.db deleted (or emptied) under a running
+    # dashboard failed every fact query and every turn's retrieval with "no
+    # such table" until a restart. One sqlite_master probe per connection
+    # (connections are per call) recreates it, and after boot re-runs the
+    # import, as the boot path does, so USER.md and friends come back.
+    probe = ("SELECT 1 FROM sqlite_master WHERE type='table' "
+             "AND name='facts_fts'")
+    if con.execute(probe).fetchone() is None:
+        with _ml_create_lock:            # one thread recreates + re-imports
+            if con.execute(probe).fetchone() is None:
+                con.executescript(_ML_SCHEMA)
+                # facts may have survived its FTS table: index what is there
+                con.execute("INSERT INTO facts_fts(facts_fts) VALUES('rebuild')")
+                con.commit()
+                _ml_migrate(con)
+                _ml_secure()
+                if _ml_state["ready"]:
+                    _ml_log("memory.db was missing its schema — recreated, "
+                            "re-importing")
+                    threading.Thread(target=_ml_reimport, daemon=True,
+                                     name="memlayer-reimport").start()
     return con
+
+
+def _ml_reimport():
+    """C108: refill a recreated memory.db from the files the boot import reads.
+    Never raises — a failed re-import leaves an empty but working store."""
+    try:
+        memlayer_import()
+    except Exception as e:
+        _ml_log("re-import after recreate failed: %s" % type(e).__name__,
+                once_key="reimport")
 
 
 def _ml_migrate(con):
@@ -262,15 +311,26 @@ def _ml_migrate(con):
                     "ON facts(review)")
         con.commit()
         return False
-    con.execute("ALTER TABLE facts ADD COLUMN review INTEGER NOT NULL DEFAULT 0")
-    con.execute("CREATE INDEX IF NOT EXISTS facts_review ON facts(review)")
-    con.execute("UPDATE facts SET source = 'people' "
-                "WHERE origin_key LIKE 'person:%'")
-    con.execute("UPDATE facts SET review = 1 WHERE archived = 0 "
-                "AND in_snapshot = 0 AND pinned = 0 AND source NOT IN (%s)"
-                % ", ".join("?" for _ in _ML_TRUSTED_SOURCES),
-                tuple(_ML_TRUSTED_SOURCES))
-    con.commit()
+    # ONE transaction. The sqlite3 module runs DDL in autocommit, so ALTER
+    # TABLE used to commit on its own: a crash (or any error) before the
+    # backfill below left the column present and the imported rows NOT held —
+    # and the early return above then made that permanent (2026-10-08 audit,
+    # "non-atomic memlayer review migration"). sqlite's DDL is transactional,
+    # so an explicit BEGIN makes the whole step all-or-nothing.
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        con.execute("ALTER TABLE facts ADD COLUMN review INTEGER NOT NULL DEFAULT 0")
+        con.execute("CREATE INDEX IF NOT EXISTS facts_review ON facts(review)")
+        con.execute("UPDATE facts SET source = 'people' "
+                    "WHERE origin_key LIKE 'person:%'")
+        con.execute("UPDATE facts SET review = 1 WHERE archived = 0 "
+                    "AND in_snapshot = 0 AND pinned = 0 AND source NOT IN (%s)"
+                    % ", ".join("?" for _ in _ML_TRUSTED_SOURCES),
+                    tuple(_ML_TRUSTED_SOURCES))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
     _ml_log("migrated: added facts.review and held existing imported rows "
             "for approval", once_key="migrate")
     return True
@@ -294,6 +354,24 @@ def _ml_init():
         _ml_state["error"] = "%s: %s" % (type(e).__name__, e)
         _ml_log("store unavailable — " + _ml_state["error"], once_key="init")
     return _ml_state["ready"]
+
+
+def _ml_ready_or_retry():
+    """True when the store is usable, re-running a failed _ml_init() at most
+    once per _ML_RETRY_S.
+
+    The chat path (memlayer_block) only ever READ `ready`, so one failed init
+    at import — a locked or briefly unreadable memory.db at dashboard start —
+    meant every later turn silently carried no memory block until a restart,
+    or until someone happened to open the memory card (whose routes re-init)
+    (2026-10-21 audit C29)."""
+    if _ml_state["ready"]:
+        return True
+    now = time.monotonic()
+    if now < _ml_state.get("retry_at", 0.0):
+        return False
+    _ml_state["retry_at"] = now + _ML_RETRY_S
+    return _ml_init()
 
 
 # --------------------------------------------------------------------------
@@ -348,8 +426,9 @@ def _ml_looks_secret(text):
 
     Reuses aux_convos.py's regexes rather than inventing a second, drifting
     copy: _CV_RAW_SECRET_RES for unlabeled vendor shapes (sk-ant-, ghp_, a
-    Telegram bot token…) and _CV_SECRET_RE for `token: <value>`.  This is the
-    owner's own data and nothing is redacted for privacy — but a fact is
+    Telegram bot token…) and _CV_SECRET_RE for `token: <value>`, counted only
+    when the value itself looks like a credential (see value_is_secret).  This
+    is the owner's own data and nothing is redacted for privacy — but a fact is
     replayed into the prompt of every matching turn, and a key that lands in
     the store would be re-sent forever.
 
@@ -358,6 +437,39 @@ def _ml_looks_secret(text):
     The old code swallowed that and returned False — i.e. the one moment the
     check was broken was the one moment every credential got in.
     """
+    def value_is_secret(m):
+        # X-prompts-egress-4 (2026-10-26 cross-review): the VALUE of one
+        # labeled match (`token: <value>`) must itself look like a credential.
+        # aux_convos' _CV_SECRET_RE is an OUTPUT redactor and deliberately
+        # broad — any credential word, `:` or `=`, six non-space characters.
+        # Mangling `token = tokenizer.encode(text)` in an export is a fine
+        # trade; refusing "Rotate the GitHub token: monthly" as a fact (or
+        # withholding it from For-You, which calls this function by name) is
+        # not. A credential carries a digit, a symbol or an auth scheme word,
+        # or is 16+ characters and not a dotted identifier/call: "monthly",
+        # "manager", "tokenizer.encode", "os.environ" are words; hunter22xyz,
+        # sk-…, a/b, "Bearer xyz…" and CorrectHorseBatteryStaple are not. The
+        # mirrored block is unchanged, and so are the unlabeled shapes. A
+        # regex with no value group (a stub, a rewrite) keeps the old
+        # whole-match answer: fail closed. Kept INSIDE this function so it
+        # travels with it; hermes_mcp._secret_value is the copy — change both.
+        try:
+            v = m.group(2)
+            if m.start(2) > m.end(1):
+                return True              # a "Bearer|Basic|Token " scheme word
+        except (IndexError, AttributeError):
+            return True
+        if not v:
+            return True
+        if any(c.isdigit() for c in v):
+            return True
+        if any(not (c.isalpha() or c in "_.") for c in v):
+            return True                  # a symbol
+        # a sentence-final "." is punctuation, not a dotted identifier:
+        # "password: CorrectHorseBatteryStaple." is still a passphrase
+        v = v.rstrip(".")
+        return len(v) >= 16 and "." not in v
+
     raw, labeled = _ml_scrubber()
     if raw is None and labeled is None:
         _ml_log("secret scrubber unavailable (aux_convos.py did not load) — "
@@ -367,7 +479,15 @@ def _ml_looks_secret(text):
     try:
         if raw is not None and raw(text) != text:
             return True
-        if labeled is not None and labeled.search(text):
+        if labeled is not None and any(
+                value_is_secret(m) for m in labeled.finditer(text)):
+            return True
+        # E24 (2026-11-09 audit): the redactor's PROSE rule too — "my password
+        # is Summer2026!" was scrubbed from every export and MCP result yet
+        # stored here as a fact.  That rule already insists on a digit or a
+        # mid-word symbol, so "the token is expired" still passes.
+        prose = _ml_g("_CV_PROSE_SECRET_RE")
+        if hasattr(prose, "search") and prose.search(text):
             return True
     except Exception as e:
         _ml_log("secret scrubber raised %s — refusing to store"
@@ -494,6 +614,12 @@ def memlayer_set_settings(patch):
     memory_layer key was lost. server.py's settings_update() re-reads the file
     inside _state_lock and this merges against THAT (2026-09-10 audit A01)."""
     patch = patch if isinstance(patch, dict) else {}
+    # E121 (2026-11-09 audit): bool("false") is True, so the STRING "false"
+    # switched the layer ON.  Only a JSON boolean is a switch value; anything
+    # else refuses the whole patch before the settings file is touched.
+    for key in ("enabled", "episodic"):
+        if key in patch and not isinstance(patch.get(key), bool):
+            raise ValueError("'%s' must be a JSON boolean (true or false)" % key)
     updater = _ml_g("settings_update")
     if not callable(updater):
         raise RuntimeError("settings unavailable")
@@ -502,9 +628,9 @@ def memlayer_set_settings(patch):
     def _apply(s):
         cur = _ml_norm_settings(s.get("memory_layer"))
         if "enabled" in patch:
-            cur["enabled"] = bool(patch.get("enabled"))
+            cur["enabled"] = patch.get("enabled") is True
         if "episodic" in patch:
-            cur["episodic"] = bool(patch.get("episodic"))
+            cur["episodic"] = patch.get("episodic") is True
         if "budget_chars" in patch:
             try:
                 n = int(patch.get("budget_chars"))
@@ -650,7 +776,7 @@ def memlayer_block(user_text, budget_chars=None, episodic=None, now=None):
     now = now if now is not None else time.time()
     empty = {"text": "", "chars": 0, "tokens": 0, "fact_ids": [],
              "facts": [], "episodic": []}
-    if budget <= 0 or not _ml_state["ready"]:
+    if budget <= 0 or not _ml_ready_or_retry():
         return empty
 
     con = None
@@ -767,6 +893,15 @@ def memlayer_last_chars():
 _ML_PIN_FULL = ("%d pinned facts is the limit — unpin one first"
                 % _ML_PINNED_MAX)
 
+# WHY a row is archived, in the `archived` column itself (no migration needed):
+# 1 = the owner archived it (the card's Archive button) — never undone by an
+# importer; 2 = the import's reconciliation pass found its line gone from its
+# file — undone the moment that position holds a line again (C105). Every
+# reader that means "hidden" tests `archived = 0` / `!= 0`, never `= 1`. Rows
+# archived before this split read as 1, the conservative reading.
+_ML_ARCH_OWNER = 1
+_ML_ARCH_STALE = 2
+
 
 def _ml_pinned_count(con, exclude_id=None):
     """Live pins.  Archived rows do not count: they are not injected."""
@@ -783,7 +918,7 @@ def _ml_add(con, text, kind="fact", source="user", pinned=False,
             now=None):
     """Insert one fact, or update the existing row with this origin_key.
 
-    Returns "added" | "updated" | "same".  origin_key is what makes every
+    Returns "added" | "updated" | "same" | "restored".  origin_key is what makes every
     importer idempotent, and since 1.2.3 it is source + file + POSITION rather
     than a hash of the text: with a text hash, editing line 3 of a memories
     file did not update line 3's row — it minted a second row and left the
@@ -796,6 +931,11 @@ def _ml_add(con, text, kind="fact", source="user", pinned=False,
     owner did not type into the card waits for approval before it can be
     retrieved.  An edit to an already-imported row re-arms that flag, because
     new text from a writable file is new untrusted text.
+
+    "restored" (C105): the row was archived by the RECONCILER (its line had
+    gone from the file) and the position holds a line again — the same one
+    restored from a snapshot, or a new entry. It is un-archived; identical text
+    keeps its approval, new text re-arms review exactly like "updated".
     """
     now = now if now is not None else time.time()
     text = _ml_txt(text, _ML_TEXT_MAX)
@@ -808,25 +948,33 @@ def _ml_add(con, text, kind="fact", source="user", pinned=False,
     flag = _ml_needs_review(source) if review is None else bool(review)
     if origin_key:
         row = con.execute(
-            "SELECT id, text FROM facts WHERE origin_key = ?",
+            "SELECT id, text, archived FROM facts WHERE origin_key = ?",
             (origin_key,)).fetchone()
         if row is None and legacy_key:
             row = con.execute(
-                "SELECT id, text FROM facts WHERE origin_key = ?",
+                "SELECT id, text, archived FROM facts WHERE origin_key = ?",
                 (legacy_key,)).fetchone()
             if row is not None:
                 con.execute("UPDATE facts SET origin_key = ? WHERE id = ?",
                             (origin_key, row[0]))
         if row:
+            stale = row[2] == _ML_ARCH_STALE
             if row[1] == text:
+                if stale:
+                    con.execute("UPDATE facts SET archived = 0, updated_ts = ? "
+                                "WHERE id = ?", (now, row[0]))
+                    return "restored"
                 return "same"
-            # `archived` is deliberately NOT cleared here: archiving is the
-            # owner's decision (or the reconciler's) and an importer must never
-            # resurrect what the owner dismissed.  Restore is one click away.
+            # An OWNER archive (archived=1) is deliberately left alone: an
+            # importer must never resurrect what the owner dismissed, and
+            # Restore is one click away.  A STALE archive is the importer's own
+            # bookkeeping, and the line it stood for is back.
             con.execute("UPDATE facts SET text = ?, kind = ?, review = ?, "
-                        "updated_ts = ? WHERE id = ?",
-                        (text, kind, 1 if flag else 0, now, row[0]))
-            return "updated"
+                        "updated_ts = ?, archived = CASE WHEN archived = ? "
+                        "THEN 0 ELSE archived END WHERE id = ?",
+                        (text, kind, 1 if flag else 0, now, _ML_ARCH_STALE,
+                         row[0]))
+            return "restored" if stale else "updated"
     con.execute(
         "INSERT INTO facts(text, kind, source, created_ts, updated_ts, "
         "last_used_ts, uses, weight, pinned, archived, in_snapshot, "
@@ -918,12 +1066,13 @@ def memlayer_import(now=None):
     The result splits every outcome: added / updated / same / skipped (empty
     entry) / refused (the credential check said no — see `reasons`) / failed
     (anything else, by exception type) / stale (a row whose line is no longer
-    in its file, archived by the reconciliation pass) / needs_review.
+    in its file, archived by the reconciliation pass) / restored (a stale row
+    whose position holds a line again, un-archived — C105) / needs_review.
     """
     now = now if now is not None else time.time()
     counts = {"added": 0, "updated": 0, "same": 0, "skipped": 0, "refused": 0,
-              "failed": 0, "stale": 0, "needs_review": 0, "reasons": [],
-              "sources": {}}
+              "failed": 0, "stale": 0, "restored": 0, "needs_review": 0,
+              "reasons": [], "sources": {}}
     if not _ml_state["ready"] and not _ml_init():
         counts["error"] = _ml_state["error"]
         return counts
@@ -936,7 +1085,7 @@ def memlayer_import(now=None):
         return counts
 
     _ML_VERDICTS = ("added", "updated", "same", "skipped", "refused", "failed",
-                    "stale")
+                    "stale", "restored")
 
     def bump(src_label, verdict, reason=None):
         counts[verdict] = counts.get(verdict, 0) + 1
@@ -985,8 +1134,15 @@ def memlayer_import(now=None):
                 bump(src_label, "failed", "%s: %s" % (name, type(e).__name__))
                 continue
             bump(src_label, verdict)
-            if review and verdict in ("added", "updated"):
-                counts["needs_review"] += 1
+            if review and verdict in ("added", "updated", "restored"):
+                # Count what is REALLY waiting: a restored row may keep the
+                # owner's approval, and an edit to an owner-archived row is
+                # hidden — counting either made this line disagree with the
+                # card's own "needs review" number (C105).
+                st = con.execute("SELECT review, archived FROM facts "
+                                 "WHERE origin_key = ?", (key,)).fetchone()
+                if st and st[0] and not st[1]:
+                    counts["needs_review"] += 1
 
     con = None
     try:
@@ -1029,8 +1185,8 @@ def memlayer_import(now=None):
                 continue
             if key in seen[prefix]:
                 continue
-            con.execute("UPDATE facts SET archived = 1, updated_ts = ? "
-                        "WHERE id = ?", (now, fid))
+            con.execute("UPDATE facts SET archived = ?, updated_ts = ? "
+                        "WHERE id = ?", (_ML_ARCH_STALE, now, fid))
             bump(_ml_key_src(key), "stale")
         con.commit()
     except Exception as e:
@@ -1070,7 +1226,7 @@ def memlayer_stats():
             "SELECT COUNT(*) FROM facts WHERE archived = 0 AND pinned = 1"
         ).fetchone()[0]
         out["archived"] = con.execute(
-            "SELECT COUNT(*) FROM facts WHERE archived = 1").fetchone()[0]
+            "SELECT COUNT(*) FROM facts WHERE archived != 0").fetchone()[0]
         out["in_snapshot"] = con.execute(
             "SELECT COUNT(*) FROM facts WHERE in_snapshot = 1").fetchone()[0]
         # "live" already excludes these, so the two never double-count: a row
@@ -1101,6 +1257,23 @@ def memlayer_stats():
 def _ml_not_ready():
     return ({"ok": False, "error": _ml_state["error"] or "memory store "
              "unavailable"}, 503)
+
+
+def _ml_bool_field(body, key):
+    """(value, refusal) for an optional boolean field of a request body.
+
+    C59 (2026-10-21 audit): bool("false") is True, so a client that sent the
+    STRING "false" pinned the fact (or approved / archived it). Absent ->
+    (None, None); a JSON boolean -> (v, None); anything else -> a 400 refusal,
+    and the caller changes nothing. Same rule as aux_claudebridge's
+    _cb_bool_body."""
+    if key not in body:
+        return None, None
+    v = body.get(key)
+    if not isinstance(v, bool):
+        return None, ({"ok": False, "error": "'%s' must be a JSON boolean "
+                                             "(true or false)" % key}, 400)
+    return v, None
 
 
 def _ml_no_scrubber(e):
@@ -1171,10 +1344,19 @@ def _ml_facts_post(ctx):
     if not text:
         return ({"ok": False, "error": "text is required"}, 400)
     from_card = str(body.get("origin") or "").strip().lower() == "card"
-    pinned = bool(body.get("pinned"))
+    pinned, bad = _ml_bool_field(body, "pinned")          # C59: JSON bool only
+    if bad:
+        return bad
+    pinned = bool(pinned)
     con = None
     try:
         con = _ml_conn()
+        if pinned:
+            # the ceiling check and the pin are ONE write transaction, or two
+            # concurrent pins both count 11 and the store ends up at 13
+            # (2026-10-08 P3 "pin ceiling race"). A refusal returns before
+            # commit; close() rolls it back.
+            con.execute("BEGIN IMMEDIATE")
         if pinned and _ml_pinned_count(con) >= _ML_PINNED_MAX:
             return ({"ok": False, "error": _ML_PIN_FULL}, 400)
         verdict = _ml_add(con, text, kind=_ml_kind(body.get("kind")),
@@ -1217,8 +1399,13 @@ def _ml_facts_update(ctx):
         return _ml_not_ready()
     body = ctx.body if isinstance(ctx.body, dict) else {}
     from_card = str(body.get("origin") or "").strip().lower() == "card"
+    flags = {}                       # C59: each switch is a JSON boolean or 400
+    for key in ("approve_all", "approve", "pinned", "archived"):
+        flags[key], bad = _ml_bool_field(body, key)
+        if bad:
+            return bad
 
-    if body.get("approve_all"):
+    if flags["approve_all"]:
         con = None
         try:
             con = _ml_conn()
@@ -1242,7 +1429,7 @@ def _ml_facts_update(ctx):
         return ({"ok": False, "error": "id is required"}, 400)
 
     sets, args = [], []
-    if body.get("approve"):
+    if flags["approve"]:
         sets.append("review = 0")
     if "text" in body:
         text = _ml_txt(body.get("text"), _ML_TEXT_MAX)
@@ -1263,10 +1450,10 @@ def _ml_facts_update(ctx):
         args.append(_ml_kind(body.get("kind")))
     if "pinned" in body:
         sets.append("pinned = ?")
-        args.append(1 if body.get("pinned") else 0)
+        args.append(1 if flags["pinned"] else 0)
     if "archived" in body:
         sets.append("archived = ?")
-        args.append(1 if body.get("archived") else 0)
+        args.append(_ML_ARCH_OWNER if flags["archived"] else 0)
     if not sets:
         return ({"ok": False, "error": "nothing to change"}, 400)
     sets.append("updated_ts = ?")
@@ -1279,7 +1466,9 @@ def _ml_facts_update(ctx):
         # Refuse the 13th pin instead of accepting it and quietly injecting 12:
         # _ml_candidates can only carry _ML_PINNED_MAX of them, so a pin beyond
         # the limit used to be a button that did nothing visible and lied.
-        if body.get("pinned") and _ml_pinned_count(con, fid) >= _ML_PINNED_MAX:
+        if flags["pinned"]:
+            con.execute("BEGIN IMMEDIATE")     # count + pin as one step (above)
+        if flags["pinned"] and _ml_pinned_count(con, fid) >= _ML_PINNED_MAX:
             return ({"ok": False, "error": _ML_PIN_FULL}, 400)
         cur = con.execute("UPDATE facts SET " + ", ".join(sets) +
                           " WHERE id = ?", args)

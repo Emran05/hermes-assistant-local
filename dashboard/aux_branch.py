@@ -72,10 +72,14 @@ def _br_log(msg):
 
 
 def _br_valid(sid):
-    """A branchable conversation id: well-formed, real, and not the prewarm key."""
+    """A branchable conversation id: well-formed, real, and not reserved —
+    prewarm or the needs-you draft session (C38: a branch of it was a listed,
+    indexed copy of third-party text). Resolved by name at call time."""
     if not sid or not SESSION_RE.match(sid):                  # noqa: F821
         return False
-    if sid == PREWARM_SESSION:                                # noqa: F821
+    hidden = (globals().get("HIDDEN_SESSIONS")
+              or (PREWARM_SESSION, "needsyou"))               # noqa: F821
+    if sid.casefold() in hidden:      # any letter case (E69): one file on APFS
         return False
     return os.path.exists(chat_path(sid))                     # noqa: F821
 
@@ -172,17 +176,34 @@ def _br_serve_key_live(key):
         return False
 
 
-def br_seed_params(chat_meta):
-    """hermes_rpc.SEED_HOOK — extra `session.create` params for a forked chat.
-
-    Returns {} for every ordinary conversation, so the normal minting path is
-    byte-for-byte what it was. For a branch it returns
-    {"messages": [...], "parent_session_id": "<src serve_key>"?}.
+def _br_seed_of(chat_meta):
+    """The seed a forked chat would be created with ([] when none).
 
     The trailing user message is dropped: POST /api/chat appends the turn to
     the JSON *before* _chat_worker runs, and that same text is already the
     `prompt` about to be submitted — seeding it too would show the model the
     question twice. Everything before it is context, which is the point.
+    """
+    msgs = list(chat_meta.get("messages") or [])
+    if msgs and isinstance(msgs[-1], dict) and msgs[-1].get("role") == "user":
+        msgs = msgs[:-1]
+    return br_seed_history(msgs)
+
+
+def br_seed_params(chat_meta):
+    """hermes_rpc.SEED_HOOK — extra `session.create` params for a forked chat.
+
+    Returns {} for every ordinary conversation, so the normal minting path is
+    byte-for-byte what it was. For a branch it returns
+    {"messages": [...], "parent_session_id": "<a live state.db key>"?}.
+
+    The parent is the SOURCE conversation's serve_key when that is still a
+    live state.db row. When it is not (the source has no agent session, or its
+    row was pruned), it is the branch's OWN previous serve_key when the
+    run_turn wrapper below asked for a re-seed (`_br_reseed_parent`): upstream
+    persists a seed only for a session that has a parent, and without one the
+    branch forgot everything before its first turn as soon as serve's orphan
+    reaper dropped the live session (C120).
     """
     try:
         if not isinstance(chat_meta, dict):
@@ -190,10 +211,7 @@ def br_seed_params(chat_meta):
         forked = chat_meta.get("forked_from")
         if not isinstance(forked, dict):
             return {}
-        msgs = list(chat_meta.get("messages") or [])
-        if msgs and isinstance(msgs[-1], dict) and msgs[-1].get("role") == "user":
-            msgs = msgs[:-1]
-        seed = br_seed_history(msgs)
+        seed = _br_seed_of(chat_meta)
         if not seed:
             return {}
         params = {"messages": seed}
@@ -202,10 +220,103 @@ def br_seed_params(chat_meta):
             key = (load_chat(src).get("serve_key") or "").strip()   # noqa: F821
             if _br_serve_key_live(key):
                 params["parent_session_id"] = key
+        if "parent_session_id" not in params:
+            own = (chat_meta.get("_br_reseed_parent") or "").strip()
+            if own and _br_serve_key_live(own):
+                params["parent_session_id"] = own
         return params
     except Exception as e:                                    # pragma: no cover
         _br_log("seed build failed (branch starts empty): %r" % e)
         return {}
+
+
+def _br_row_parent(key):
+    """state.db `sessions.parent_session_id` of `key`, read-only.
+
+    None = no such row (or state.db unreadable); "" = a row with NO parent,
+    which for a branch means upstream never persisted its seed.
+
+    A row stamped `model_config._branched_from` counts as anchored even with
+    its parent gone: upstream stamps that marker exactly when it was created
+    WITH a parent (so `_persist_branch_seed` ran), and deleting the source
+    session later NULLs the child's parent_session_id but keeps the marker
+    (hermes_state.delete_session). Re-seeding that branch would only swap its
+    persisted history — tool calls included — for the text-only transcript."""
+    if not key or not os.path.exists(STATE_DB):               # noqa: F821
+        return None
+    try:
+        import sqlite3
+        uri = "file:" + _br_urlparse.quote(STATE_DB) + "?mode=ro"   # noqa: F821
+        con = sqlite3.connect(uri, uri=True, timeout=2)
+        try:
+            try:
+                row = con.execute(
+                    "SELECT parent_session_id, json_extract(COALESCE("
+                    "model_config, '{}'), '$._branched_from') FROM sessions "
+                    "WHERE id=? LIMIT 1", (key,)).fetchone()
+            except sqlite3.OperationalError:     # an older state.db: no column
+                row = con.execute("SELECT parent_session_id, NULL FROM sessions "
+                                  "WHERE id=? LIMIT 1", (key,)).fetchone()
+        finally:
+            con.close()
+        return None if row is None else (row[0] or row[1] or "")
+    except Exception:
+        return None
+
+
+def br_needs_reseed(chat_meta):
+    """The branch's current serve_key when its agent session was created WITHOUT
+    a parent (so its pre-branch seed lives only in serve's memory and the next
+    session.resume would drop it), else "".
+
+    C120: upstream `_persist_branch_seed` writes the seed to state.db only when
+    `parent_session_id` is set, and br_seed_params can give a parent only while
+    the source chat has a live state.db row. The branch's first turn is fine
+    (the live session carries the seed); 20 s later serve's orphan reaper drops
+    that session and session.resume rebuilds it from state.db, where the branch
+    holds only its own turns. The fix: re-create it ONCE, seeded with the whole
+    transcript so far and parented to its own previous row — a real row, so
+    upstream persists the seed and every later resume has the full context."""
+    if not isinstance(chat_meta, dict) or not isinstance(
+            chat_meta.get("forked_from"), dict):
+        return ""
+    key = (chat_meta.get("serve_key") or "").strip()
+    if not key or _br_row_parent(key) != "":
+        return ""        # no session yet, no row (a resume re-seeds anyway), or anchored
+    return key if _br_seed_of(chat_meta) else ""
+
+
+def _br_wrap_run_turn(orig):
+    """hermes_rpc.run_turn, re-seeding an unanchored branch first (C120).
+
+    Same runtime-override pattern aux_index uses for save_chat: server.py calls
+    `hermes_rpc.run_turn` by attribute at call time, so rebinding it here wraps
+    every dashboard turn without editing hermes_rpc. For anything that is not
+    an unanchored branch it is a pass-through."""
+    if getattr(orig, "_br_wrapped", False):
+        return orig
+
+    def run_turn(job, chat_meta, prompt, save_meta, *args, **kwargs):
+        prev = ""
+        try:
+            prev = br_needs_reseed(chat_meta)
+        except Exception as e:                                # pragma: no cover
+            _br_log("re-seed check failed: %r" % e)
+        if prev:
+            _br_log("branch session %s has no persisted seed — re-creating it "
+                    "with the full transcript, parented to itself" % prev)
+            chat_meta["serve_sid"] = ""      # in memory only: run_turn creates,
+            chat_meta["serve_key"] = ""      # then save_meta() persists the new ids
+            chat_meta["_br_reseed_parent"] = prev
+        try:
+            return orig(job, chat_meta, prompt, save_meta, *args, **kwargs)
+        finally:
+            if isinstance(chat_meta, dict):
+                chat_meta.pop("_br_reseed_parent", None)
+
+    run_turn._br_wrapped = True
+    run_turn.__wrapped__ = orig
+    return run_turn
 
 
 # --------------------------------------------------------------------------
@@ -367,6 +478,7 @@ register_get("/api/sessions/tree", _br_tree)                  # noqa: F821
 try:
     import hermes_rpc as _br_rpc
     _br_rpc.SEED_HOOK = br_seed_params
+    _br_rpc.run_turn = _br_wrap_run_turn(_br_rpc.run_turn)
 except Exception as _br_e:                                    # pragma: no cover
     _br_log("seed hook not wired — branches will start with no context: %r"
             % _br_e)

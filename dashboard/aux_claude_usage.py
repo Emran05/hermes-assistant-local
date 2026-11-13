@@ -3,7 +3,7 @@
 # exec'd into server.py's globals by the aux-module loader (after
 # expanders_extra.py, sorted before the other aux_*.py). It may use these
 # server.py globals: HOME, read_json, write_json, _cached, _widget_cache,
-# register_get, register_post, get_layout, save_layout, WIDGETS, EXPANDERS.
+# register_get, register_post, layout_inject, WIDGETS, EXPANDERS.
 # It imports ALL its own stdlib deps (exec'd code can't rely on server.py's
 # function-local imports) and defines only new names (CU_*, _cu_*,
 # w_claude_usage, expand_claude_usage) so it clobbers nothing.
@@ -26,6 +26,7 @@
 import os
 import sys
 import json
+import threading
 import time
 import datetime as _cu_datetime   # private alias: other aux modules do
                                   # `from datetime import datetime`, which would
@@ -97,7 +98,132 @@ def _cu_cfg():
 # --------------------------------------------------------------------------
 # scan: walk ~/.claude/projects/**/*.jsonl (read-only, bounded, fault-tolerant)
 # --------------------------------------------------------------------------
+# C86: the scan used to re-read every log modified in the last 8 days (~480 MB
+# on this Mac) every time the 60 s cache expired. Claude Code's logs are
+# append-only JSONL, so each file's parsed records are kept, keyed by inode +
+# size + mtime: an unchanged file is not opened at all, a grown one is read only
+# from where the last scan stopped (a 64-byte fingerprint of the bytes before
+# that point must still match, else it is re-read whole), and files that drop
+# out of the scan are forgotten. The combine step walks the files in the same
+# order the old single pass did, so the payload is identical.
+# Memory: a kept record is (event, key) — about 400 bytes; session ids live in
+# one set per file, not as a string per record (~42k records here, ~16 MB).
+_CU_FILES = {}                 # path -> per-file parse state (see _cu_file_state)
+_CU_MODELS = {}                # interned model ids: one string per model, not per event
+_CU_SCAN_LOCK = threading.Lock()
+_CU_TAIL = 64                  # fingerprint length before the resume offset
+
+
+def _cu_line(raw):
+    """One JSONL line (bytes) -> (event, sessionId, cwd, key) or None. `key` is
+    message.id + NUL + requestId when both are present (see _cu_scan_locked) —
+    one string, not a tuple of two, because every kept record holds one."""
+    if b'"usage"' not in raw:                  # cheap skip before json.loads
+        return None
+    line = raw.decode("utf-8", "replace").strip()
+    if not line:
+        return None
+    try:
+        rec = json.loads(line)
+    except Exception:
+        return None
+    if not isinstance(rec, dict):
+        return None
+    msg = rec.get("message")
+    if not isinstance(msg, dict):
+        return None
+    usage = msg.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    ts = _cu_ts(rec)
+    if ts is None:
+        return None
+    model = msg.get("model") or "?"
+    if isinstance(model, str):
+        model = _CU_MODELS.setdefault(model, model)
+    try:
+        inp = int(usage.get("input_tokens") or 0)
+        out = int(usage.get("output_tokens") or 0)
+        cr = int(usage.get("cache_read_input_tokens") or 0)
+        cc = int(usage.get("cache_creation_input_tokens") or 0)
+    except (TypeError, ValueError):
+        return None
+    if (inp + out + cr + cc) <= 0:
+        return None
+    cw = rec.get("cwd")
+    mid, rid = msg.get("id"), rec.get("requestId")
+    key = (mid + "\x00" + rid) if isinstance(mid, str) and isinstance(rid, str) else None
+    return ((ts, _cu_family(model), model, inp, out, cr, cc),
+            rec.get("sessionId"), cw if isinstance(cw, str) and cw else None, key)
+
+
+def _cu_take(state, hit):
+    ev, sid, cw, key = hit
+    state["done"].append((ev, key))
+    if isinstance(sid, str) and sid:
+        state["sids"].add(sid)
+    if state["cwd"] is None and cw:
+        state["cwd"] = cw
+
+
+def _cu_file_state(p, st):
+    """Parsed records of one log, re-reading only what changed since last time."""
+    old = _CU_FILES.get(p)
+    if (old is not None and old["ino"] == st.st_ino and old["size"] == st.st_size
+            and old["mtime"] == st.st_mtime_ns):
+        return old
+    with open(p, "rb") as f:
+        state = None
+        if (old is not None and old["ino"] == st.st_ino
+                and st.st_size >= old["offset"]):
+            k = min(_CU_TAIL, old["offset"])
+            f.seek(old["offset"] - k)
+            if f.read(k) == old["tail"]:
+                state = old                    # appended to: resume at offset
+        if state is None:
+            state = {"ino": st.st_ino, "offset": 0, "lines": 0, "tail": b"",
+                     "capped": False, "done": [], "sids": set(), "cwd": None}
+            f.seek(0)
+        state["partial"] = []                  # the unterminated last line, if any
+        state["psids"] = set()
+        pcwd = None
+        while not state["capped"]:
+            raw = f.readline()
+            if not raw:
+                break
+            if state["lines"] + 1 > CU_MAX_LINES:
+                state["capped"] = True
+                break
+            if not raw.endswith(b"\n"):
+                # still being written: count it this scan, re-read it next time
+                hit = _cu_line(raw)
+                if hit is not None:
+                    state["partial"].append((hit[0], hit[3]))
+                    if isinstance(hit[1], str) and hit[1]:
+                        state["psids"].add(hit[1])
+                    pcwd = hit[2]
+                break
+            state["lines"] += 1
+            state["offset"] += len(raw)
+            hit = _cu_line(raw)
+            if hit is not None:
+                _cu_take(state, hit)
+        k = min(_CU_TAIL, state["offset"])
+        f.seek(state["offset"] - k)
+        state["tail"] = f.read(k)
+    state["pcwd"] = pcwd
+    state["size"] = st.st_size
+    state["mtime"] = st.st_mtime_ns
+    _CU_FILES[p] = state
+    return state
+
+
 def _cu_scan():
+    with _CU_SCAN_LOCK:
+        return _cu_scan_locked()
+
+
+def _cu_scan_locked():
     events = []            # (ts, family, model, in, out, cache_read, cache_write)
     sessions = set()
     proj_tok = {}          # project-dir -> aggregate
@@ -118,73 +244,57 @@ def _cu_scan():
                     continue
                 if st.st_mtime < cutoff:
                     continue
-                files.append((st.st_mtime, p))
+                files.append((st.st_mtime, p, st))
     except Exception:
         pass
-    files.sort(reverse=True)           # newest first
+    files.sort(key=lambda x: (x[0], x[1]), reverse=True)   # newest first
     files = files[:CU_MAX_FILES]
+    keep = {p for _mt, p, _st in files}
+    for gone in [q for q in _CU_FILES if q not in keep]:
+        _CU_FILES.pop(gone, None)
 
-    for _mt, p in files:
+    # One API message is logged as several records — streaming partials with
+    # the same input/cache usage and a growing output count, the last one final
+    # — and a forked session copies them into a second file. Summing every
+    # record counted input and cache 2-4x (half the records here were copies),
+    # so each (message.id, requestId) counts once, as its fullest copy.
+    rows, seen = [], {}
+    for _mt, p, st in files:
         try:
             rel = os.path.relpath(os.path.dirname(p), CU_PROJECTS)
             proj = rel.split(os.sep)[0] if rel and rel != "." else "?"
         except Exception:
             proj = "?"
         try:
-            with open(p, "r", encoding="utf-8", errors="replace") as f:
-                n = 0
-                for line in f:
-                    n += 1
-                    if n > CU_MAX_LINES:
-                        break
-                    if '"usage"' not in line:      # cheap skip before json.loads
-                        continue
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except Exception:
-                        continue
-                    if not isinstance(rec, dict):
-                        continue
-                    msg = rec.get("message")
-                    if not isinstance(msg, dict):
-                        continue
-                    usage = msg.get("usage")
-                    if not isinstance(usage, dict):
-                        continue
-                    ts = _cu_ts(rec)
-                    if ts is None:
-                        continue
-                    model = msg.get("model") or "?"
-                    try:
-                        inp = int(usage.get("input_tokens") or 0)
-                        out = int(usage.get("output_tokens") or 0)
-                        cr = int(usage.get("cache_read_input_tokens") or 0)
-                        cc = int(usage.get("cache_creation_input_tokens") or 0)
-                    except (TypeError, ValueError):
-                        continue
-                    if (inp + out + cr + cc) <= 0:
-                        continue
-                    events.append((ts, _cu_family(model), model, inp, out, cr, cc))
-                    sid = rec.get("sessionId")
-                    if sid:
-                        sessions.add(sid)
-                    if proj not in proj_cwd:
-                        cw = rec.get("cwd")
-                        if isinstance(cw, str) and cw:
-                            proj_cwd[proj] = cw
-                    pa = proj_tok.get(proj)
-                    if pa is None:
-                        pa = proj_tok[proj] = {"in": 0, "out": 0, "cr": 0,
-                                               "cc": 0, "cost": 0.0, "msgs": 0}
-                    pa["in"] += inp; pa["out"] += out
-                    pa["cr"] += cr; pa["cc"] += cc
-                    pa["cost"] += _cu_cost(model, inp, out, cr, cc)
-                    pa["msgs"] += 1
+            state = _cu_file_state(p, st)
         except OSError:
+            _CU_FILES.pop(p, None)
             continue
+        cwd = state["cwd"] or state.get("pcwd")
+        if proj not in proj_cwd and cwd:
+            proj_cwd[proj] = cwd
+        sessions |= state["sids"]
+        sessions |= state["psids"]
+        for bucket in ("done", "partial"):
+            for ev, key in state[bucket]:
+                j = seen.get(key) if key is not None else None
+                if j is None:
+                    if key is not None:
+                        seen[key] = len(rows)
+                    rows.append((ev, proj))
+                elif ev[4] > rows[j][0][4]:
+                    rows[j] = (ev, rows[j][1])     # the fuller copy, first file's project
+    for ev, proj in rows:
+        events.append(ev)
+        _ts, _fam, model, inp, out, cr, cc = ev
+        pa = proj_tok.get(proj)
+        if pa is None:
+            pa = proj_tok[proj] = {"in": 0, "out": 0, "cr": 0,
+                                   "cc": 0, "cost": 0.0, "msgs": 0}
+        pa["in"] += inp; pa["out"] += out
+        pa["cr"] += cr; pa["cc"] += cc
+        pa["cost"] += _cu_cost(model, inp, out, cr, cc)
+        pa["msgs"] += 1
 
     events.sort(key=lambda e: e[0])
     return events, sessions, proj_tok, proj_cwd
@@ -409,7 +519,7 @@ def _cu_config_post(ctx):
         else:
             try:
                 cfg["cap"] = max(0, int(cap))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):   # E123: 1e999 is infinity
                 return ({"ok": False, "error": "bad_cap"}, 400)
     if "plan" in b:
         plan = b.get("plan")
@@ -440,17 +550,11 @@ WIDGETS["claude_usage"] = {"title": "Claude Code Usage", "icon": "activity",
                            "provider": w_claude_usage}
 EXPANDERS["claude_usage"] = expand_claude_usage
 
-# Show up without a manual add: append to the layout order IF absent (never
-# clobber the user's order). WIDGETS already has claude_usage above, so
-# get_layout()'s catalog filter keeps it.
+# Show up without a manual add — ONCE. layout_inject() appends the id only if
+# layout.json has never seen it, so a Remove sticks across restarts, and it
+# edits the stored order without the catalog filter, so widgets whose modules
+# load after this one are not dropped (B07).
 try:
-    _cu_lay = get_layout()
-    if isinstance(_cu_lay, dict):
-        _cu_order = _cu_lay.get("order")
-        if not isinstance(_cu_order, list):
-            _cu_order = _cu_lay["order"] = []
-        if "claude_usage" not in _cu_order:
-            _cu_order.append("claude_usage")
-            save_layout(_cu_lay)
+    layout_inject("claude_usage")
 except Exception as _cu_e:                                   # pragma: no cover
     print("[aux_claude_usage] layout inject failed: %s" % _cu_e, file=sys.stderr)

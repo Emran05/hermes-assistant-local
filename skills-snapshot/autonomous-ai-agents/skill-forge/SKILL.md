@@ -43,11 +43,13 @@ Never draft from memory. Before writing a single line:
 1. `ls` the skills root to pick the right EXISTING category:
    `ls "${HERMES_HOME:-$HOME/.hermes}/skills/"`
    - NEVER invent a new top-level category without an explicit user OK.
-   - NEVER nest under `computer-use/`, `dogfood/`, or `yuanbao/` — those are flat
-     single-skill directories, not categories (they have a SKILL.md at top level).
-2. `skill_view` 2–3 exemplars for format fidelity — always include
-   `google-workspace` (canonical frontmatter) plus any house-authored pack
-   (author "Hermes Assistant (local)") in a category near your target.
+   - NEVER nest under a flat single-skill directory (one with a SKILL.md at its
+     top level, e.g. `yuanbao/`) — those are skills, not categories.
+2. `skill_view` 2–3 exemplars for format fidelity — house-authored packs
+   (author "Hermes Assistant (local)", e.g. `hub-cartographer` or
+   `screen-oracle`) in a category near your target. Only view skills that
+   `ls` shows installed; archived ones (under `skills/.archive/`) are not
+   exemplars.
 3. Note the anatomy: `skills/<category>/<name>/SKILL.md` + optional `scripts/`
    (helpers you run via terminal) + optional `references/`.
 
@@ -87,10 +89,12 @@ the file:
    do, what its Drill proves.
 3. **Explicit user yes.** (MUTATE gate — this step is part of the recipe, not
    optional. "Silence" or "they probably want it" is a no.)
-4. **Write the files** (MUTATE): the skills directory is outside safe dirs, so this
-   raises an approval ticket — expected and correct. Forge ONLY in hub chat where the
-   user can tap approve. Never forge from cron or a `-z` oneshot (approvals fail
-   closed there, and oneshot mode can fake approval success).
+4. **Write the files** (MUTATE) with `write_file`/`patch`: the skills directory is
+   under `~/.hermes`, so the approval-gate plugin raises an approval card for every
+   write — expected and correct. Forge ONLY in hub chat where the user can tap
+   approve. Never forge from cron or a `-z` oneshot: nobody can approve there, so
+   the gate blocks the write — and `hermes -z` runs in YOLO mode, so a shell
+   redirect would NOT be stopped. Never write skill files through the terminal.
 5. **Validate** (READ) — must PASS BEFORE the delegate test, not after:
    ```bash
    python3 "${HERMES_HOME:-$HOME/.hermes}/skills/autonomous-ai-agents/skill-forge/scripts/validate_skill.py" \
@@ -167,10 +171,11 @@ the three house-style sections.
 
 ## Gotchas
 
-- The skills directory is OUTSIDE the safe-dir set: every file write there raises an
-  approval ticket. In hub chat the user taps approve; in cron/oneshot it fails
-  closed — and oneshot mode has been observed to FAKE approval success. Hub chat
-  only.
+- The skills directory is under `~/.hermes`: every `write_file`/`patch` there raises
+  an approval card (approval-gate plugin). In hub chat the user taps approve; in
+  cron or a `hermes -z` oneshot the gate blocks it. It does NOT gate the terminal,
+  and `-z` auto-approves dangerous commands (YOLO), so a shell write there would
+  go through unreviewed. Hub chat only, file tools only.
 - Validator BEFORE delegate test. A sub-agent burning iterations on a pack with
   broken frontmatter is wasted work.
 - `name` must equal the directory name exactly — `skill_view` resolves by name and a

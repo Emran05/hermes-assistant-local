@@ -99,8 +99,10 @@ ping.
 
 ## 3. NIGHTLY JOURNAL (cron variant)
 
-Create once (this registers in the standard hermes cron registry — confirm
-with `hermes cron list`):
+Setting this up is a cron change, so section 4's rule applies: PROPOSE it to
+the user (the schedule and the prompt below), and run the command only after
+they say yes in this conversation. It registers in the standard hermes cron
+registry — confirm with `hermes cron list`:
 
 ```bash
 hermes cron create "0 3 * * *" \
@@ -191,7 +193,8 @@ Entries must not contain the `§` character; the API joins them itself.
 
 ## Gotchas (hard rules)
 
-- **Unattended cron runs fail closed on approval-needing writes.** The
+- **Unattended cron runs cannot get an approval**, and the approval-gate
+  plugin blocks every `write_file`/`patch` under `~/.hermes` there. The
   journal therefore writes ONLY via the `/api/memory/*` endpoints (the
   dashboard's own etag/flock-guarded CRUD) — never `write_file`, never shell
   redirection into `~/.hermes/memories/`. If even the API call is blocked in

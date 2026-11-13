@@ -47,15 +47,21 @@ front_app() {
 
 window_bounds() {
   # Prints "x, y, w, h" (points) of window 1 of the named process, or nothing on failure.
+  # The app name (agent-supplied, or whatever the frontmost process calls itself)
+  # goes in as an osascript ARGUMENT, never into the script text: interpolated,
+  # a name containing `"` could close the string and run its own AppleScript.
   local app="$1"
-  osascript 2>/dev/null <<EOF
-tell application "System Events"
-  tell (first process whose name is "$app")
-    set {x, y} to position of window 1
-    set {w, h} to size of window 1
+  osascript - "$app" 2>/dev/null <<'EOF'
+on run argv
+  set appName to item 1 of argv
+  tell application "System Events"
+    tell (first process whose name is appName)
+      set {x, y} to position of window 1
+      set {w, h} to size of window 1
+    end tell
   end tell
-end tell
-return (x as text) & "," & (y as text) & "," & (w as text) & "," & (h as text)
+  return (x as text) & "," & (y as text) & "," & (w as text) & "," & (h as text)
+end run
 EOF
 }
 

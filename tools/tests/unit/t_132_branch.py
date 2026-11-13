@@ -69,35 +69,29 @@ def _find_repo():
 REPO = _find_repo()
 DASH = os.path.join(REPO, "dashboard")
 REAL_HOME = os.path.expanduser("~")
-REAL_CHATS = os.path.join(REAL_HOME, ".hermes", "dashboard", "chats")
 AGENT_GATEWAY = os.path.join(REAL_HOME, ".hermes", "hermes-agent",
                              "tui_gateway", "server.py")
 
 # --------------------------------------------------------------------------
-# a real conversation, copied — the builder is tested on real data, and the
-# real file is only ever READ.
+# a conversation in the STORED on-disk shape.  This used to sample the
+# owner's largest real conversation out of ~/.hermes/dashboard/chats; a unit
+# suite never reads the owner's data (S2 seam), so the shape it was there for
+# — ids, error bubbles, tool/approval/status rows, a deep card — is built here.
 # --------------------------------------------------------------------------
-REAL_SAMPLE = None
-try:
-    cands = []
-    for fn in os.listdir(REAL_CHATS):
-        if not fn.endswith(".json") or fn.startswith("__"):
-            continue
-        p = os.path.join(REAL_CHATS, fn)
-        try:
-            with open(p) as f:
-                c = json.load(f)
-        except Exception:
-            continue
-        if len(c.get("messages") or []) >= 4:
-            cands.append((len(c["messages"]), fn, c))
-    cands.sort(reverse=True)
-    if cands:
-        REAL_SAMPLE = cands[0][2]
-        print("real conversation sampled (read-only): %s, %d messages"
-              % (cands[0][1], cands[0][0]))
-except Exception as e:
-    print("no real conversation available (%s) — synthetic only" % type(e).__name__)
+STORED_SAMPLE = {"title": "Stored-shape sample", "rev": 9, "messages": [
+    {"id": "c0c0c0c0c001", "role": "user", "ts": 1788000000.0, "text": "plan my week"},
+    {"id": "c0c0c0c0c002", "role": "tool", "tool": "calendar", "ts": 1788000001.0,
+     "text": "3 events"},
+    {"id": "c0c0c0c0c003", "role": "bot", "ts": 1788000002.0,
+     "text": "You have three meetings.", "status": None},
+    {"id": "c0c0c0c0c004", "role": "bot", "ts": 1788000003.0, "text": "model offline",
+     "err": True},
+    {"id": "c0c0c0c0c005", "role": "user", "ts": 1788000004.0, "text": "move the second"},
+    {"id": "c0c0c0c0c006", "role": "bot", "ts": 1788000005.0, "text": "Run this?",
+     "approval": {"cmd": "osascript move.scpt", "approval_id": "ap-1"}},
+    {"id": "c0c0c0c0c007", "role": "bot", "ts": 1788000006.0, "text": "Moved it.",
+     "deep": {"model": "sonnet", "ms": 800}},
+]}
 
 # --------------------------------------------------------------------------
 # throwaway HOME + server.py
@@ -193,8 +187,8 @@ if COERCE is None:
     # missing fixture, not a bug in the branch feature, so it is reported and
     # skipped rather than failed; every assertion below that depends on it is
     # itself guarded on `COERCE is not None`.
-    print("  --   gateway _coerce_seed_history not available on this machine "
-          "(no ~/.hermes/hermes-agent) — shape round-trip skipped")
+    print("  SKIP gateway _coerce_seed_history not available on this machine "
+          "(no ~/.hermes/hermes-agent) — shape round-trip")
 else:
     check("our seed survives the gateway acceptor unchanged",
           COERCE(seed) == seed, (COERCE(seed), seed))
@@ -206,10 +200,9 @@ else:
     check("the gateway keeps exactly what our builder keeps",
           COERCE(raw) == srv.br_seed_history(mixed),
           (COERCE(raw), srv.br_seed_history(mixed)))
-    if REAL_SAMPLE:
-        rseed = srv.br_seed_history(REAL_SAMPLE["messages"])
-        check("real conversation seeds cleanly", COERCE(rseed) == rseed
-              and len(rseed) > 0, len(rseed))
+    rseed = srv.br_seed_history(STORED_SAMPLE["messages"])
+    check("a stored-shape conversation seeds cleanly", COERCE(rseed) == rseed
+          and len(rseed) > 0, len(rseed))
     # the shape the gateway CANNOT carry — documented, and asserted
     check("tool rows have no representation in the seed",
           COERCE([{"role": "tool", "content": "ls -la output"},
@@ -222,7 +215,7 @@ else:
 section("B. branch a conversation")
 
 SRC = "chat-branch-harness-src"
-base = (REAL_SAMPLE["messages"][:6] if REAL_SAMPLE else [
+base = ([
     {"role": "user", "text": "plan my day", "ts": 100.0},
     {"role": "bot", "text": "Three things are due today.", "ts": 101.0},
     {"role": "user", "text": "reschedule the second one", "ts": 102.0},

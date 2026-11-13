@@ -54,7 +54,10 @@ doc.head.appendChild = function (c) { if (c.id) byId[c.id] = c; return c; };
 global.window = global;
 global.document = doc;
 global.setTimeout = setTimeout;
-global.esc = function (s) { return String(s == null ? "" : s); };
+// the REAL esc() from index.html's inline script — the stand-in that used to
+// live here escaped nothing, so no check could see the shipped escaping (C84)
+global.esc = require(path.join(REPO, "tools", "tests", "lib", "index_helpers.js"))
+  .indexFunction("esc");
 
 let NEXT = null;
 global.fetch = async function () {

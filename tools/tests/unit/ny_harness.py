@@ -147,11 +147,21 @@ wj("intel.json", {"version": 1, "updated": NOW - 3600, "feeds": 9,
 # exec-load server.py (this pulls in every aux_*.py, ours included)
 # --------------------------------------------------------------------------
 G = {"__name__": "ny_harness_server", "__file__": os.path.join(DASH, "server.py")}
+# The aux modules start their background loops at import unless the flag is
+# already set.  Those loops gather real feeds (intel_loop fetched a dozen news
+# sites from inside this "offline" suite) and probe model lanes; nothing here
+# tests them, so they never start (C81).
+for _flag in ("_watchtower_thread_started", "_intel_thread_started",
+              "_foryou_thread_started", "_ev_thread_started",
+              "_metrics_thread_started", "_recorder_thread_started",
+              "_goog_calendar_prime_started"):
+    G[_flag] = True
 sys.path.insert(0, DASH)
 t0 = time.time()
 with open(os.path.join(DASH, "server.py")) as f:
     exec(compile(f.read(), os.path.join(DASH, "server.py"), "exec"), G)
 print("server.py exec'd in %.1fs" % (time.time() - t0))
+G["SB_BIN"] = os.path.join(G["HOME"], "no-shortcuts-cli")   # the preamble lists no real Shortcuts
 
 # --------------------------------------------------------------------------
 # stubs — NOTHING here may reach a model, a calendar or Reminders
@@ -165,6 +175,11 @@ G["_ny_rem_fetch"] = lambda: _REM
 G["CHAT_JOBS"] = {}
 G["_ny_cache"]["payload"] = None
 G["_ny_cache"]["at"] = 0.0
+# the midday/evening composers read the markets + RSS widget providers, which
+# fetch Yahoo and a dozen feeds; the rhythm-hook checks below only need the
+# Needs-you line, so the providers answer "nothing live" (C81)
+G["_markets_data"] = lambda: {"state": "CLOSED", "indices": [], "watchlist": []}
+G["_rss_data"] = lambda: {"sections": []}
 
 C = G["_ny_classify"]
 NYS = G["NY_STORE"]
@@ -192,14 +207,22 @@ with open(os.path.join(DASH, "aux_needsyou.py")) as f:
     exec(compile(f.read(), os.path.join(DASH, "aux_needsyou.py"), "exec"), G)
 lay2 = json.load(open(os.path.join(DATA, "layout.json")))
 eq("existing user order untouched", lay2["order"], custom)
-# and when it is missing again it goes back to the front
+# a layout that has NEVER seen it gets it at the front (B07: only then)
 with open(os.path.join(DATA, "layout.json"), "w") as f:
-    json.dump({"order": ["clock", "weather"]}, f)
+    json.dump({"order": ["clock", "weather"], "seen": ["clock", "weather"]}, f)
 with open(os.path.join(DASH, "aux_needsyou.py")) as f:
     exec(compile(f.read(), os.path.join(DASH, "aux_needsyou.py"), "exec"), G)
 lay3 = json.load(open(os.path.join(DATA, "layout.json")))
-eq("re-inserted at front when missing", lay3["order"],
+eq("inserted at front when never seen", lay3["order"],
    ["needsyou", "clock", "weather"])
+# ...and one the owner removed stays removed across a re-load (B07)
+with open(os.path.join(DATA, "layout.json"), "w") as f:
+    json.dump({"order": ["clock", "weather"],
+               "seen": ["clock", "weather", "needsyou"]}, f)
+with open(os.path.join(DASH, "aux_needsyou.py")) as f:
+    exec(compile(f.read(), os.path.join(DASH, "aux_needsyou.py"), "exec"), G)
+lay4 = json.load(open(os.path.join(DATA, "layout.json")))
+eq("a removed needsyou is not re-inserted", lay4["order"], ["clock", "weather"])
 # restore the stubs the re-exec may have shadowed
 G["bg_online"] = lambda: False
 G["model_online"] = lambda: False
@@ -326,26 +349,32 @@ eq("message absent -> []", G["_ny_collect_message"](srcs), [])
 eq("message reports absent", srcs.get("message"), "absent")
 os.rename(_real + ".away", _real)
 
-# calendar
+# calendar — on a pinned clock (today at local noon): the collector files every
+# clock time under TODAY, so on the real clock after ~23:20 "now + 40 min" was
+# tomorrow, got dropped, and the overlap check below passed on an empty list
+_lt = time.localtime()
+CAL_NOW = time.mktime((_lt.tm_year, _lt.tm_mon, _lt.tm_mday, 12, 0, 0, 0, 0, -1))
 _CAL["events"] = [
     {"time": "9:00 AM - 10:00 AM", "title": "Standup"},           # past-ish
     {"time": "%s - %s" % (time.strftime("%I:%M %p",
-                                        time.localtime(NOW + 1800)),
+                                        time.localtime(CAL_NOW + 1800)),
                           time.strftime("%I:%M %p",
-                                        time.localtime(NOW + 5400))),
+                                        time.localtime(CAL_NOW + 5400))),
      "title": "Design review"},
     {"time": "%s - %s" % (time.strftime("%I:%M %p",
-                                        time.localtime(NOW + 2400)),
+                                        time.localtime(CAL_NOW + 2400)),
                           time.strftime("%I:%M %p",
-                                        time.localtime(NOW + 6000))),
+                                        time.localtime(CAL_NOW + 6000))),
      "title": "Overlapping call"},
     {"time": "", "title": "All-day offsite"},
 ]
 srcs = {}
-cal = G["_ny_collect_calendar"](srcs)
+cal = G["_ny_collect_calendar"](srcs, now=CAL_NOW)
 eq("calendar present", srcs.get("calendar"), "present")
 titles = [c["title"] for c in cal]
 ok("all-day event skipped", "All-day offsite" not in titles, titles)
+ok("both overlapping events are listed",
+   {"Design review", "Overlapping call"} <= set(titles), titles)
 ok("overlap flagged on both",
    all("conflict" in c["flags"] for c in cal
        if c["title"] in ("Design review", "Overlapping call")), cal)
@@ -479,7 +508,8 @@ eq("message present in sources", p["sources"]["message"], "present")
 allids = [i["id"] for i in p["now"] + p["today"] + p["later"]]
 ok("approval reached now", "approval:job1" in [i["id"] for i in p["now"]],
    [i["id"] for i in p["now"]])
-ok("now is capped at five", len(p["now"]) <= 5, len(p["now"]))
+# (the five-item cap itself is exercised in section Q with seven now-rows —
+# this fixture has fewer, so a `<= 5` here could never fail)
 ok("never_count counts the automated rows", p["never_count"] >= 2,
    p["never_count"])
 ok("curated landed in later",
@@ -497,7 +527,16 @@ ok("draft only suggested for people",
    all((i["suggested_action"] == "reply_draft") ==
        (i["source"] in ("message", "email"))
        for i in p["now"] + p["today"] + p["later"]))
-ok("next_brief computed", isinstance(p.get("next_brief"), dict), p.get("next_brief"))
+# E78: this fixture keeps the Briefings master OFF (so nothing can push), and
+# with it off no brief will be sent — so none may be promised
+eq("no next_brief while Briefings are off", p.get("next_brief"), None)
+_real_wt_load = G["_wt_load"]
+_on = dict(_real_wt_load())
+_on["master"] = {"briefings": True, "news": False}
+G["_wt_load"] = lambda: _on
+ok("next_brief computed once Briefings are on",
+   isinstance(G["_ny_next_brief"](NOW), dict), G["_ny_next_brief"](NOW))
+G["_wt_load"] = _real_wt_load
 
 print("\n=== G. act: done / snooze / reclassify ===")
 Ctx = G["RouteCtx"]
@@ -808,6 +847,242 @@ eq("still fails open — a brief never dies on this", _line, "")
 ok("but the failure is logged with class AND message",
    "RuntimeError" in _err3.getvalue() and "payload exploded" in _err3.getvalue(),
    _err3.getvalue())
+
+print("\n=== Q. the trust thresholds hold: cap 5, confidence 0.6, model 0.8 (C79) ===")
+eq("NY_NOW_MAX is five", G["NY_NOW_MAX"], 5)
+eq("NY_CONF_MIN is 0.6", G["NY_CONF_MIN"], 0.6)
+eq("NY_MODEL_MIN is 0.8", G["NY_MODEL_MIN"], 0.8)
+eq("NY_MODEL_DEMOTE_MIN is 0.6", G["NY_MODEL_DEMOTE_MIN"], 0.6)
+
+# -- the cap: seven approvals, every one of them a `now` by the rules
+_jobs_before = G["CHAT_JOBS"]
+G["CHAT_JOBS"] = {"capjob%d" % i: {"id": "capjob%d" % i, "session": "s%d" % i,
+                                   "state": "approval",
+                                   "approval": {"command": "echo %d" % i},
+                                   "done": False, "ts": NOW - 60 - i}
+                  for i in range(7)}
+pq = G["_ny_build"](NOW)
+_rows = pq["now"] + pq["today"] + pq["later"]
+_appr = [i for i in _rows if i["source"] == "approval" and i["id"].startswith("approval:capjob")]
+eq("seven now-rows -> now shows exactly five", len(pq["now"]), 5)
+eq("no approval vanished (all seven are on screen)", len(_appr), 7)
+_over = [i for i in pq["today"] if "five-item now cap" in i["reason"]]
+ok("the overflow fell to today, not out of the inbox", len(_over) >= 2, [i["id"] for i in _over])
+ok("...at the TOP of today", pq["today"][:len(_over)] == _over,
+   [i["id"] for i in pq["today"][:4]])
+ok("...re-labelled today", all(i["bucket"] == "today" for i in _over))
+G["CHAT_JOBS"] = _jobs_before
+
+# -- the confidence floor: a non-today rule result below NY_CONF_MIN is today
+_vip_ask = mk("message", "conf1", "T", sender_tier="vip", requires_reply=True,
+              deadline_ts=NOW + 3600, summary="the lease by 5pm?")
+_stranger = mk("message", "conf2", "T", sender_tier="unknown", summary="hello")
+eq("(control) a VIP time-bound ask is now at the real floor", C(_vip_ask, NOW)["bucket"], "now")
+eq("(control) a stranger with nothing due is never", C(_stranger, NOW)["bucket"], "never")
+G["NY_CONF_MIN"] = 0.95          # every rule result above is now below the floor
+_r1, _r2 = C(_vip_ask, NOW), C(_stranger, NOW)
+G["NY_CONF_MIN"] = 0.6
+eq("below the floor, a would-be NOW falls to today", _r1["bucket"], "today")
+ok("...and says it was not confident", "not confident" in _r1["reason"], _r1["reason"])
+eq("below the floor, a would-be NEVER falls to today too (a silent miss costs more)",
+   _r2["bucket"], "today")
+
+# -- the model pass: promote to now only at >= 0.8 AND a deadline <= 24 h
+import urllib.request as _ur                                    # noqa: E402
+from types import SimpleNamespace as _NS                        # noqa: E402
+_sent = []
+
+
+def _fake_reply(rows):
+    def urlopen(req, timeout=None):
+        _sent.append(req.data.decode("utf-8"))
+
+        class _R:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps({"choices": [{"message": {
+                    "content": "here you go:\n" + json.dumps(rows)}}]}).encode()
+        return _R()
+    return urlopen
+
+
+_saved = {k: G.get(k) for k in ("urllib", "get_settings", "bg_online", "bg_lane")}
+G["get_settings"] = lambda: {"needs_you": {"model_pass": True}}
+G["bg_online"] = lambda: True
+G["bg_lane"] = lambda: {"lane": "bg", "model": "stub",
+                        "chat_url": "http://127.0.0.1:9/v1/chat/completions"}
+_items = [mk("message", "m%d" % i, "T", sender_tier="known", requires_reply=True,
+             deadline_ts=dl, summary="row %d" % i)
+          for i, dl in enumerate((NOW + 3 * 3600, NOW + 3 * 3600, NOW + 3 * 3600, 0,
+                                  NOW + 30 * 3600, NOW + 3 * 3600, NOW + 3 * 3600))]
+_ids = [it["id"] for it in _items]
+_rows_in = [
+    {"id": _ids[0], "bucket": "now", "confidence": 0.85, "reason": "boss, 5pm"},
+    {"id": _ids[1], "bucket": "now", "confidence": 0.79, "reason": "just under"},
+    {"id": _ids[2], "bucket": "now", "confidence": 0.8, "reason": "exactly at"},
+    {"id": _ids[3], "bucket": "now", "confidence": 0.99, "reason": "no deadline at all"},
+    {"id": _ids[4], "bucket": "now", "confidence": 0.99, "reason": "due in 30 h"},
+    {"id": _ids[5], "bucket": "later", "confidence": 0.6, "reason": "can wait"},
+    {"id": _ids[6], "bucket": "later", "confidence": 0.59, "reason": "barely sure"},
+    {"id": "message:not-sent", "bucket": "now", "confidence": 1.0, "reason": "made up"},
+]
+G["urllib"] = _NS(request=_NS(Request=_ur.Request, urlopen=_fake_reply(_rows_in)))
+try:
+    _mp = G["_ny_model_pass"](_items, NOW)
+finally:
+    for _k, _v in _saved.items():
+        if _v is None:
+            G.pop(_k, None)
+        else:
+            G[_k] = _v
+eq("0.85 + a deadline in 3 h -> promoted to now", (_mp.get(_ids[0]) or {}).get("bucket"), "now")
+ok("0.79 is NOT enough to reach now", _ids[1] not in _mp, _mp.get(_ids[1]))
+eq("exactly 0.8 is", (_mp.get(_ids[2]) or {}).get("bucket"), "now")
+ok("no deadline -> never promoted, however sure", _ids[3] not in _mp, _mp.get(_ids[3]))
+ok("a deadline beyond 24 h -> never promoted", _ids[4] not in _mp, _mp.get(_ids[4]))
+# C42: a demotion hides a row, so it needs the promotion bar (NY_MODEL_MIN)
+# and never applies to a row with an ask or a deadline (t_c42_ny_demotion.py)
+ok("a demotion at 0.6 is NOT taken (C42: below the 0.8 bar)", _ids[5] not in _mp,
+   _mp.get(_ids[5]))
+ok("a demotion at 0.59 is not", _ids[6] not in _mp, _mp.get(_ids[6]))
+ok("an id the dashboard did not send is ignored", "message:not-sent" not in _mp, _mp)
+
+# ...and _ny_build only ever sends it the TODAY bucket
+_sent.clear()
+G["CHAT_JOBS"] = {"onlytoday": {"id": "onlytoday", "session": "s", "state": "approval",
+                                "approval": {"command": "echo"}, "done": False, "ts": NOW}}
+G["get_settings"] = lambda: {"needs_you": {"model_pass": True}}
+G["bg_online"] = lambda: True
+G["bg_lane"] = lambda: {"lane": "bg", "model": "stub",
+                        "chat_url": "http://127.0.0.1:9/v1/chat/completions"}
+G["urllib"] = _NS(request=_NS(Request=_ur.Request, urlopen=_fake_reply([])))
+try:
+    pq2 = G["_ny_build"](NOW)
+finally:
+    for _k, _v in _saved.items():
+        if _v is None:
+            G.pop(_k, None)
+        else:
+            G[_k] = _v
+    G["CHAT_JOBS"] = _jobs_before
+_today_ids = [i["id"] for i in pq2["today"]]
+ok("the model pass ran once", len(_sent) == 1, len(_sent))
+ok("a NOW row (the waiting approval) is never sent to the model",
+   bool(_sent) and "approval:onlytoday" not in _sent[0])
+ok("today rows are what it sees", bool(_sent) and bool(_today_ids)
+   and any(t in _sent[0] for t in _today_ids), _today_ids[:3])
+
+print("\n=== R. B09 rule edges (round-2 review) ===")
+# Through the REAL collector (ask / request / deadline parsing, tiering) and
+# the REAL classifier.  The three edges: a parsed time with no ask was Now,
+# unparsed deadline words never aged out, and a group got "known" from its
+# own name.
+_H = NOW - 86400                                   # you replied yesterday
+
+
+def _cv(ident, last, ts, name=None, group=False, sender=None, unread=1):
+    return {"name": name or ("Friend " + ident[-3:]), "ident": ident,
+            "group": group, "participants": 5 if group else 2, "last": last,
+            "from_me": False, "sender": sender or name or ident, "ts": ts,
+            "unread": unread, "attachment": False, "reaction": False,
+            "today_count": 1, "service": "iMessage"}
+
+
+_R_VIP = [
+    # (ident, text, received_at, want_now, label)
+    ("+15550008001", "landing in 30 minutes", NOW - 60, False,
+     "'landing in 30 minutes' (a time, no ask)"),
+    ("+15550008002", "running late, there in 10 min", NOW - 60, False,
+     "'there in 10 min'"),
+    ("+15550008003", "meeting starts in 1 hour", NOW - 60, False,
+     "'meeting starts in 1 hour'"),
+    ("+15550008004", "call me in 2 hours", NOW - 600, True,
+     "'call me in 2 hours' (a request + a time)"),
+    ("+15550008005", "send it by tonight", NOW - 600, True,
+     "'send it by tonight'"),
+    ("+15550008006", "ok, need the signed copy asap", NOW - 600, True,
+     "'ok, need the signed copy asap'"),
+    ("+15550008007", "can you send it by 5pm?", NOW - 600, True,
+     "a question with a time"),
+    ("+15550008008", "urgent: the server is down", NOW - 3600, True,
+     "fresh unparsed urgency, no ask"),
+    ("+15550008009", "urgent: the server is down", NOW - 40 * 3600, False,
+     "the same urgency 40 h later"),
+    ("+15550008010", "need it by tomorrow", NOW - 40 * 3600, False,
+     "an unparsed 'by tomorrow' request 40 h later"),
+    ("+15550008011", "can you do it by tomorrow?", NOW - 40 * 3600, False,
+     "an unparsed 'by tomorrow' question 40 h later"),
+    ("+15550008012", "can you call me?", NOW - 40 * 3600, True,
+     "(control) a bare VIP question has no words to age out"),
+]
+_R_OTHER = [
+    _cv("+15550008013", "asap", NOW - 40 * 3600, name="+15550008013"),
+    _cv("chat900", "who's bringing snacks by 5pm?", NOW - 600,
+        name="Soccer Parents", group=True, sender="+15550009001"),
+    _cv("chat901", "great game!", NOW - 600, name="Soccer Parents", group=True,
+        sender="+15550009001"),
+    _cv("chat902", "can you bring the snacks by 5pm?", NOW - 600,
+        name="Soccer Parents", group=True, sender="(555) 000-9002"),
+    _cv("chat903", "anyone free saturday?", NOW - 600, name="Book club",
+        group=True, sender="+15550009003"),
+    _cv("chat904", "can anyone bring snacks by 5pm?", NOW - 600,
+        name="Soccer Parents", group=True, sender="+15550009004"),
+    _cv("chat905", "great game!", NOW - 600, name="Soccer Parents", group=True,
+        sender="(555) 000-9002"),
+]
+wj("messages.json", {"v": 1, "fda": True, "generated_at": NOW, "stored_at": NOW,
+                     "totals": {"unread": 0, "today": 0},
+                     "conversations": [_cv(i, t, ts) for i, t, ts, _w, _l in _R_VIP]
+                     + _R_OTHER})
+_rhist = {i: _H for i, _t, _ts, _w, _l in _R_VIP}
+_rhist["+15550009002"] = _H           # a direct thread with chat902's last sender
+_rhist["chat903"] = _H                # you replied in the book club itself
+_rhist["+15550009004"] = _H           # ...and with chat904's last sender
+_ri = {it["id"]: it for it in G["_ny_collect_message"]({}, {"history": _rhist}, NOW)}
+for _i, _t, _ts, _want, _label in _R_VIP:
+    _it = _ri.get("message:" + _i)
+    if _it is None:
+        ok("%s collected" % _label, False, sorted(_ri))
+        continue
+    eq("%s is a VIP row" % _label, _it["sender_tier"], "vip")
+    _v = C(_it, NOW)
+    ok("%s -> %s" % (_label, "now" if _want else "not now"),
+       (_v["bucket"] == "now") == _want, (_t, _v))
+_v = C(_ri["message:+15550008001"], NOW)
+ok("...and 'landing' says it named a time but asks nothing",
+   "named a time" in _v["reason"] and "asks nothing" in _v["reason"], _v)
+_v = C(_ri["message:+15550008011"], NOW)
+ok("...an aged-out question says its urgency is old, not 'nothing is due'",
+   "more than a day old" in _v["reason"], _v)
+_v = C(_ri["message:+15550008013"], NOW)
+eq("an unknown 'asap' 40 h old, no ask -> never", _v["bucket"], "never")
+eq("a group never gets 'known' from its name",
+   _ri["message:chat900"]["sender_tier"], "unknown")
+_v = C(_ri["message:chat900"], NOW)
+ok("...a group question by 5pm from strangers is not Now, nor 'a contact'",
+   _v["bucket"] == "today" and "contact" not in _v["reason"], _v)
+eq("...group chatter from strangers -> never",
+   C(_ri["message:chat901"], NOW)["bucket"], "never")
+# review: a 1:1 contact talking in a group you never reply in is someone you
+# KNOW, not a VIP thread — round 1 (C60) kept "can anyone bring snacks by
+# 5pm?" in a group out of Now, and a friend's name on it must not undo that
+eq("a group whose last sender is someone you text 1:1 -> known, not vip",
+   _ri["message:chat902"]["sender_tier"], "known")
+_v = C(_ri["message:chat902"], NOW)
+ok("...so their time-bound question in the group stays Today, not Now",
+   _v["bucket"] == "today" and "contact" not in _v["reason"]
+   and "no history" not in _v["reason"], _v)
+_g2 = _ri.get("message:chat904")
+ok("...and 'can anyone bring snacks by 5pm?' from a 1:1 friend is not Now",
+   _g2 is not None and C(_g2, NOW)["bucket"] == "today", _g2)
+eq("...while that friend's group chatter is Today, not Never",
+   C(_ri["message:chat905"], NOW)["bucket"], "today")
+eq("a group you replied in -> vip", _ri["message:chat903"]["sender_tier"], "vip")
 
 print("\n" + "=" * 60)
 print("PASS %d   FAIL %d" % (PASSES[0], len(FAILS)))

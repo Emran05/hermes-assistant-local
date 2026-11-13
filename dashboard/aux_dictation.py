@@ -42,10 +42,11 @@
 #   casual   (Slack, Messages)    capitalised, but no full stop is added — chat
 #                                 messages do not end in one, and adding it is
 #                                 the tell that a machine wrote the line.
-#   verbatim (Terminal, VS Code)  fillers, doubled words and self-corrections are
-#                                 still removed (that is what dictation cleanup
-#                                 IS), but NOTHING else: no capitalisation, no
-#                                 punctuation added or removed.  A shell command
+#   verbatim (Terminal, VS Code)  self-corrections are still removed, but
+#                                 NOTHING else — not even filler sounds, since
+#                                 "echo um" is data (E107): no capitalisation,
+#                                 no punctuation added or removed, no doubled word collapsed
+#                                 ("ls -a a" is a command).  A shell command
 #                                 that gets a capital letter and a full stop is a
 #                                 shell command that does not run.
 #
@@ -120,7 +121,7 @@ DCT_STYLE_HINT = {
     "casual": ("It is a chat message: keep it informal and do not add a full "
                "stop at the end."),
     "verbatim": ("Verbatim: do not change punctuation, capitalisation, spelling "
-                 "or word choice. Only remove filler words and false starts."),
+                 "or word choice, and keep filler words. Only remove false starts."),
 }
 
 _dct_lock = _dct_threading.Lock()
@@ -312,30 +313,77 @@ def _dct_style_for(bundle, name, settings=None):
 # Standalone hesitation sounds.  Deliberately conservative: "like", "so" and
 # "well" are real words far more often than they are filler, and a cleanup that
 # eats a real word costs the user more than one that leaves an "uh" in.
+#
+# "mhm" is not here: it is an answer ("Did you get it? Mhm."), not a hesitation
+# (2026-11-09 audit E107).
 _DCT_FILLER_WORDS = ("um", "umm", "ummm", "uh", "uhh", "uhhh", "uhm", "erm",
-                     "er", "ah", "ahh", "hmm", "mmm", "mhm")
-_DCT_FILLER_PHRASES = ("you know", "kind of like", "sort of like")
+                     "er", "ah", "ahh", "hmm", "mmm")
+# Matched case-SENSITIVELY: lower case anywhere, sentence case ("Um, ...") too —
+# but never ALL CAPS, which is an acronym ("the ER", "AH-64", "UM"), and "Er"
+# only in lower case, since "Er" is erbium (E107).
+_DCT_FILLER_FORMS = tuple(
+    f for w in _DCT_FILLER_WORDS
+    for f in ((w,) if w == "er" else (w, w[0].upper() + w[1:])))
+# Multi-word fillers, removed ONLY where the commas say they are an aside (see
+# _dct_strip_fillers).  "kind of like" / "sort of like" are not here: "it is
+# kind of like a dog" is a comparison, and deleting it changed the sentence
+# (2026-10-21 audit C124).
+_DCT_FILLER_PHRASES = ("you know",)
 
 # The commas around a filler belong to the filler — "this is, uh, a test" is one
 # clause with a hesitation in it, not three clauses, so both commas go with the
 # "uh".  Leaving them behind produced "This is, a test.", which reads worse than
 # the raw transcript did.
+#
+# A hyphen is part of the word on both sides: "uh-huh", "uh-oh", "ah-ha" and
+# "AH-64" are words, not a filler followed by a stray "-huh" (E107).
 _DCT_FILLER_RE = _dct_re.compile(
-    r"(?:,\s*)?(?<![\w'])(?:" + "|".join(_DCT_FILLER_WORDS) + r")(?![\w'])\s*,?\s*",
-    _dct_re.IGNORECASE)
+    r"(?:,\s*)?(?<![\w'\-])(?:" + "|".join(_DCT_FILLER_FORMS) + r")(?![\w'\-])\s*,?\s*")
 _DCT_PHRASE_RE = _dct_re.compile(
-    r"(?:,\s*)?(?<![\w'])(?:"
+    r"(,\s*)?(?<![\w'])(?:"
     + "|".join(_p.replace(" ", r"\s+") for _p in _DCT_FILLER_PHRASES)
-    + r")(?![\w'])\s*,?\s*", _dct_re.IGNORECASE)
+    + r")(?![\w'])(\s*,)?", _dct_re.IGNORECASE)
 
-# A self-correction marker: everything before it in the clause was a false start.
+# A self-correction marker: what comes after it re-states what came before.
+# "actually no" is not one ("the answer is actually no" IS the answer), and
+# "I mean" / "I meant" count only when a comma sets them off — "I meant to call
+# you", "I mean it" and "what I meant" are sentences, not corrections (2026-10-08
+# audit B16, 2026-10-21 C124).  Recognising a marker is not enough to delete
+# anything: _dct_splice() must also find an anchor (below).
 _DCT_MARKER_RE = _dct_re.compile(
-    r"(?<![\w'])(?:no,?\s+wait|wait,?\s+no|actually,?\s+no|no,?\s+sorry|"
-    r"scratch\s+that|sorry,?\s+i\s+meant|i\s+meant|i\s+mean|or\s+rather)"
+    r"(?<![\w'])(?:no,?\s+wait|wait,?\s+no|no,?\s+sorry|scratch\s+that|"
+    r"(?:sorry,?\s+)?i\s+meant?(?=\s*,)|or\s+rather)"
     r"(?![\w'])[\s,]*", _dct_re.IGNORECASE)
 
-_DCT_REPEAT_RE = _dct_re.compile(r"(?<![\w'])(\w+)(\s+\1)+(?![\w'])", _dct_re.IGNORECASE)
-_DCT_SENT_RE = _dct_re.compile(r"[^.!?]+(?:[.!?]+|$)")
+# How much one self-correction may replace.  A one-word anchor ("the", "on") is
+# weak evidence, so it may only stand in for a short false start ("the blue
+# folder" -> "the green folder"); a longer anchor may replace more.  Past either
+# limit the words stay as spoken (B16: "...about the launch. I meant, to call
+# you" must not lose the first sentence to the shared word "to").
+_DCT_ANCHOR1_MAX_WORDS = 4
+_DCT_ANCHOR_MAX_WORDS = 12
+# ...and a lone subject pronoun is no anchor at all: after a marker it starts a
+# NEW clause far more often than it re-says a false start.  "Should I wait, no
+# I should go" became "Should I should go", and "I told him no, sorry, I can't
+# make it" lost "I told him no" (C124).  Two words still anchor ("I want the
+# red, no wait, I want the blue").
+_DCT_WEAK_ANCHORS = ("i", "you", "he", "she", "it", "we", "they")
+
+# Doubled words: only the closed-class words people stutter on and never double
+# on purpose.  Everything else stays — "had had", "that that", "very very",
+# "no no no", "Bora Bora", "on on Monday" and every number ("555 555 1234") are
+# speech, not stammer (B16, C124).  A doubled content word left in costs one
+# Backspace; a deleted one changes what was said.
+_DCT_STUTTER_WORDS = ("a", "an", "the", "i", "we", "they", "she", "and", "but",
+                      "or", "if", "your", "our", "their")
+_DCT_REPEAT_RE = _dct_re.compile(
+    r"(?<![\w'\-])(" + "|".join(_DCT_STUTTER_WORDS) + r")(?:\s+\1)+(?![\w'\-])",
+    _dct_re.IGNORECASE)
+# A sentence ends at . ! ? followed by whitespace or the end of the text — not
+# inside "3.5", "$4.99", "example.com" or "../src", which the old split broke
+# into two "sentences" and glued back together with a space (C124).  The inner
+# run is possessive so a transcript of nothing but dots cannot backtrack.
+_DCT_SENT_RE = _dct_re.compile(r"(?:[^.!?]|[.!?]++(?=[^\s.!?]))+(?:[.!?]+|$)")
 _DCT_SPACE_BEFORE_PUNCT_RE = _dct_re.compile(r"\s+([,.;:!?])")
 _DCT_DUP_PUNCT_RE = _dct_re.compile(r"([,;:])(\s*[,;:])+")
 
@@ -355,46 +403,109 @@ def _dct_bare(w):
     return w.strip(",.;:!?\"'()[]").lower()
 
 
-def _dct_splice(prev_words, corr_words):
-    """Fold a spoken self-correction into what it corrects.
+def _dct_splice(prev_words, corr_words, min_anchor=1):
+    """Fold a spoken self-correction into what it corrects, or None.
 
     "a test of the local dictation system" + "the local dictation pipeline"
     -> "a test of the local dictation pipeline"
 
     The correction usually RE-SAYS the start of the part it is replacing, so the
-    longest prefix of the correction (>= 2 words) that also occurs in the
-    original marks where the false start began.  The LAST occurrence wins: in
-    "the local file, no wait, the local folder" the anchor must be the second
-    "the local", not the first.
+    longest prefix of the correction that also occurs in the original marks
+    where the false start began.  The LAST occurrence wins: in "the local file,
+    no wait, the local folder" the anchor must be the second "the local", not
+    the first.
 
-    With no anchor there is nothing to align on, so the correction replaces the
-    clause back to the previous comma, and failing that the whole thing — that
-    is what a self-correction MEANS, and the raw transcript is one Undo away in
-    the app that received the text."""
-    if not corr_words:
-        return prev_words
-    if not prev_words:
-        return corr_words
+    None means "leave the words as spoken": no anchor at all, an anchor shorter
+    than `min_anchor`, or an anchor so far back that the "false start" it would
+    delete is longer than a false start (_DCT_ANCHOR1_MAX_WORDS for a one-word
+    anchor, _DCT_ANCHOR_MAX_WORDS otherwise).  There used to be a fallback that
+    replaced the clause back to the last comma, or the WHOLE thing — that is
+    how "Wait no one told me" replaced the sentence before it and "red or
+    rather crimson" lost "red" (2026-10-21 audit C124).  A correction we cannot
+    place is a correction we do not make."""
+    if not corr_words or not prev_words:
+        return None
     lp = [_dct_bare(w) for w in prev_words]
     lc = [_dct_bare(w) for w in corr_words]
-    # Longest anchor first, down to a single word: a speaker who restarts a
-    # phrase almost always repeats at least its first word, and taking the LAST
-    # occurrence of a one-word anchor cuts at the restart rather than at the
-    # first time that word happened to appear.
-    for k in range(min(len(lc), 6), 0, -1):
+    fillers = set(_DCT_FILLER_WORDS)
+    for k in range(min(len(lc), 6), max(1, min_anchor) - 1, -1):
         needle = lc[:k]
+        if not all(needle) or (k == 1 and needle[0] in _DCT_WEAK_ANCHORS):
+            continue
         for i in range(len(lp) - k, -1, -1):
             if lp[i:i + k] == needle:
-                return prev_words[:i] + corr_words
-    for i in range(len(prev_words) - 1, -1, -1):
-        if prev_words[i].endswith(","):
-            return prev_words[:i + 1] + corr_words
-    return corr_words
+                # The nearest occurrence is the only candidate: an earlier one
+                # would replace MORE, and a shorter anchor gets its own turn.
+                replaced = sum(1 for w in lp[i:] if w and w not in fillers)
+                limit = _DCT_ANCHOR1_MAX_WORDS if k == 1 else _DCT_ANCHOR_MAX_WORDS
+                if replaced <= limit:
+                    if _dct_negation_dropped(lp[:i], lc):
+                        return None
+                    return prev_words[:i] + corr_words
+                break
+    return None
+
+
+# Words that negate what follows them.  A correction that re-says a negated
+# phrase WITHOUT its negation is taking the negation back ("Don't send the
+# email, no wait, send the email"); splicing it after the kept prefix would keep
+# the very word the speaker withdrew and flip the meaning (2026-11-09 audit
+# E27).  Contractions are caught by their "n't" ending, either apostrophe.
+_DCT_NEGATORS = frozenset((
+    "not", "no", "never", "cannot", "nor", "neither", "none", "nobody",
+    "nothing", "nowhere", "noone", "nope", "nah", "without",
+    "dont", "doesnt", "didnt", "cant", "wont", "isnt", "arent", "wasnt",
+    "werent", "shouldnt", "wouldnt", "couldnt", "mustnt", "neednt", "havent",
+    "hasnt", "hadnt", "aint", "shant", "mightnt", "darent"))
+
+
+def _dct_negated(bare_words):
+    for w in bare_words:
+        w = w.replace("\u2019", "'")
+        if w in _DCT_NEGATORS or w.endswith("n't"):
+            return True
+    return False
+
+
+def _dct_negation_dropped(kept, corr):
+    """True when the part a splice KEEPS holds a negation — the case where
+    folding the correction in could assert the opposite of what was finally
+    said.  A negation the correction repeats does not make it safe: "Don't send
+    the email, no wait, send the email, not the text" carries a "not" about
+    something else, and the splice still kept the withdrawn "Don't".  A
+    correction that does re-say the negation anchors on it, so nothing negated
+    is left in the kept part.  As spoken is always safe (B16/C124: a correction
+    we cannot place safely is a correction we do not make)."""
+    return _dct_negated(kept)
+
+
+def _dct_fold_inline(core):
+    """Every marker INSIDE one sentence, left to right.  A marker whose
+    correction cannot be placed stays in the text exactly as spoken — so does a
+    marker with nothing after it ("I'll be there at five, no sorry"): dropping
+    it would assert the very thing the speaker took back."""
+    pos = 0
+    while True:
+        m = _DCT_MARKER_RE.search(core, pos)
+        if not m:
+            return core
+        left = core[:m.start()].strip()
+        right = core[m.end():].strip()
+        merged = _dct_splice(_dct_words(left), _dct_words(right)) if right else None
+        if merged is None:
+            pos = m.end()
+            continue
+        cut = len(merged) - len(_dct_words(right))
+        head = " ".join(merged[:cut])
+        core = " ".join(merged)
+        pos = len(head) + (1 if head else 0)     # resume at the correction
 
 
 def _dct_self_correct(text):
     """Two passes: a marker INSIDE a sentence corrects the clause before it, and
-    a sentence that STARTS with a marker corrects the sentence before it."""
+    a sentence that STARTS with a marker corrects the sentence before it — but
+    only with a two-word anchor (a sentence that begins "No, sorry, I ..." is far
+    more often an answer than a correction of the previous "I ...")."""
     sentences = [m.group(0).strip() for m in _DCT_SENT_RE.finditer(text)]
     sentences = [s for s in sentences if s]
     if not sentences:
@@ -409,35 +520,38 @@ def _dct_self_correct(text):
             core = core[:-1]
         core = core.strip()
 
-        starts_with_marker = False
-        m = _DCT_MARKER_RE.match(core)
-        if m:
-            starts_with_marker = True
-            core = core[m.end():].strip()
+        lead = _DCT_MARKER_RE.match(core)
+        body = _dct_fold_inline(core[lead.end():].strip() if lead else core)
 
-        # inline: fold each remaining marker into what came before it
-        while True:
-            m = _DCT_MARKER_RE.search(core)
-            if not m:
-                break
-            left = core[:m.start()].strip()
-            right = core[m.end():].strip()
-            if not right:
-                core = left.rstrip(" ,;:")
-                break
-            core = " ".join(_dct_splice(_dct_words(left), _dct_words(right)))
-
-        if starts_with_marker and fixed:
+        if lead and fixed and body:
             prev_core, prev_end = fixed[-1]
-            merged = " ".join(_dct_splice(_dct_words(prev_core), _dct_words(core)))
-            fixed[-1] = (merged, prev_end or end)
-        elif core:
-            fixed.append((core, end))
+            merged = _dct_splice(_dct_words(prev_core), _dct_words(body), min_anchor=2)
+            if merged is not None:
+                fixed[-1] = (" ".join(merged), prev_end or end)
+                continue
+        if lead:
+            # Nothing it could correct: the sentence stays as spoken, marker
+            # included ("Wait no one told me", "No, sorry, I did not see it").
+            body = (core[:lead.end()].rstrip() + " " + body).strip()
+        if body:
+            fixed.append((body, end))
     return " ".join((c + e).strip() for c, e in fixed if c).strip()
 
 
 def _dct_strip_fillers(text):
-    s = _DCT_PHRASE_RE.sub(" ", text)
+    """Single hesitation sounds anywhere; a filler PHRASE only as an aside —
+    set off by a comma on at least one side, with a comma or a sentence edge on
+    the other.  "it is, you know, fine" and "You know, it works" lose it; "Do
+    you know where she went", "As you know the deadline moved" and "you know
+    what I mean" are questions and statements and keep it (C124)."""
+    def aside(m):
+        before = m.string[:m.start()].rstrip()
+        after = m.string[m.end():].lstrip()
+        lcomma, rcomma = m.group(1) is not None, m.group(2) is not None
+        ledge = lcomma or not before or before[-1] in ".!?"
+        redge = rcomma or not after or after[0] in ".!?"
+        return " " if (ledge and redge and (lcomma or rcomma)) else m.group(0)
+    s = _DCT_PHRASE_RE.sub(aside, text)
     s = _DCT_FILLER_RE.sub(" ", s)
     return _dct_norm(s)
 
@@ -506,12 +620,18 @@ def dictation_clean_rules(text, style="prose", dictionary=None):
     if not s:
         return ""
     s = _dct_self_correct(s)
-    s = _dct_strip_fillers(s)
-    s = _dct_collapse_repeats(s)
+    if style != "verbatim":
+        # Not in verbatim either: "echo um" or a variable called "uh" is
+        # data, and a filler left in costs one Backspace (E107).
+        s = _dct_strip_fillers(s)
+    if style != "verbatim":
+        # Not in verbatim: a terminal line is data, and "ls -a a" or
+        # "echo the the" may mean exactly what was said (C124).
+        s = _dct_collapse_repeats(s)
     s = _dct_apply_dictionary(s, dictionary or {})
     if style == "verbatim":
-        # "no punctuation changes" is meant literally.  Fillers, doubled words
-        # and false starts are gone; everything else is exactly as spoken.
+        # "no punctuation changes" is meant literally.  False starts are gone;
+        # everything else, filler sounds included, is exactly as spoken.
         return _dct_norm(s)
     s = _dct_tidy_punct(s)
     return _dct_capitalise(s, add_final_stop=(style == "prose"))
@@ -847,9 +967,15 @@ def _dct_finish(ctx):
     bundle = str(body.get("app_bundle") or "")[:160]
     app_name = str(body.get("app_name") or "")[:120]
     engine = str(body.get("engine") or "")[:48]
+    dur = body.get("duration_ms")
+    # E123: a list/dict or a non-finite number is a client error (400)
+    if isinstance(dur, bool) or not isinstance(dur, (type(None), int, float, str)) \
+            or (isinstance(dur, float) and (dur != dur or dur in (float("inf"), float("-inf")))):
+        return {"ok": False, "text": "", "mode": "off", "ms": 0,
+                "error": "duration_ms must be a number"}, 400
     try:
-        duration = int(body.get("duration_ms") or 0)
-    except (TypeError, ValueError):
+        duration = int(dur or 0)
+    except (TypeError, ValueError, OverflowError):
         duration = 0
     style = _dct_style_for(bundle, app_name, settings)
 

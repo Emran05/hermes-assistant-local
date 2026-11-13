@@ -25,9 +25,12 @@
 # permit messages.send.  The skill's stock setup.py hardcodes gmail.send +
 # gmail.modify + drive + docs + sheets.  This module therefore builds the
 # consent URL ITSELF with only:
-#     gmail.readonly   — read mail; sending is impossible at Google's own
-#                        authorization layer
-#     calendar         — read/manage calendar (today widget, calendar_gap)
+#     gmail.readonly    — read mail; sending is impossible at Google's own
+#                         authorization layer
+#     calendar.readonly — read the calendar (today widget, calendar_gap).
+#                         It was the full read/write `calendar` scope until
+#                         C51 (2026-10-21 audit), while every surface said
+#                         read-only; nothing in this module writes events.
 #     contacts.readonly
 # The exchange step refuses + revokes any grant outside that set.  "Drafting"
 # means the agent composes text the USER sends — no send-capable scope is ever
@@ -69,12 +72,21 @@ GOOG_LASTURL  = os.path.join(GOOG_DIR, "google_oauth_last_url.txt")
 GOOG_REDIRECT = "http://localhost:1"          # == setup.py REDIRECT_URI
 GOOG_AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
 GOOG_TOKEN_URI = "https://oauth2.googleapis.com/token"
+# E87 (2026-11-09 audit): the only hosts an `auth_uri` / `token_uri` from a
+# pasted client file (or the token file) may name.  The token address
+# receives the authorization code, the PKCE verifier and the client secret,
+# so a foreign one could redeem read access to the owner's Google data.
+# www.googleapis.com: client files downloaded before ~2019 name
+# https://www.googleapis.com/oauth2/v3/token, and setup.py copies it into
+# google_token.json — refusing it would silently stop an owner's refresh.
+GOOG_OAUTH_HOSTS = ("accounts.google.com", "oauth2.googleapis.com",
+                    "www.googleapis.com")
 GOOG_REVOKE_URI = "https://oauth2.googleapis.com/revoke"
 
 # The ONLY scopes this dashboard will ever request (see mandate above).
 GOOG_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/calendar.readonly",
     "https://www.googleapis.com/auth/contacts.readonly",
 ]
 # Benign identity scopes Google sometimes appends; a grant limited to
@@ -101,7 +113,8 @@ GOOG_SKILL_STOCK = {
     "https://www.googleapis.com/auth/documents":
         "Docs — not requested (opt-in later)",
     "https://www.googleapis.com/auth/gmail.readonly": "Read mail",
-    "https://www.googleapis.com/auth/calendar": "Calendar",
+    "https://www.googleapis.com/auth/calendar":
+        "Create or change calendar events — excluded by design (read-only)",
     "https://www.googleapis.com/auth/contacts.readonly": "Contacts (read-only)",
 }
 GOOG_MAX_SECRET_BYTES = 65536
@@ -152,10 +165,66 @@ def _goog_sslctx():
     return None
 
 
+# C21 (2026-10-21 audit): what the last token refresh actually did, and when
+# anything last went to Google. Module state on purpose (no new file): the
+# calendar prime loop refreshes within seconds of every dashboard start, so a
+# dead grant is known again almost at once. `tok_mtime` ties a failure to the
+# token file it was made with — a reconnect writes a new file, and a failure
+# recorded against the old one must not haunt it.
+_GOOG_NET = globals().get("_GOOG_NET") or {"last_out": 0.0, "refresh": None}
+# Errors Google uses for "this grant is gone": revoked by the owner, a Testing-
+# mode OAuth app's 7-day refresh expiry, or a deleted client. Anything else
+# (no network, 5xx, 429) is transient and retried by the prime loop.
+GOOG_DEAD_GRANT = ("invalid_grant", "invalid_client", "unauthorized_client")
+
+
+def _goog_net_note():
+    _GOOG_NET["last_out"] = time.time()
+
+
+def _goog_token_mtime():
+    try:
+        return os.stat(GOOG_TOKEN).st_mtime
+    except OSError:
+        return None
+
+
+def _goog_note_refresh(ok, status, resp):
+    """Record one refresh outcome; log once per change of state. Only Google's
+    error CODE is kept — never the posted fields, never a token."""
+    prev = _GOOG_NET.get("refresh")
+    if ok:
+        _GOOG_NET["refresh"] = None
+        if prev:
+            print("[aux_google] token refresh works again", file=sys.stderr, flush=True)
+    else:
+        code = str((resp or {}).get("error") or
+                   (("http_%d" % status) if status else "network_error"))[:60]
+        _GOOG_NET["refresh"] = {"at": time.time(), "status": int(status or 0),
+                                "error": code, "dead": code in GOOG_DEAD_GRANT,
+                                "tok_mtime": _goog_token_mtime()}
+        if not prev or prev.get("error") != code:
+            print("[aux_google] token refresh failed: %s (HTTP %s)%s"
+                  % (code, status or "-", " — Google needs reconnecting"
+                     if code in GOOG_DEAD_GRANT else ""),
+                  file=sys.stderr, flush=True)
+    if prev or not ok:
+        _goog_bust()          # the status card must not keep a stale verdict
+
+
+def _goog_refresh_failure():
+    """The recorded refresh failure for the CURRENT token file, or None."""
+    rf = _GOOG_NET.get("refresh")
+    if not rf or rf.get("tok_mtime") != _goog_token_mtime():
+        return None
+    return rf
+
+
 def _goog_post_form(url, fields, timeout=25):
     """POST x-www-form-urlencoded; returns (http_status, parsed_json|{}).
     Raises nothing; upstream errors come back as (status, {"error": ...}).
     The posted fields are never included in any error we surface."""
+    _goog_net_note()
     body = urllib.parse.urlencode(fields).encode("ascii")
     req = urllib.request.Request(
         url, data=body, method="POST",
@@ -242,7 +311,10 @@ def _goog_status_compute():
     has_pending = os.path.isfile(GOOG_PENDING)
     out = {"ok": True, "connected": False, "has_client_secret": has_secret,
            "awaiting_code": has_pending, "partial": False, "scopes": [],
-           "missing_features": [], "reason": "", "checked_at": time.time()}
+           "missing_features": [], "reason": "", "checked_at": time.time(),
+           "needs_reauth": False,
+           # when a request last went to Google (not when this file was read)
+           "last_outbound": _GOOG_NET.get("last_out") or None}
     if not os.path.isfile(GOOG_TOKEN):
         out["reason"] = "not_connected"
         return out
@@ -283,6 +355,19 @@ def _goog_status_compute():
                               in scopes) and not any(
         any(f in s for f in ("gmail.send", "gmail.compose", "gmail.modify",
                              "mail.google.com")) for s in scopes)
+    # A grant made before C51 holds the full read/write `calendar` scope. It is
+    # not revoked behind the owner's back (that would disconnect them); it is
+    # REPORTED, and the card asks for a reconnect to narrow it.
+    out["scope_excess"] = _goog_scope_check(scopes)
+    # C21: a token FILE is not a working grant. Once a refresh of THIS file
+    # has failed, say so — needs_reauth when Google called the grant dead
+    # (revoked, a Testing-mode client's 7-day expiry), a transient reason
+    # otherwise. Still no network here: this reads what the last refresh did.
+    rf = _goog_refresh_failure()
+    if rf:
+        out["reason"] = "refresh_failed:" + rf["error"]
+        out["refresh_failed_at"] = rf["at"]
+        out["needs_reauth"] = bool(rf.get("dead"))
     return out
 
 
@@ -354,6 +439,13 @@ def _goog_secret_handler(ctx):
         if not (isinstance(ruris, list) and ruris):
             return ({"ok": False, "error": "not_client_secret",
                      "hint": "installed.redirect_uris is missing."}, 400)
+        for key, dflt in (("auth_uri", GOOG_AUTH_URI), ("token_uri", GOOG_TOKEN_URI)):
+            if _goog_oauth_uri(inst.get(key), dflt) is None:
+                return ({"ok": False, "error": "bad_client_secret",
+                         "hint": "installed.%s must be Google's own https address "
+                                 "(accounts.google.com, oauth2. or www.googleapis.com) — "
+                                 "download the client JSON from Google Cloud "
+                                 "Console again." % key}, 400)
         _goog_atomic_write(GOOG_SECRET, raw)
         _goog_bust()
         return {"ok": True, "stored": True}
@@ -403,8 +495,12 @@ def _goog_authurl_handler(ctx):
             ("prompt", "consent"),
             ("include_granted_scopes", "false"),  # never inherit an old broad grant
         ]
-        url = ((inst.get("auth_uri") or GOOG_AUTH_URI) + "?"
-               + urllib.parse.urlencode(params))
+        auth_uri = _goog_oauth_uri(inst.get("auth_uri"), GOOG_AUTH_URI)
+        if auth_uri is None:                          # E87: a file stored pre-check
+            return ({"ok": False, "error": "bad_client_secret",
+                     "hint": "The stored client file names a sign-in address "
+                             "that is not Google's — re-paste it (step 1)."}, 400)
+        url = auth_uri + "?" + urllib.parse.urlencode(params)
         try:
             _goog_atomic_write(GOOG_LASTURL, url + "\n")   # parity with SKILL.md
         except Exception:
@@ -419,6 +515,28 @@ def _goog_authurl_handler(ctx):
 # --------------------------------------------------------------------------
 # code exchange (urllib to oauth2.googleapis.com/token; scope wall; 600 token)
 # --------------------------------------------------------------------------
+def _goog_oauth_uri(u, default):
+    """`default` when `u` is absent or empty; `u` itself when it is an https
+    address on one of GOOG_OAUTH_HOSTS (default port, no userinfo, query or
+    fragment); otherwise None — the caller refuses rather than posting (E87)."""
+    if u is None or u == "":
+        return default
+    if not isinstance(u, str) or any(c in u for c in "\\ \t\r\n") or \
+            any(ord(c) < 32 or ord(c) == 127 for c in u):
+        return None
+    try:
+        p = urllib.parse.urlsplit(u)
+        port = p.port
+    except ValueError:
+        return None
+    if (p.scheme != "https" or p.username is not None or p.password is not None
+            or port not in (None, 443) or p.query or p.fragment
+            or (p.hostname or "").lower() not in GOOG_OAUTH_HOSTS
+            or "@" in p.netloc):
+        return None
+    return u
+
+
 def _goog_extract_code(code_or_url):
     """Accept a bare code or the full localhost:1 redirect URL (like setup.py)."""
     s = (code_or_url or "").strip()
@@ -434,7 +552,8 @@ def _goog_extract_code(code_or_url):
 def _goog_authcode_handler(ctx):
     try:
         b = ctx.body if isinstance(ctx.body, dict) else {}
-        raw = (b.get("code") or "").strip()
+        raw = b.get("code")
+        raw = raw.strip() if isinstance(raw, str) else ""       # E123: no_code, not 500
         if not raw:
             return ({"ok": False, "error": "no_code",
                      "hint": "Paste the full address-bar URL from the browser "
@@ -461,7 +580,11 @@ def _goog_authcode_handler(ctx):
 
         data = _goog_read_json(GOOG_SECRET) or {}
         inst = data.get("installed") or {}
-        token_uri = inst.get("token_uri") or GOOG_TOKEN_URI
+        token_uri = _goog_oauth_uri(inst.get("token_uri"), GOOG_TOKEN_URI)
+        if token_uri is None:                         # E87: never post the code there
+            return ({"ok": False, "error": "bad_client_secret",
+                     "hint": "The stored client file names a token address "
+                             "that is not Google's — re-paste it (step 1)."}, 400)
 
         st, resp = _goog_post_form(token_uri, {
             "code": code,
@@ -564,6 +687,7 @@ def _goog_disconnect_handler(ctx):
 # server.py's body), same discipline aux_index/aux_memlayer document.
 # --------------------------------------------------------------------------
 GOOG_CAL_TTL = 300
+GOOG_TOKEN_SKEW_S = 60
 
 
 def _goog_ensure_access_token(timeout=25):
@@ -583,19 +707,42 @@ def _goog_ensure_access_token(timeout=25):
               if payload.get("expiry") else None)
     now_utc = _goog_datetime.datetime.now(
         _goog_datetime.timezone.utc).replace(tzinfo=None)
-    if payload.get("token") and not (expiry and expiry <= now_utc):
+    # refresh GOOG_TOKEN_SKEW_S early: a token handed out with seconds left
+    # can expire while the request that carries it is still in flight
+    soon = now_utc + _goog_datetime.timedelta(seconds=GOOG_TOKEN_SKEW_S)
+    if payload.get("token") and not (expiry and expiry <= soon):
         return payload["token"]
+    # inside the skew window the old token still works: when the early
+    # refresh cannot happen, hand it out as before rather than nothing
+    still = (payload.get("token")
+             if payload.get("token") and not (expiry and expiry <= now_utc)
+             else None)
     refresh = payload.get("refresh_token")
     if not refresh:
-        return None
-    st, resp = _goog_post_form(payload.get("token_uri") or GOOG_TOKEN_URI, {
+        return still
+    dead = _goog_refresh_failure()
+    if dead and dead.get("dead"):
+        # Google already called THIS grant dead; asking again every five
+        # minutes would only resend the refresh token. A reconnect (or the
+        # agent's own successful refresh) rewrites the file and clears this.
+        return still
+    token_uri = _goog_oauth_uri(payload.get("token_uri"), GOOG_TOKEN_URI)
+    if token_uri is None:
+        # E87: a token file naming a foreign token address is never sent the
+        # refresh token; the caller degrades to "unavailable" as on any miss
+        return still
+    st, resp = _goog_post_form(token_uri, {
         "client_id": payload.get("client_id") or "",
         "client_secret": payload.get("client_secret") or "",
         "refresh_token": refresh,
         "grant_type": "refresh_token",
     }, timeout=timeout)
     if st != 200 or not resp.get("access_token"):
-        return None
+        # C21: this used to vanish without a trace, and status kept saying
+        # "Connected" from the token file alone. Now it is remembered.
+        _goog_note_refresh(False, st, resp)
+        return still
+    _goog_note_refresh(True, st, resp)
     expires_in = int(resp.get("expires_in") or 3600)
     new_expiry = (_goog_datetime.datetime.now(_goog_datetime.timezone.utc)
                   .replace(tzinfo=None)
@@ -619,10 +766,16 @@ def _goog_calendar_fetch():
     # function at all.
     token = _goog_ensure_access_token(timeout=4)
     if not token:
-        return {"available": False, "reason": "not_connected"}
+        # say WHY (C21): a dead grant is not the same as never connected
+        rf = _goog_refresh_failure()
+        return {"available": False,
+                "reason": ("refresh_failed:" + rf["error"]) if rf else "not_connected"}
+    _goog_net_note()                       # the events GET below goes to Google
     lt = time.localtime()
     day_start = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
-    day_end = day_start + 86400
+    # the next local midnight, not +86400: a DST day is 23 or 25 hours long
+    # (mktime normalises tm_mday past the end of the month)
+    day_end = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday + 1, 0, 0, 0, 0, 0, -1))
 
     def rfc(ts):
         return _goog_datetime.datetime.fromtimestamp(
@@ -639,12 +792,23 @@ def _goog_calendar_fetch():
             data = json.loads(r.read().decode("utf-8", "replace"))
     except Exception as e:
         return {"available": False, "reason": "google_calendar_error: " + type(e).__name__}
+    # An event title is written by whoever sent the invite and goes straight
+    # into every chat prompt via access_preamble() (audit B19): one inert line,
+    # chat-template tokens defanged (dashboard/untrusted.py). Imported here,
+    # not at module load — aux files exec into server.py's globals.
+    try:
+        from untrusted import line as _goog_line
+    except Exception:
+        import re as _goog_re
+
+        def _goog_line(s, limit=120):
+            return _goog_re.sub(r"\s+", " ", str(s)).strip()[:limit]
     events = []
     for it in (data.get("items") or []):
         if not isinstance(it, dict) or it.get("status") == "cancelled":
             continue
         start = it.get("start") or {}
-        title = str(it.get("summary") or "(untitled)")[:120]
+        title = _goog_line(it.get("summary") or "(untitled)", 120) or "(untitled)"
         tstr = ""
         if start.get("dateTime"):
             try:
@@ -696,7 +860,10 @@ if not globals().get("_goog_calendar_prime_started"):
 # routes
 # --------------------------------------------------------------------------
 register_get("/api/google/status", _goog_status_handler)
-register_get("/api/google/auth_url", _goog_authurl_handler)
+# POST, not GET (R2-48): building the URL rewrites the PKCE pending file, and
+# the same-origin guard lets a cross-site NAVIGATION through on GET by design,
+# so any page could silently break a connect the owner had half done.
+register_post("/api/google/auth_url", _goog_authurl_handler)
 register_post("/api/google/client_secret", _goog_secret_handler)
 register_post("/api/google/auth_code", _goog_authcode_handler)
 register_post("/api/google/disconnect", _goog_disconnect_handler)

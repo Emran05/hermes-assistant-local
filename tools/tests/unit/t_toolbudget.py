@@ -108,7 +108,8 @@ if sp:
     dmode = stat.S_IMODE(os.stat(os.path.dirname(sp[0])).st_mode)
     check("spill dir mode 0700", dmode == 0o700, oct(dmode))
     with open(sp[0]) as fh:
-        check("spill holds the FULL original", fh.read() == big)
+        # framed by its two sentinel lines (C41 follow-up), the original intact
+        check("spill holds the FULL original", tb._spill_unframe(fh.read()) == big)
     check("spill dir is today's date", os.path.basename(os.path.dirname(sp[0])) == datetime.date.today().isoformat())
 rows = log_rows()
 check("one log row", len(rows) == 1, rows)
@@ -173,7 +174,7 @@ check("tail is a suffix of the original", uni.endswith(tail), repr(tail[:20]))
 sp = spill_files()
 if sp:
     with open(sp[0], encoding="utf-8") as fh:
-        check("spill round-trips the unicode", fh.read() == uni)
+        check("spill round-trips the unicode", tb._spill_unframe(fh.read()) == uni)
 # a string with NO newlines at all (one long line of multi-byte text)
 oneline = "漢字ひらがなカタカナ🌊" * 2000
 out2 = tb.transform_tool_result(tool_name="terminal", result=oneline)

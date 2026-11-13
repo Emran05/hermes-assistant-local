@@ -100,7 +100,7 @@ Every Tier-1 pack MUST contain these sections — this is the house style skill-
 ## Drill doctrine (how every build gets verified)
 
 1. **Model check first:** Qwen3-30B-A3B must be active. Hermes-3-8B does NOT reliably tool-call — it deflects and fakes success (docs/FINDINGS.md), which would green-light broken skills.
-2. **`hermes -z` is for read-only drills only.** Under manual approvals, oneshot runs fail closed on approval-needing writes AND can fake approval success — so -z drills must touch nothing gated.
+2. **`hermes -z` is for read-only drills only.** Oneshot runs do NOT fail closed: `-z` sets `HERMES_YOLO_MODE=1` and auto-approves every non-hardline command, `approvals.mode: manual` or not (corrected 2026-10-21, audit C36) — so -z drills must touch nothing gated, and pass an explicit reduced `--toolsets`.
 3. **Hub chat is the approval surface.** Anything needing a grant runs via POST /api/chat → poll → /api/chat/approve (choice approve|deny) with the builder watching. Exact param names: verify against ~/HermesAssistant/dashboard/server.py before scripting.
 4. **No real sends** in drills — no `hermes send`, no Telegram, no watchtower test_rule that fires a live alert without the user forewarned.
 5. **Verify recipes against source, not memory** — endpoint shapes come from dashboard/server.py + aux_*.py, cron syntax from `hermes cron --help`. The original runbook's fabricated values are the standing lesson.

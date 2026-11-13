@@ -46,18 +46,28 @@
   // ==========================================================================
   // Reuses index.html's top-level globals. Classic <script>s share one global
   // lexical scope, so `session` (a top-level `let`) and the `function`
-  // declarations (setChatMode/loadHistory/addBubble/streamJob) are reachable
-  // and (for session) reassignable from here.
+  // declarations (openChat/loadHistory/addBubble/streamJob) are reachable
+  // and (for session) reassignable from here. The chat lives on the Agent
+  // page only, so the hand-off opens that page (it used to force the Hub's
+  // full-screen chat mode, which then stuck as the window's layout).
   function resumeInMain(job) {
     try {
       session = "menubar";                                   // reassigns index.html's let session
       try { localStorage.setItem("hermes_session", "menubar"); } catch (e) {}
-      if (typeof setChatMode === "function") setChatMode("full");
+      if (typeof openChat === "function") openChat();
       (async function () {
         try {
           if (typeof loadSessions === "function") await loadSessions();
-          if (typeof loadHistory === "function") await loadHistory();
-          if (job && typeof addBubble === "function" && typeof streamJob === "function") {
+          // W.loadHistory: index.html's. The bare name is THIS file's popover
+          // loadHistory (same name, IIFE scope), which draws into POP.thread
+          // and threw here, so the hand-off never reached streamJob. The
+          // main window's attaches to the conversation's running turn itself
+          // (the dashboard's inflight_job; `job` is only the hint for a
+          // dashboard that does not send one). Streaming `job` again here drew
+          // a turn that had already finished twice: once from the history,
+          // once from its last poll.
+          if (typeof W.loadHistory === "function") await W.loadHistory(job || undefined);
+          else if (job && typeof addBubble === "function" && typeof streamJob === "function") {
             var thinking = addBubble("", "bot", false);
             await streamJob(job, thinking);
           }
@@ -160,6 +170,7 @@
   // ---- bespoke glyphs (no emoji, ever) --------------------------------------
   var PATHS = {
     send: '<path d="M12 19V5"/><path d="M5.5 11.5 12 5l6.5 6.5"/>',
+    stop: '<rect x="6.5" y="6.5" width="11" height="11" rx="2.2" fill="currentColor" stroke="none"/>',
     clip: '<rect x="8.5" y="3" width="7" height="3.6" rx="1.1"/><path d="M8.5 4.8H6.4A1.9 1.9 0 0 0 4.5 6.7v12.4A1.9 1.9 0 0 0 6.4 21h11.2a1.9 1.9 0 0 0 1.9-1.9V6.7a1.9 1.9 0 0 0-1.9-1.9h-2.1"/>',
     sum: '<path d="M4.5 7h15M4.5 12h15M4.5 17h8.5"/>',
     explain: '<circle cx="12" cy="12" r="8.6"/><path d="M9.7 9.4a2.4 2.4 0 1 1 3.2 2.3c-.7.3-1 .8-1 1.5v.4"/><path d="M12 16.8h.01"/>',
@@ -290,6 +301,9 @@
     // resting state is a quiet ghost button, not a faded primary one
     ".qa-go[disabled]{background:var(--chip);color:var(--faint);cursor:default}",
     ".qa-go[data-busy]{background:var(--chip);color:var(--muted)}",
+    // Stop (a chat turn is running): a neutral chip with an ink square, never the accent Send
+    ".qa-go[data-stop]{background:var(--chip);color:var(--ink);box-shadow:inset 0 0 0 1px var(--field-edge)}",
+    ".qa-go[data-stop][aria-disabled=true]{color:var(--muted);cursor:default}",
 
     // ---------- 3. action chips ----------
     ".qa-acts{flex:0 0 auto;display:flex;gap:6px;padding:8px 11px;overflow-x:auto;overflow-y:hidden;",
@@ -387,8 +401,13 @@
     "border:1px solid color-mix(in srgb,var(--warn) 42%,transparent);",
     "background:color-mix(in srgb,var(--warn) 10%,transparent)}",
     ".qa-appr .h{display:flex;align-items:center;gap:6px;font-size:11.5px;font-weight:650;color:var(--warn)}",
-    ".qa-appr code{display:block;margin:6px 0 8px;padding:6px 8px;border-radius:7px;max-height:92px;overflow:auto;",
-    "font:11px/1.5 " + MONO + ";background:color-mix(in srgb,var(--ink) 9%,transparent);white-space:pre-wrap;word-break:break-word}",
+    // E15: no inner scroll — WebKit's overlay scrollbar is invisible until
+    // scrolled, so a clipped command hid lines with no cue; the card grows and
+    // the thread (which shows its scrollbar) scrolls instead
+    ".qa-appr code{display:block;margin:6px 0 8px;padding:6px 8px;border-radius:7px;",
+    "font:11px/1.5 " + MONO + ";background:color-mix(in srgb,var(--ink) 9%,transparent);white-space:pre-wrap;overflow-wrap:anywhere;tab-size:4}",
+    ".qa-appr .pol{margin:5px 0 -1px;font-size:10.5px;color:var(--muted);overflow-wrap:anywhere}",
+    ".qa-appr .long{margin:-2px 0 8px;font-size:11px;font-weight:600;color:var(--warn)}",
     ".qa-appr .row{display:flex;gap:6px}",
     ".qa-appr .row button{flex:1;height:30px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;",
     "border:1px solid var(--hairline);background:var(--glass-2);color:var(--ink);",
@@ -811,6 +830,8 @@
     disabled: "Clipboard actions are turned off in settings.",
     model_error: "The model is busy or slow — try again."
   };
+  var CLIP_CUT = "Cut off: the text was longer than this action can return, " +
+    "so the result above is incomplete. Don't paste it over the original.";
 
   function runClip(action, label) {
     if (POP.busy) return;
@@ -843,6 +864,9 @@
           POP.busy = false; syncGo();
           if (d && d.ok) {
             turn(d.result || "", "bot", true);
+            // the model hit its output cap — never let a partial proofread
+            // pass for the whole text (C22)
+            if (d.truncated_output) line(CLIP_CUT, "err");
             return;
           }
           var err = d && d.error;
@@ -989,6 +1013,25 @@
   // ==========================================================================
   function syncGo() {
     if (!POP.go) return;
+    if (POP.busy && POP.job) {
+      // a chat turn is running: the go button is Stop (POST /api/chat/stop,
+      // once). Return in the field never stops — only this button does.
+      var stopping = POP.stopping === POP.job;
+      POP.go.disabled = false;
+      POP.go.removeAttribute("data-busy");
+      POP.go.setAttribute("data-stop", "1");
+      POP.go.setAttribute("aria-disabled", stopping ? "true" : "false");
+      POP.go.setAttribute("aria-label", stopping ? "Stopping\u2026" : "Stop");
+      POP.go.title = stopping ? "Stopping\u2026" : "Stop this reply";
+      POP.go.innerHTML = stopping ? dots() : svg("stop", 15, 2);
+      return;
+    }
+    if (POP.go.getAttribute("data-stop")) {
+      POP.go.removeAttribute("data-stop");
+      POP.go.removeAttribute("aria-disabled");
+      POP.go.setAttribute("aria-label", "Send");
+      POP.go.title = "Send (Return)";
+    }
     var has = !!(POP.input.value || "").trim();
     POP.go.disabled = POP.busy || !has;
     if (POP.busy) { POP.go.setAttribute("data-busy", "1"); POP.go.innerHTML = dots(); }
@@ -1023,16 +1066,23 @@
     try { W.localStorage.setItem("hermes_qa_last", text); } catch (e) {}
     POP.input.value = ""; grow(); setFilter("");
     POP.busy = true; syncGo();
-    turn(text, "user", false);
+    var mine = turn(text, "user", false);
     var asleep = STATE.modelState === "asleep" || STATE.modelState === "waking" ||
       STATE.modelState === "loading" || STATE.modelState === "offline";
     // The chat worker wakes an asleep model itself — never block the send.
     var pend = busyLine(asleep ? "waking the model (~40 s)…" : "thinking…");
     if (asleep) { beginWake(); }
     j("/api/chat", { message: text, session: SESSION }).then(function (d) {
-      if (d && d.job) { POP.job = d.job; poll(d.job, pend); return; }
+      if (d && d.job && !d.busy) { POP.job = d.job; syncGo(); poll(d.job, pend); return; }
       pend.remove();
       POP.busy = false; syncGo();
+      // B11 / E72: no turn started — busy (the main window can hold
+      // "menubar" too), refused (agent paused, memory ceiling) or the
+      // dashboard unreachable. Nothing was sent, so the message leaves the
+      // thread and the text goes back in the box (unless something new was
+      // typed meanwhile).
+      if (mine && mine.parentNode) mine.parentNode.remove();
+      if (!POP.input.value) { POP.input.value = text; grow(); }
       if (d && d.reply) line(d.reply, d.ok ? "" : "err");
       else line("Could not reach the dashboard.", "err");
       refreshState();
@@ -1041,7 +1091,7 @@
   }
 
   function poll(job, pend) {
-    var bubble = null, appr = null, deep = null, deepSeen = false;
+    var bubble = null, appr = null, answered = null, deep = null, deepSeen = false;
     var ensure = function () {
       if (!bubble) {
         bubble = turn("", "bot", true);
@@ -1051,7 +1101,7 @@
     };
     var finish = function () {
       if (pend && pend.parentNode) pend.remove();
-      POP.busy = false; POP.job = null; syncGo(); fit(); focusInput();
+      POP.busy = false; POP.job = null; POP.stopping = null; syncGo(); fit(); focusInput();
     };
     var loop = function () {
       j("/api/chat/poll?job=" + encodeURIComponent(job)).then(function (d) {
@@ -1061,6 +1111,7 @@
           line("That request was lost (did the dashboard restart?) — ask again.", "err");
           return;
         }
+        if (d.stopping && !d.done && POP.stopping !== job) { POP.stopping = job; syncGo(); }   // stopped elsewhere
         if (d.text) {
           var b0 = ensure();
           b0.querySelector(".md").innerHTML = qaMd(d.text);
@@ -1077,20 +1128,32 @@
         else if (d.deep && deep) fillDeep(deep, d.deep);
         if (d.deep && d.deep.state !== "thinking") deepSeen = true;
 
-        if (d.state === "approval" && d.approval && !appr) {
-          appr = approvalBox(job, d.approval, function () { appr = null; });
+        // B01: one card per approval_id — a different request replaces it, an
+        // answered one is never rebuilt (the poll can lag the click by ~1 s)
+        var aid = (d.state === "approval" && d.approval) ? String(d.approval.approval_id || "") : null;
+        if (appr && appr.dataset.aid !== aid) { appr.remove(); appr = null; }
+        if (aid !== null && !appr && aid !== answered) {
+          appr = approvalBox(job, d.approval, function () {
+            answered = aid;
+            if (appr && appr.dataset.aid === aid) appr = null;   // not a newer card
+          });
+          appr.dataset.aid = aid;
           POP.thread.appendChild(pend);
           scrollDown(true); fit();
         }
-        if (d.state !== "approval" && appr) { appr.remove(); appr = null; }
 
         if (d.done) {
           var b = ensure();
           b.classList.remove("stream");
           b.querySelector(".md").innerHTML = qaMd(d.reply || d.text || "");
-          if (d.err) b.classList.add("err");
+          if (d.err && !d.stopped) b.classList.add("err");   // a stop is not an error; the reply says so
           if (appr) { appr.remove(); appr = null; }
           finish();
+          // A03 / E72: the reply is on screen but not in the conversation —
+          // say so, as the main window does, before it is lost on the next open
+          if (d.persisted === false) {
+            line("This reply could not be saved to the conversation — copy it before closing.", "err");
+          }
           refreshState();
           // the Claude answer can land AFTER the local turn (aux_autoroute runs
           // it in parallel) — keep watching so it is never dropped
@@ -1102,6 +1165,23 @@
       });
     };
     loop();
+  }
+  // The owner's Stop for the running chat turn (one POST per job). The reply
+  // — the kept text and the server's stopped line — arrives through poll().
+  function qaStop() {
+    var job = POP.job;
+    if (!job || !POP.busy || POP.stopping === job) return;
+    POP.stopping = job; syncGo();
+    try {   // a waiting card goes inert at once; the server refuses it too
+      POP.thread.querySelectorAll(".qa-appr button").forEach(function (b) { b.disabled = true; });
+    } catch (e) {}
+    j("/api/chat/stop", { job: job }).then(function (r) {
+      if (!r || (r.ok === false && !r.gone)) {
+        if (POP.stopping === job) POP.stopping = null;
+        syncGo();
+        line("Hermes could not be told to stop \u2014 try again.", "err");
+      }
+    });
   }
   function pollDeep(job, card) {
     var n = 0;
@@ -1116,21 +1196,106 @@
     setTimeout(tick, 1000);
   }
 
+  // E15: bidi and default-ignorable characters in a command are shown as
+  // ⟦U+XXXX⟧, so the text read is the text that runs. A COPY of aux_github.js
+  // HIDDEN_RE (the mirror of aux_ghchanges.py _GHC_HIDDEN_RE; index.html's
+  // streamJob has the same copy) — change all or none
+  // (t_e15_approval_multiline.py compares them code point by code point).
+  function qaMarkHidden(s) {
+    var QA_HIDDEN_RE = null;   // built per call: approvals are rare, and the function stays self-contained
+    try {
+      QA_HIDDEN_RE = new RegExp("(?:[\\u00ad\\u034f\\u061c\\u115f\\u1160\\u17b4\\u17b5\\u180e\\u200b-\\u200f\\u2028-\\u202e" +
+        "\\u2060-\\u206f\\u3164\\uffa0\\ufeff\\ufff0-\\ufffb" +
+        "\\u{1bca0}-\\u{1bca3}\\u{1d173}-\\u{1d17a}\\u{e0000}-\\u{e0fff}" +
+        "\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f-\\x9f]|[\\ufe00-\\ufe0f\\u180b-\\u180d\\u180f]{2,})", "gu");
+    } catch (e) {
+      try {
+        QA_HIDDEN_RE = new RegExp("(?:[\\u00ad\\u034f\\u061c\\u115f\\u1160\\u17b4\\u17b5\\u180e\\u200b-\\u200f\\u2028-\\u202e" +
+          "\\u2060-\\u206f\\u3164\\uffa0\\ufeff\\ufff0-\\ufffb" +
+          "\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f-\\x9f]|[\\ufe00-\\ufe0f\\u180b-\\u180d\\u180f]{2,})", "g");
+      } catch (e2) { QA_HIDDEN_RE = null; }
+    }
+    s = String(s == null ? "" : s);
+    if (!QA_HIDDEN_RE) return s;
+    return s.replace(QA_HIDDEN_RE, function (m) {
+      var out = "";
+      Array.from(m).forEach(function (ch) {
+        var h = ch.codePointAt(0).toString(16).toUpperCase();
+        while (h.length < 4) h = "0" + h;
+        out += "\u27e6U+" + h + "\u27e7";
+      });
+      return out;
+    });
+  }
+
+  // Review R4: index.html streamJob's `shape`. The body between the
+  // SHAPE-BODY markers is THE SAME TEXT there and here — change both or
+  // neither (t_s3_shape_copies.py compares the two line by line). A bare CR
+  // draws nothing, a run of blanks of 40 characters or 80 columns (U+2800)
+  // draws an empty block, 4+ stacked combining marks rise over the lines
+  // above: each is marked, as the GitHub sheet does (aux_github.js DL/DX).
+  function qaShape(s) {
+    // SHAPE-BODY-BEGIN
+    var mk = null;
+    try { mk = new RegExp("[\\p{Mn}\\p{Me}]{4,}", "gu"); } catch (e) {
+      mk = /[\u0300-\u036f\u0483-\u0489\u0591-\u05c7\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06ed\u0900-\u0903\u093a-\u094f\u0e31-\u0e3a\u0e47-\u0e4e\u0f71-\u0fbc\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20f0\ua670-\ua672\ufe20-\ufe2f]{4,}/g;
+    }
+    var pl = function (n, w) { return n + " " + w + (n === 1 ? "" : "s"); };
+    return String(s).replace(/\r(?!\n)/g, "\u27e6U+000D\u27e7")
+      .replace(/[ \t\u00a0\u1680\u2000-\u200a\u202f\u205f\u2800\u3000]{2,}/g, function (m) {
+        // the server's C-longline rule (aux_ghchanges.py _ghc_blank_width): a run
+        // is marked at 40 blanks OR 80 columns, a tab counting 8 and U+3000 /
+        // U+2800 counting 2; the words are the GitHub sheet's (aux_github.js blankWord)
+        var sp = 0, tb = 0, cols = 0, i, c;
+        for (i = 0; i < m.length; i++) {
+          c = m.charAt(i);
+          if (c === " ") sp++; else if (c === "\t") tb++;
+          cols += c === "\t" ? 8 : (c === "\u3000" || c === "\u2800") ? 2 : 1;
+        }
+        if (m.length < 40 && cols < 80) return m;
+        var ot = m.length - sp - tb, parts = [];
+        if (sp) parts.push(pl(sp, "space"));
+        if (tb) parts.push(pl(tb, "tab"));
+        if (ot) parts.push(pl(ot, "other blank character"));
+        return "\u27e6" + (parts.length > 2 ? parts.slice(0, -1).join(", ") + " and " + parts[parts.length - 1] : parts.join(" and ")) + "\u27e7";
+      })
+      .replace(mk, function (m) { return "\u27e6" + pl(Array.from(m).length, "combining mark") + "\u27e7"; });
+    // SHAPE-BODY-END
+  }
+
   function approvalBox(job, a, onGone) {
     var d = document, box = d.createElement("div");
+    var raw = String(a.command || a.summary || a.tool || a.name || "a sensitive action");
+    // a long command: the thread lands on its LAST lines, right above Approve
+    var nl = raw.split("\n").length;
+    var long = (nl > 12 || raw.length > 1200) ? "This command is " + nl + " line" + (nl === 1 ? "" : "s") +
+      " (" + raw.length + " characters) long \u2014 scroll up and read all of it before you approve." : "";
+    // E03 seam: why the Trust policy is asking (permissions.decide()'s reason,
+    // carried as approval._policy) — the same quiet line the main window's card
+    // shows: text, marked like the command, one line, at most 300 characters.
+    var pr = (a._policy && typeof a._policy === "object" && typeof a._policy.reason === "string") ? a._policy.reason : "";
+    var pol = pr.trim() ? qaShape(qaMarkHidden(pr)).replace(/\s*[\r\n\u2028\u2029]+\s*/g, " ").trim() : "";
+    if (pol.length > 300) pol = pol.slice(0, 299).replace(/[\ud800-\udbff]$/, "") + "\u2026";
     box.className = "qa-appr";
     box.innerHTML = '<div class="h">' + svg("warn", 13) + "<span>Needs your approval</span></div>" +
-      "<code></code><div class=\"row\"></div>" +
+      (pol ? '<div class="pol"></div>' : "") +
+      "<code></code>" + (long ? '<div class="long"></div>' : "") + "<div class=\"row\"></div>" +
       '<div class="sub"><button type="button">Review it in the main window</button></div>';
-    box.querySelector("code").textContent =
-      a.command || a.summary || a.tool || a.name || "a sensitive action";
+    if (pol) box.querySelector(".pol").textContent = pol;
+    if (long) box.querySelector(".long").textContent = long;
+    box.querySelector("code").textContent = qaShape(qaMarkHidden(raw));
     var row = box.querySelector(".row");
     [["approve", "Approve", "ok"], ["deny", "Deny", ""]].forEach(function (c) {
       var b = d.createElement("button");
       b.type = "button"; b.textContent = c[1]; if (c[2]) b.className = c[2];
       b.onclick = function () {
         row.querySelectorAll("button").forEach(function (x) { x.disabled = true; });
-        j("/api/chat/approve", { job: job, choice: c[0] }).then(function (r) {
+        j("/api/chat/approve", { job: job, choice: c[0], approval_id: a.approval_id || "" }).then(function (r) {
+          if (r && r.stale) {                       // B01: that card is no longer the one waiting
+            box.remove(); onGone && onGone();
+            line("That approval is no longer waiting — nothing was sent.", "err");
+            return;
+          }
           if (!r || r.ok === false) {
             row.querySelectorAll("button").forEach(function (x) { x.disabled = false; });
             line("That approval could not be recorded — try the main window.", "err");
@@ -1233,7 +1398,17 @@
     };
     // While the field holds a "/…" action query the go button must run the
     // highlighted action, not post "/re" to the model as a message.
-    POP.go.onclick = function () { submit(); };
+    POP.go.onclick = function () {
+      if (POP.go.getAttribute("data-stop")) {
+        if (POP.go.getAttribute("aria-disabled") !== "true") qaStop();
+        return;
+      }
+      submit();
+    };
+    // a held Enter/Space on the button is one Stop (or one send), never a stream
+    POP.go.addEventListener("keydown", function (e) {
+      if ((e.key === "Enter" || e.key === " " || e.key === "Spacebar") && e.repeat) e.preventDefault();
+    });
 
     POP.input.addEventListener("input", function () {
       STATE.lastTouch = Date.now();

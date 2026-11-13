@@ -95,10 +95,14 @@
               + "reads Apple Notes via a script that opens the Notes app." }
   ];
 
-  function switchHTML(key, on, busy) {
+  // a real switch (C94): named after its app, a Tab stop, Enter/Space in
+  // wire(); aria-disabled while its POST is in flight
+  function switchHTML(key, on, busy, name) {
     return '<span class="aasw' + (on ? " on" : "") + (busy ? " busy" : "") +
-      '" data-k="' + E(key) + '" role="switch" aria-checked="' +
-      (on ? "true" : "false") + '"><i></i></span>';
+      '" data-k="' + E(key) + '" role="switch" tabindex="0" aria-label="' +
+      E((name || key) + " automation") + '" aria-checked="' +
+      (on ? "true" : "false") + '"' + (busy ? ' aria-disabled="true"' : "") +
+      '><i></i></span>';
   }
 
   function cardHTML(state) {
@@ -110,7 +114,7 @@
       var busy = !!(state.busy && state.busy[r.key]);
       return "<li><label>" +
         '<span class="aaname">' + E(r.name) + "</span>" +
-        switchHTML(r.key, on, busy) +
+        switchHTML(r.key, on, busy, r.name) +
         '<span class="aadet">' + E(r.detail) + "</span>" +
         "</label></li>";
     }).join("");
@@ -193,6 +197,12 @@
           if (el.classList.contains("busy")) return;
           flip(el.getAttribute("data-k"));
         };
+        el.onkeydown = function (e) {
+          if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
+          e.preventDefault();
+          if (e.repeat) return;               // a held key flips once, not once per save
+          el.onclick();
+        };
       });
   }
 
@@ -212,8 +222,20 @@
     } else if (el.parentNode !== body) {
       try { body.appendChild(el); } catch (e) {}
     }
+    // paint() rebuilds the card, so a switch flipped from the keyboard would
+    // lose focus to <body> on its own busy/settled repaint — find it again
+    var fk = null;
+    try {
+      var a = d.activeElement;
+      if (a && el.contains(a) && a.getAttribute) fk = a.getAttribute("data-k");
+    } catch (e) {}
     try { el.innerHTML = cardHTML(S); } catch (e) { return; }
     wire(el);
+    if (fk) {
+      Array.prototype.slice.call(el.querySelectorAll(".aasw")).forEach(function (sw) {
+        if (sw.getAttribute("data-k") === fk) { try { sw.focus({ preventScroll: true }); } catch (e) {} }
+      });
+    }
     if (!relocatedOnce) {
       relocatedOnce = true;
       try { if (typeof W.settingsRelocate === "function") W.settingsRelocate(); } catch (e) {}

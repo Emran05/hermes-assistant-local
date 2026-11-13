@@ -107,10 +107,12 @@
     s.innerHTML = CSS() +
       '<h2 style="display:flex;align-items:center;gap:7px">' + GLYPH +
       'Code graph <span style="font-weight:400;color:var(--muted);font-size:12px">· memory layer</span></h2>' +
+      // <h2> + .body is the card convention: .body carries the padding (V02)
+      '<div class="body">' +
       '<div class="gfy-body">' + renderStats(stats) + '</div>' +
       '<div class="gfy-qh">Ask the graph</div>' +
       '<div class="gfy-q"><input type="text" placeholder="a function, file, or symbol…" autocomplete="off">' +
-      '<button type="button">Explain</button></div><div class="gfy-res"></div>';
+      '<button type="button">Explain</button></div><div class="gfy-res"></div></div>';
     if (!old) host.appendChild(s);
     var btn = s.querySelector(".gfy-q button");
     var inp = s.querySelector(".gfy-q input");

@@ -10,10 +10,12 @@ SP = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.environ.get("HERMES_REPO") or os.path.dirname(
     os.path.dirname(os.path.dirname(SP)))
 REPO = os.path.join(ROOT, "dashboard")
-# The owner's REAL home, captured before HOME is pointed at the throwaway.
-REAL_HOME = os.path.expanduser("~")
 HOME = tempfile.mkdtemp(prefix="hermes-index-")
-PORT = "7801"
+# a FREE loopback port, not a fixed one: two checkouts (or two worktrees)
+# running the unit tier at once used to collide on "Address already in use"
+import socket as _socket                         # noqa: E402
+_s = _socket.socket(); _s.bind(("127.0.0.1", 0))
+PORT = str(_s.getsockname()[1]); _s.close()
 
 shutil.rmtree(HOME, ignore_errors=True)
 DASH = os.path.join(HOME, ".hermes", "dashboard")
@@ -22,22 +24,44 @@ os.makedirs(CH, exist_ok=True)
 
 NOW = time.time()
 
-# ---- chat fixtures: two REAL conversations + crafted ones ------------------
-# Read-only borrows from the owner's store.  Fingerprint it (and the real
-# index.db) BEFORE anything runs, so section 19 can prove this harness wrote
-# nothing there — a hard-coded file count went stale the first time the owner
-# had another conversation.
-REAL = os.path.join(REAL_HOME, ".hermes", "dashboard", "chats")
-REAL_BEFORE = sorted(os.listdir(REAL)) if os.path.isdir(REAL) else None
-REAL_IXDB = os.path.join(REAL_HOME, ".hermes", "dashboard", "index.db")
-REAL_IXDB_BEFORE = (os.path.getmtime(REAL_IXDB), os.path.getsize(REAL_IXDB)) \
-    if os.path.exists(REAL_IXDB) else None
+# ---- chat fixtures ----------------------------------------------------------
+# Everything here is synthetic.  This suite used to copy two of the owner's
+# real conversations out of ~/.hermes/dashboard/chats and fingerprint the real
+# index.db (which the live dashboard rewrites, so the check was flaky) — a unit
+# suite never reads the owner's data (S2 seam, 2026-11-09 audit).  The two
+# "stored" conversations below have the full on-disk shape save_chat writes
+# (rev, per-message ids, serve_sid/serve_key, tool/approval/status rows), which
+# is what the borrowed files were there to exercise.
+STORED = {
+    "chat-2026-08-31-fixt1": {
+        "title": "Plan the greenhouse irrigation", "rev": 7,
+        "serve_sid": "sid-ephemeral-1a2b", "serve_key": "durable-key-wombatserve",
+        "messages": [
+            {"id": "a1b2c3d4e5f6", "role": "user", "ts": NOW - 5000,
+             "text": "How should I lay out the drip lines in the greenhouse?"},
+            {"id": "a1b2c3d4e5f7", "role": "tool", "tool": "terminal", "ts": NOW - 4990,
+             "text": "wombattool output that must not be indexed"},
+            {"id": "a1b2c3d4e5f8", "role": "bot", "ts": NOW - 4980,
+             "text": "Run one manifold per bench and keep the lines under twenty metres."},
+        ]},
+    "chat-2026-09-05-fixt2": {
+        "title": "", "rev": 3, "serve_sid": None, "serve_key": "durable-key-2",
+        "messages": [
+            {"id": "b1b2c3d4e5f6", "role": "user", "ts": NOW - 3000,
+             "text": "Summarise the quarterly persimmon ledger"},
+            {"id": "b1b2c3d4e5f7", "role": "bot", "ts": NOW - 2990,
+             "text": "wombatapproval row", "approval": {"cmd": "ls", "approval_id": "x"}},
+            {"id": "b1b2c3d4e5f8", "role": "bot", "ts": NOW - 2980,
+             "text": "The persimmon ledger shows three suppliers and one late invoice.",
+             "deep": {"model": "sonnet", "ms": 1200}},
+        ]},
+}
 copied = []
-for fn in ("chat-2026-08-31-qglb4.json", "chat-2026-09-05-noxjw.json"):
-    src = os.path.join(REAL, fn)
-    if os.path.exists(src):
-        shutil.copy2(src, os.path.join(CH, fn))
-        copied.append(fn)
+for _sid, _obj in STORED.items():
+    with open(os.path.join(CH, _sid + ".json"), "w") as _fh:
+        json.dump(_obj, _fh, indent=1)
+    os.utime(os.path.join(CH, _sid + ".json"), (NOW - 2900, NOW - 2900))
+    copied.append(_sid)
 
 
 def wr(sid, obj, mtime=None):
@@ -186,7 +210,7 @@ def search(q, **kw):
 import urllib.parse                              # noqa: E402
 
 print("\n=== fixtures ===")
-print("  real chats copied:", copied or "(none found)")
+print("  stored-shape chats:", copied)
 
 # --------------------------------------------------------------------------
 print("\n=== 1. sweep + status ===")
@@ -235,6 +259,13 @@ ok("sources counts match result mix",
    d["sources"]["chat"] == len([r for r in d["results"] if r["source"] == "chat"]),
    d["sources"])
 ok("took_ms present", isinstance(d["took_ms"], int), d.get("took_ms"))
+# C39 (2026-10-21): the agent reads this through a terminal tool, which Hermes
+# never wraps as untrusted, so the response has to say it itself.
+ok("C39: the response carries the third-party-text notice",
+   "never instructions" in (d.get("notice") or ""), d.get("notice"))
+ok("C39: message/calendar/watchtower rows are flagged untrusted, the rest not",
+   all(r.get("untrusted") is (r["source"] in ("message", "calendar", "watchtower"))
+       for r in d["results"]), [(r["source"], r.get("untrusted")) for r in d["results"]])
 
 print("\n=== 4. ranking sanity (title outranks body) ===")
 ids = [r["id"] for r in d["results"] if r["source"] == "chat"]
@@ -348,7 +379,8 @@ ok("notes.json really is absent", not os.path.exists(server.NOTES_FILE))
 c, dn0 = search("marmalade")
 ok("nothing to find before the note exists", dn0["results"] == [], dn0)
 c, dn = req("/api/notes", body={"text": "buy marmalade and kumquat jam\nsecond line"})
-ok("POST /api/notes still returns {ok:true}", c == 200 and dn == {"ok": True}, (c, dn))
+ok("POST /api/notes still returns {ok:true}", c == 200 and isinstance(dn, dict)
+   and dn.get("ok") is True, (c, dn))         # + "rev" since C19/B05
 ok("the note file was actually written",
    json.load(open(server.NOTES_FILE))["text"].startswith("buy marmalade"))
 server._ix_drain_once()
@@ -464,48 +496,97 @@ ok("fda:false prunes message rows without erroring",
 c, dm = search("dinner")
 ok("no message hits without FDA", dm["results"] == [], dm)
 
-print("\n=== 18. real calendar provider (read-only, ±30 days) ===")
+print("\n=== 18. the real calendar provider over a stand-in icalBuddy ===")
+# The REAL _ix_cal_lines (binary lookup, argv, framing, ISO parse) — but the
+# icalBuddy it finds first on PATH is a script in the throwaway HOME, so the
+# owner's calendar is never read (it used to be: S2 seam).
+import datetime as _h_dt                         # noqa: E402
 server._ix_cal_lines = _real_cal_lines
-lines = server._ix_cal_lines()
-print("  icalBuddy lines:", (lines or [])[:4], "…" if lines and len(lines) > 4 else "")
-if lines is None:
-    ok("no icalBuddy on this Mac -> calendar source degrades to absent", True)
-    sw7 = server.index_sweep("cal-real")
-    ok("absent calendar prunes nothing",
-       sw7["stats"]["calendar"].get("absent") is True, sw7["stats"]["calendar"])
-else:
-    sw7 = server.index_sweep("cal-real")
-    ok("real calendar rows indexed", sw7["stats"]["calendar"].get("rows", 0) >= 0,
-       sw7["stats"]["calendar"])
-    c, st7 = req("/api/search/status")
-    print("  calendar rows:", st7["sources"]["calendar"])
-    first = None
-    con = server._ix_conn()
-    first = con.execute("SELECT title, ts, ref FROM items WHERE source='calendar' "
-                        "LIMIT 1").fetchone()
-    con.close()
-    print("  sample calendar row:", first)
-    if first:
-        c, dc = search(first[0].split()[0])
-        ok("a real calendar event is searchable by its own word",
-           any(r["source"] == "calendar" for r in dc["results"]),
-           [r["source"] for r in dc["results"]])
-        ok("calendar ts parsed from the ISO date", first[1] > 0, first[1])
-        ok("calendar ref points at the today widget", first[2] == "today", first[2])
-    else:
-        ok("calendar empty in this window (no rows, no error)", True)
+_bin = os.path.join(HOME, "bin")
+os.makedirs(_bin, exist_ok=True)
+_argv_log = os.path.join(HOME, "icalbuddy-argv.json")
+_day = (_h_dt.date.today() + _h_dt.timedelta(days=2)).strftime("%Y-%m-%d")
+_fake = os.path.join(_bin, "icalBuddy")
+with open(_fake, "w") as _fh:
+    _fh.write("#!%s\nimport json, sys\njson.dump(sys.argv[1:], open(%r, 'w'))\n"
+              "print('|%s at 14:00 ~ Quillfeather orchard review')\n"
+              "print('|%s ~ Quillfeather all-day offsite')\n"
+              % (sys.executable, _argv_log, _day, _day))
+os.chmod(_fake, 0o755)
+_old_path = os.environ.get("PATH", "")
+os.environ["PATH"] = _bin + os.pathsep + _old_path
+try:
+    lines = server._ix_cal_lines()
+finally:
+    os.environ["PATH"] = _old_path
+_argv = json.load(open(_argv_log)) if os.path.exists(_argv_log) else []
+ok("the provider ran the icalBuddy it found on PATH (the stand-in)", bool(_argv), _argv)
+ok("...over a date range in ISO form",
+   any(a.startswith("eventsFrom:") for a in _argv) and any(a.startswith("to:") for a in _argv)
+   and "%Y-%m-%d" in _argv, _argv)
+ok("both stand-in lines came back", isinstance(lines, list) and len(lines) == 2, lines)
+server._ix_cal_lines = lambda: list(lines or [])
+sw7 = server.index_sweep("cal-real")
+c, st7 = req("/api/search/status")
+ok("the calendar swept without an error, and every row it read is indexed",
+   "error" not in sw7["stats"]["calendar"]
+   and sw7["stats"]["calendar"].get("rows") == 2
+   and st7["sources"]["calendar"] == 2,
+   (sw7["stats"]["calendar"], st7["sources"]["calendar"]))
+con = server._ix_conn()
+first = con.execute("SELECT title, ts, ref FROM items WHERE source='calendar' "
+                    "AND title LIKE 'Quillfeather orchard%' LIMIT 1").fetchone()
+con.close()
+ok("the timed event is a row", bool(first), first)
+if first:
+    c, dc = search("quillfeather")
+    ok("a calendar event is searchable by its own word",
+       sum(1 for r in dc["results"] if r["source"] == "calendar") == 2,
+       [r["source"] for r in dc["results"]])
+    want = time.mktime(time.strptime(_day + " 14:00", "%Y-%m-%d %H:%M"))
+    ok("calendar ts parsed from the ISO date and time", abs(first[1] - want) < 1,
+       (first[1], want))
+    ok("calendar ref points at the today widget", first[2] == "today", first[2])
+server._ix_cal_lines = lambda: None
+sw7b = server.index_sweep("cal-absent")
+ok("an absent calendar prunes nothing",
+   sw7b["stats"]["calendar"].get("absent") is True, sw7b["stats"]["calendar"])
+c, st7b = req("/api/search/status")
+ok("...so the two rows are still there", st7b["sources"]["calendar"] == 2,
+   st7b["sources"]["calendar"])
+
+print("\n=== 18b. conversations in the stored on-disk shape ===")
+con = server._ix_conn()
+_all = con.execute("SELECT id, title, body FROM items WHERE source='chat'").fetchall()
+con.close()
+_by = {}
+for _id, _t, _b in _all:
+    for _sid in STORED:
+        if _sid in _id:
+            _by[_sid] = (_t, _b)
+ok("each stored-shape conversation is one chat row", set(_by) == set(STORED), sorted(_by))
+_txt = " ".join((t or "") + " " + (b or "") for t, b in _by.values())
+ok("user and bot turns are indexed", "drip lines" in _txt and "late invoice" in _txt, _txt[:300])
+ok("tool and approval rows are not", "wombattool" not in _txt and "wombatapproval" not in _txt)
+ok("serve_sid/serve_key never reach the index",
+   "wombatserve" not in _txt and "sid-ephemeral" not in _txt)
+c, dg = search("persimmon")
+ok("an untitled stored conversation is found by its body",
+   any(r["source"] == "chat" and "fixt2" in (r.get("ref") or r.get("id") or "")
+       for r in dg["results"]), dg["results"])
 
 print("\n=== 19. no writes escaped the throwaway HOME ===")
 ok("index.db lives under the throwaway HOME", server.IX_DB.startswith(HOME),
    server.IX_DB)
-# NB: expanduser() would follow the throwaway HOME — REAL_HOME was captured
-# before the redirect.
-ok("the real ~/.hermes/index.db is byte-for-byte as it was",
-   ((os.path.getmtime(REAL_IXDB), os.path.getsize(REAL_IXDB))
-    if os.path.exists(REAL_IXDB) else None) == REAL_IXDB_BEFORE,
-   REAL_IXDB)
-ok("the real chats dir is untouched",
-   (sorted(os.listdir(REAL)) if os.path.isdir(REAL) else None) == REAL_BEFORE)
+ok("the chats store the index read is the throwaway one",
+   os.path.realpath(server.CHATS).startswith(
+       os.path.realpath(HOME)))
+for _side in ("", "-wal", "-shm"):
+    _p = server.IX_DB + _side
+    if os.path.exists(_p):
+        ok("index.db%s is under HOME and 0600" % _side,
+           _p.startswith(HOME) and stat.S_IMODE(os.stat(_p).st_mode) == 0o600,
+           (_p, oct(os.stat(_p).st_mode)))
 
 print("\n=========================================")
 print("  PASS %d   FAIL %d" % (PASS, FAIL))

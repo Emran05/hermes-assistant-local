@@ -171,7 +171,7 @@
         "font-variant-numeric:tabular-nums;text-wrap:pretty}" +
       SEL + " .trbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:2px 0 0}" +
       SEL + " button.trb{padding:9px 16px;border-radius:10px;font-size:12.5px;" +
-        "font-weight:600;cursor:pointer;border:0;background:var(--iris);color:#fff;" +
+        "font-weight:600;cursor:pointer;border:0;background:var(--iris);color:var(--iris-ink,#fff);" +
         "min-height:40px;transition-property:opacity;transition-duration:150ms;" +
         "transition-timing-function:ease-out}" +
       SEL + " button.trb.trb-2{background:transparent;color:var(--ink);" +
@@ -281,20 +281,30 @@
   }
 
   // ---- data ----------------------------------------------------------------
+  // R2-29: one sequence number per load(). Switching Today -> 30 days -> Today
+  // fires three summaries, and whichever ANSWERED last used to win — a slow
+  // 30-day count landing after the Today one put 30 days of numbers under the
+  // Today button. Only the newest request may write S; an older answer is
+  // dropped (and a range error supersedes whatever is still in flight).
+  var loadSeq = 0;
+
   async function load() {
+    var seq = ++loadSeq;
     var r = rangeFor(S);
-    if (r.error) { S.sum = null; S.err = r.error; return; }
+    if (r.error) { S.sum = null; S.err = r.error; S.loading = false; return; }
     S.loading = true;
+    var sum = null, err = "";
     try {
       var res = await fetch("/api/trace/summary?since=" + encodeURIComponent(r.since.toFixed(3)) +
                             "&until=" + encodeURIComponent(r.until.toFixed(3)));
       var d = await res.json();
-      if (d && d.ok) { S.sum = d; S.err = ""; }
-      else { S.sum = null; S.err = (d && d.error) || "Could not read the trace summary."; }
+      if (d && d.ok) sum = d;
+      else err = (d && d.error) || "Could not read the trace summary.";
     } catch (e) {
-      S.sum = null;
-      S.err = "Could not reach the dashboard.";
+      err = "Could not reach the dashboard.";
     }
+    if (seq !== loadSeq) return;          // a newer range was asked for meanwhile
+    S.sum = sum; S.err = err;
     S.loading = false;
   }
 
@@ -315,6 +325,7 @@
     var label = (fmt === "otel") ? "OTLP JSON" : "JSONL";
     var mime = (fmt === "otel") ? "application/json" : "application/x-ndjson";
     var fname = "hermes-trace." + (fmt === "otel" ? "otlp.json" : "jsonl");
+    var asked = rangeLabel(S);            // R2-29: the range may change mid-fetch
     var text = "";
     var capped = "";
     S.busy = fmt; S.err = ""; S.warn = ""; paint();
@@ -335,14 +346,14 @@
         var cap = Number(res.headers.get("X-Hermes-Trace-Span-Cap"));
         capped = "This export stopped at the " +
           (isFinite(cap) && cap > 0 ? num(cap) + "-span" : "span") +
-          " cap, so it covers only the start of " + rangeLabel(S) +
+          " cap, so it covers only the start of " + asked +
           " — narrow the range for the rest.";
       }
     } catch (e) {
       S.busy = ""; S.err = "Could not reach the dashboard."; paint(); return;
     }
     S.busy = ""; S.warn = capped; paint();
-    if (!text.length) { T("Nothing recorded in " + rangeLabel(S) + "."); return; }
+    if (!text.length) { T("Nothing recorded in " + asked + "."); return; }
     // one toast, and the cap is the headline when there is one — a "saved!"
     // toast over a half-complete file is the failure this fixes
     if (capped) T(capped, 6000);
@@ -426,9 +437,9 @@
       el = d.createElement("section");
       el.id = CARD_ID;
       el.className = "card glass set-legacy";
-      body.appendChild(el);
+      putInBody(body, el);
     } else if (el.parentNode !== body) {
-      try { body.appendChild(el); } catch (e) {}
+      try { putInBody(body, el); } catch (e) {}
     }
     try { el.innerHTML = cardHTML(S); } catch (e) { return; }
     wire(el);
@@ -439,6 +450,16 @@
       // are not a direct child of #view-mind).
       try { if (typeof W.settingsRelocate === "function") W.settingsRelocate(); } catch (e) {}
     }
+  }
+
+  // Before the shell's empty [data-legacy-slot] marker (V02): .set-body is a
+  // flex column with gap:15px, and a card placed AFTER that empty div got the
+  // gap twice (30px) while every other card in the panel got 15px.
+  function putInBody(body, el) {
+    var anchor = null;
+    try { anchor = body.querySelector ? body.querySelector("[data-legacy-slot]") : null; } catch (e) { anchor = null; }
+    if (anchor && anchor.parentNode === body) body.insertBefore(el, anchor);
+    else body.appendChild(el);
   }
 
   var loading = false;

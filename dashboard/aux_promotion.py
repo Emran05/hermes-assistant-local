@@ -40,6 +40,7 @@ import glob
 import threading
 import urllib.request
 import urllib.error
+import http.client as _pro_httpclient
 import re as _pro_re
 import datetime as _pro_datetime   # private alias — never rebind bare `datetime`
 
@@ -53,6 +54,18 @@ PRO_CHAT_URL = MODEL_URL.replace("/v1/models", "/v1/chat/completions")
 PRO_CASE_TIMEOUT = 150          # s per completion call (covers on-demand load)
 PRO_LOAD_BUDGET = 300           # s to wait for a model to come up after switch
 PRO_MAX_TOKENS = 700
+# E103: written BEFORE a temporary swap, removed once the owner's model is
+# back. A dashboard that ends mid-drill (update, kickstart -k, crash, logout)
+# finds it at the next start and puts the original model back.
+PRO_RESTORE_FILE = os.path.join(DATA, "drill-restore.json")
+PRO_BOOT_DELAY = 3              # s after load before the boot recovery runs
+
+# C07.1: a case that raises one of these got NO ANSWER to judge — the model
+# server refused the connection, timed out, crashed mid-reply or sent a body
+# that is not JSON (URLError and socket timeouts are OSErrors). That is an
+# infrastructure error, not a failed case: the run stops, `err` is set and no
+# verdict is stored. The same three classes aux_evals.py's _EV_INFRA_EXC uses.
+_PRO_INFRA_EXC = (OSError, _pro_httpclient.HTTPException, json.JSONDecodeError)
 
 # Small static license map (first substring hit wins).  Llama-family models
 # carry the "Built with Llama" attribution required by the Llama 3.1
@@ -146,7 +159,9 @@ def _pro_completion(mid, messages, tools=None, max_tokens=PRO_MAX_TOKENS,
     req = urllib.request.Request(
         PRO_CHAT_URL, data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    # E20: server.py's proxy-free, redirect-free loopback opener (by name)
+    opener = globals().get("local_urlopen") or urllib.request.urlopen
+    with opener(req, timeout=timeout) as r:
         return json.loads(r.read().decode())
 
 
@@ -431,6 +446,176 @@ def _pro_wait_ready(mid, budget_s):
     return False, last
 
 
+def _pro_wake_serving():
+    """C07.1: drilling the SERVING model (no switch) while it is asleep — an
+    idle-suspend, or down without the marker — used to wait 120 s for a
+    model nothing woke and fail with 'model never came up'. Wake it the way
+    a chat turn does (agent_wake, resolved by name). Returns None when no
+    wake was needed or it worked, else the reason it did not."""
+    g = globals()
+    try:
+        asleep = g.get("agent_idle_suspended")
+        paused = g.get("agent_paused")
+        online = g.get("model_online")
+        need = bool((callable(asleep) and asleep()) or
+                    (callable(online) and not (callable(paused) and paused())
+                     and not online()))
+    except Exception:
+        need = False
+    wake = g.get("agent_wake")
+    if not need or not callable(wake):
+        return None
+    _PRO_STATE["note"] = "waking the model"
+    try:
+        if wake(wait=True, timeout=PRO_LOAD_BUDGET):
+            return None
+        return "the model did not wake in time"
+    except Exception as e:
+        return "wake failed: " + type(e).__name__ + ": " + str(e)[:120]
+
+
+def _pro_restore_original(orig, mid):
+    """E19: put the owner's model back after a temporary swap — unless the
+    owner took over while the drill ran. switch_model() on a PAUSED agent
+    resumes it (that is the menu's rule), so restoring through it undid the
+    owner's Pause a few seconds after it was pressed, and a switch the owner
+    made mid-drill was reverted. Returns the record stored in last.restore:
+      * the active model is no longer the drilled one -> nothing is touched,
+        {skipped: "switched", active: <that model>};
+      * paused or asleep -> only the original's FILES are re-activated
+        (_activate_model: active-model, server args, Hermes model.default;
+        nothing starts), so the next start loads the owner's model and the
+        pause holds — {skipped: "paused"|"asleep", files_only: True};
+      * otherwise switch_model(orig) and wait for it, as before."""
+    g = globals()
+    try:
+        cur = active_model()
+    except Exception:
+        cur = None
+    if cur != mid:
+        return {"ok": True, "model": orig, "skipped": "switched", "active": cur,
+                "error": None}
+    try:
+        paused = bool(agent_paused())
+    except Exception:
+        paused = False
+    asleep = False
+    try:
+        fn = g.get("agent_idle_suspended")
+        asleep = bool(callable(fn) and fn())
+    except Exception:
+        asleep = False
+    if paused or asleep:
+        act = g.get("_activate_model")
+        if not callable(act):
+            return {"ok": False, "model": orig, "files_only": True,
+                    "skipped": "paused" if paused else "asleep",
+                    "error": "no _activate_model to put the files back"}
+        try:
+            ok, why = act(orig)
+        except Exception as e:
+            ok, why = False, type(e).__name__ + ": " + str(e)[:160]
+        return {"ok": bool(ok), "model": orig, "files_only": True,
+                "skipped": "paused" if paused else "asleep", "error": why or None}
+    rs = switch_model(orig)
+    ok2, e2 = _pro_wait_ready(orig, PRO_LOAD_BUDGET)
+    err = e2 or None
+    if not (isinstance(rs, dict) and rs.get("ok")):
+        err = str((rs or {}).get("error") or err or "switch back failed")[:200]
+    return {"ok": bool(isinstance(rs, dict) and rs.get("ok") and ok2),
+            "model": orig, "error": err}
+
+
+def _pro_restore_mark(orig, mid):
+    """E103: record the restore point before a temporary swap (0600, atomic)."""
+    tmp = PRO_RESTORE_FILE + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump({"restore_to": orig, "candidate": mid, "at": time.time()}, f)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, PRO_RESTORE_FILE)
+
+
+def _pro_restore_clear():
+    try:
+        os.remove(PRO_RESTORE_FILE)
+    except OSError:
+        pass
+
+
+def _pro_boot_recover():
+    """E103: a restore point left by a drill the dashboard did not live to
+    finish. The candidate is still the assistant's model (active-model and
+    Hermes model.default name it — for an uncensored candidate, with no
+    acknowledgement), so put the original back through the normal path:
+    switch_model when the model is running and not paused, otherwise the
+    files only (_activate_model) so the next start loads the owner's model
+    and a pause or sleep holds. Nothing is done when the owner has switched
+    since. Returns the restore record (None when there was no restore point)."""
+    try:
+        with open(PRO_RESTORE_FILE) as f:
+            rec = json.load(f)
+    except FileNotFoundError:
+        return None
+    except Exception:
+        rec = None
+    orig = rec.get("restore_to") if isinstance(rec, dict) else None
+    cand = rec.get("candidate") if isinstance(rec, dict) else None
+    if not (isinstance(orig, str) and orig.strip() and len(orig) <= 200
+            and isinstance(cand, str) and cand.strip() and len(cand) <= 200):
+        _pro_restore_clear()
+        print("[promotion] drill restore point unreadable — removed", flush=True)
+        return {"ok": False, "skipped": "unreadable", "model": None, "error": None}
+    try:
+        online = bool(globals().get("model_online", lambda: False)())
+    except Exception:
+        online = False
+    if online:
+        restore = _pro_restore_original(orig, cand)
+    else:
+        try:
+            cur = active_model()
+        except Exception:
+            cur = None
+        if cur != cand:
+            restore = {"ok": True, "model": orig, "skipped": "switched",
+                       "active": cur, "error": None}
+        else:
+            act = globals().get("_activate_model")
+            try:
+                ok, why = act(orig) if callable(act) else (False, "no _activate_model")
+            except Exception as e:
+                ok, why = False, type(e).__name__ + ": " + str(e)[:160]
+            restore = {"ok": bool(ok), "model": orig, "files_only": True,
+                       "skipped": "down", "error": why or None}
+    try:
+        still = active_model() == cand
+    except Exception:
+        still = True
+    if not still:
+        _pro_restore_clear()
+    restore["after_restart"] = True
+    print("[promotion] the dashboard restarted during a drill of %s — restore of %s: %s"
+          % (cand, orig, json.dumps(restore)[:300]), flush=True)
+    with _PRO_LOCK:
+        if not _PRO_STATE.get("running"):
+            _PRO_STATE.update(last={"model": cand, "score": 0, "of": PRO_OF,
+                                    "pass": None, "restore": restore,
+                                    "error": "the dashboard restarted during the "
+                                             "drill — no verdict stored",
+                                    "finished": time.time()})
+    return restore
+
+
+def _pro_boot_recover_later():
+    time.sleep(PRO_BOOT_DELAY)
+    try:
+        _pro_boot_recover()
+    except Exception as e:
+        print("[promotion] drill restore after restart failed: %s: %s"
+              % (type(e).__name__, e), flush=True)
+
+
 def promotion_drill_run(mid):
     """The drill body — runs in a background thread."""
     t0 = time.time()
@@ -443,11 +628,26 @@ def promotion_drill_run(mid):
         _PRO_STATE["note"] = "preparing"
         if mid != orig:
             _PRO_STATE["note"] = "switching to " + mid
+            try:
+                _pro_restore_mark(orig, mid)    # E103: before anything moves
+            except OSError as e:
+                raise RuntimeError("could not record the restore point (%s) — "
+                                   "nothing was switched" % e)
             sw = switch_model(mid)          # metrics-wrapped chain preserved
+            # a switch that wrote the candidate's files but could not start
+            # it still left the candidate active: restore that too (E19)
+            try:
+                swapped = active_model() == mid
+            except Exception:
+                swapped = False
             if not (isinstance(sw, dict) and sw.get("ok")):
                 raise RuntimeError("switch failed: " +
                                    str((sw or {}).get("error")))
             swapped = True
+        else:
+            why = _pro_wake_serving()
+            if why:
+                raise RuntimeError("model never came up: " + why)
         _PRO_STATE["note"] = "waiting for model load"
         ok, e = _pro_wait_ready(mid, PRO_LOAD_BUDGET if swapped else 120)
         if not ok:
@@ -457,6 +657,11 @@ def promotion_drill_run(mid):
             c0 = time.time()
             try:
                 passed, detail = fn(mid)
+            except _PRO_INFRA_EXC as e:
+                # no answer to judge (C07.1) — stop, store no verdict
+                raise RuntimeError("model server error in case %s, no verdict "
+                                   "stored: %s: %s" % (cid, type(e).__name__,
+                                                       str(e)[:160]))
             except Exception as e:
                 passed, detail = False, "case error: " + type(e).__name__ + \
                     ": " + str(e)[:160]
@@ -469,14 +674,20 @@ def promotion_drill_run(mid):
         if swapped:
             _PRO_STATE["note"] = "restoring " + orig
             try:
-                rs = switch_model(orig)
-                ok2, e2 = _pro_wait_ready(orig, PRO_LOAD_BUDGET)
-                restore = {"ok": bool(isinstance(rs, dict) and rs.get("ok")
-                                      and ok2),
-                           "model": orig, "error": e2 or None}
+                restore = _pro_restore_original(orig, mid)
             except Exception as e:
                 restore = {"ok": False, "model": orig,
                            "error": type(e).__name__ + ": " + str(e)[:160]}
+        if mid != orig:
+            # E103: the restore point goes once the drilled model is no longer
+            # the active one; a restore that could not move it keeps it for
+            # the next dashboard start to retry
+            try:
+                gone = active_model() != mid
+            except Exception:
+                gone = False
+            if gone:
+                _pro_restore_clear()
     score = sum(1 for c in results if c["pass"])
     if err is None and results:
         rec = {"score": score, "of": PRO_OF, "pass": score >= PRO_THRESHOLD,
@@ -511,9 +722,22 @@ def promotion_drill_run(mid):
         _PRO_STATE.update(running=None, note="",
                           error=err,
                           last={"model": mid, "score": score, "of": PRO_OF,
-                                "pass": score >= PRO_THRESHOLD, "error": err,
+                                # an aborted run is no verdict either way
+                                "pass": (score >= PRO_THRESHOLD) if err is None
+                                else None, "error": err,
                                 "restore": restore,
                                 "finished": time.time()})
+
+
+def _pro_run_held(mid):
+    """C07: keep the model up — and count the drill as owner activity — for the
+    whole run, restore included. Without the hold idle_suspend_loop booted the
+    model out mid-drill and every remaining case was stored as a failure."""
+    hold = globals().get("model_hold")
+    if hold is None:
+        return promotion_drill_run(mid)
+    with hold("drill"):
+        return promotion_drill_run(mid)
 
 
 # --------------------------------------------------------------------------
@@ -521,6 +745,10 @@ def promotion_drill_run(mid):
 # --------------------------------------------------------------------------
 def _pro_drill_post(ctx):
     body = ctx.body or {}
+    # E123: a wrong-typed id is a client error (400), never an AttributeError
+    if any(body.get(k) is not None and not isinstance(body.get(k), str)
+           for k in ("model_id", "id")):
+        return ({"ok": False, "error": "model_id must be a string"}, 400)
     mid = (body.get("model_id") or body.get("id") or "").strip()
     if not mid:
         return ({"ok": False, "error": "model_id required"}, 400)
@@ -535,13 +763,27 @@ def _pro_drill_post(ctx):
     if _pro_busy_jobs():
         return {"ok": False, "error": "a chat turn is running right now — "
                                       "try again when the agent is idle"}
-    with _PRO_LOCK:
-        if _PRO_STATE.get("running"):
-            return {"ok": False, "error": "a drill is already running",
-                    "model": _PRO_STATE["running"]}
-        _PRO_STATE.update(running=mid, started=time.time(),
-                          note="starting", error=None)
-    threading.Thread(target=promotion_drill_run, args=(mid,),
+    # E117: an eval run and a drill exclude each other. The check and the
+    # claim happen under aux_evals' _EV_LOCK (by name), the lock evals_run
+    # holds while it checks _PRO_STATE and claims its own run.
+    evl = globals().get("_EV_LOCK")
+    evs = globals().get("_EV_STATE")
+    if evl is not None:
+        evl.acquire()
+    try:
+        if isinstance(evs, dict) and evs.get("running"):
+            return {"ok": False, "error": "the eval suite is running right now — "
+                                          "try again when it has finished"}
+        with _PRO_LOCK:
+            if _PRO_STATE.get("running"):
+                return {"ok": False, "error": "a drill is already running",
+                        "model": _PRO_STATE["running"]}
+            _PRO_STATE.update(running=mid, started=time.time(),
+                              note="starting", error=None)
+    finally:
+        if evl is not None:
+            evl.release()
+    threading.Thread(target=_pro_run_held, args=(mid,),
                      daemon=True).start()
     return {"ok": True, "status": "running", "model": mid,
             "swap": mid != active_model(),
@@ -564,6 +806,11 @@ def _pro_drill_get(ctx):
 
 
 register_post("/api/models/drill", _pro_drill_post)
+# E103: a drill the previous dashboard process did not finish
+if os.path.exists(PRO_RESTORE_FILE) and not globals().get("_pro_boot_checked"):
+    globals()["_pro_boot_checked"] = True
+    threading.Thread(target=_pro_boot_recover_later, name="drill-restore",
+                     daemon=True).start()
 register_get("/api/models/drill", _pro_drill_get)
 
 
@@ -600,6 +847,14 @@ if not globals().get("_pro_wrapped"):
 
     def switch_model(mid):
         out = _pro_orig_switch_model(mid)
+        # review R4 (E103): a switch made while no drill runs is the owner's
+        # choice (or the boot recovery's own restore) — a left-over restore
+        # point must not revert it at some later dashboard start
+        try:
+            if isinstance(out, dict) and out.get("ok") and not _PRO_STATE.get("running"):
+                _pro_restore_clear()
+        except Exception:
+            pass
         try:
             if isinstance(out, dict) and out.get("ok"):
                 rec = _pro_read().get(mid)

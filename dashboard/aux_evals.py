@@ -93,6 +93,7 @@ import os
 import re
 import sys
 import json
+import math as _ev_math
 import time
 import sqlite3
 import threading
@@ -153,7 +154,7 @@ def _ev_g(name, default=None):
 def _ev_int(v, lo, hi, dflt):
     try:
         n = int(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):      # int(inf) overflows
         return dflt
     return lo if n < lo else (hi if n > hi else n)
 
@@ -170,9 +171,12 @@ def _ev_is_num(v):
     it."""
     if isinstance(v, bool):
         return False
+    # JSON Infinity/NaN parse to floats: int(inf) raised OverflowError (a 500)
+    if isinstance(v, float) and not _ev_math.isfinite(v):
+        return False
     try:
         int(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return False
     return True
 
@@ -400,8 +404,11 @@ def _ev_meta_set(k, v):
 # identical local fallback so this module still works if the drill is removed.
 # --------------------------------------------------------------------------
 def _ev_completion(messages, max_tokens=EV_MAX_TOKENS,
-                   timeout=EV_CASE_TIMEOUT):
-    mid = active_model()                                     # noqa: F821
+                   timeout=EV_CASE_TIMEOUT, mid=None):
+    # E117: a run passes the model id it captured at its start, so a switch
+    # landing mid-run is a 400 from the pinned server (an infrastructure
+    # error) instead of a case silently judged on another model
+    mid = mid or active_model()                              # noqa: F821
     fn = _ev_g("_pro_completion")
     if callable(fn):
         return fn(mid, messages, None, max_tokens=max_tokens, timeout=timeout)
@@ -410,7 +417,9 @@ def _ev_completion(messages, max_tokens=EV_MAX_TOKENS,
     req = urllib.request.Request(
         EV_CHAT_URL, data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    # E20: server.py's proxy-free, redirect-free loopback opener (by name)
+    opener = globals().get("local_urlopen") or urllib.request.urlopen
+    with opener(req, timeout=timeout) as r:
         return json.loads(r.read().decode())
 
 
@@ -565,33 +574,33 @@ EV_JSON_KEYS = ["city", "country", "population"]
 EV_TABLE_COLS = ["Language", "Year", "Creator"]
 
 
-def _ev_case_json_strict():
+def _ev_case_json_strict(mid=None):
     r = _ev_completion([
         {"role": "system", "content": EV_SYSTEM},
         {"role": "user", "content":
             "Reply with a single JSON object and nothing else. It must have "
             "exactly these three keys and no others: \"city\", \"country\", "
-            "\"population\". Fill them in for Tokyo."}])
+            "\"population\". Fill them in for Tokyo."}], mid=mid)
     return ev_check_json(_ev_text(r), EV_JSON_KEYS)
 
 
-def _ev_case_table_format():
+def _ev_case_table_format(mid=None):
     r = _ev_completion([
         {"role": "system", "content": EV_SYSTEM},
         {"role": "user", "content":
             "Reply with a GitHub-flavored Markdown table and nothing else. "
             "It must have exactly these three columns, in this order: "
             "Language | Year | Creator. Give exactly three data rows, one "
-            "each for Python, Rust and Go."}])
+            "each for Python, Rust and Go."}], mid=mid)
     return ev_check_table(_ev_text(r), EV_TABLE_COLS, 3)
 
 
-def _ev_case_one_sentence():
+def _ev_case_one_sentence(mid=None):
     r = _ev_completion([
         {"role": "system", "content": EV_SYSTEM},
         {"role": "user", "content":
             "What is the capital of France and why does it matter? Answer in "
-            "one sentence."}], max_tokens=160)
+            "one sentence."}], max_tokens=160, mid=mid)
     return ev_check_one_sentence(_ev_text(r), 30)
 
 
@@ -647,8 +656,8 @@ def evals_cases():
         else:
             out.append((cid, lab, None))
     for cid, label, fn in EV_LOCAL_CASES:
-        # the local three take no model id; adapt to the drill's fn(mid) shape
-        out.append((cid, label, (lambda f: (lambda _mid: f()))(fn)))
+        # the local three take the run's model id too (E117)
+        out.append((cid, label, (lambda f: (lambda mid: f(mid)))(fn)))
     return out
 
 
@@ -696,6 +705,12 @@ def _ev_median(vals):
 _EV_LOCK = threading.Lock()
 _EV_STATE = {"running": False, "started": 0.0, "note": "", "trigger": "",
              "error": None}
+
+
+def _ev_drill_running():
+    """The model drill (aux_promotion, by name) is running right now."""
+    pro = _ev_g("_PRO_STATE")
+    return bool(isinstance(pro, dict) and pro.get("running"))
 
 
 def _ev_busy_jobs():
@@ -751,6 +766,18 @@ def _ev_store_run(mid, trigger, cases, err, ts=None):
         return 0
 
 
+def _ev_held(kind, fn, /, *a, **kw):
+    """C07: hold the model up for the whole run — idle_suspend_loop otherwise
+    boots it out mid-suite. A manual run is owner activity; a scheduled one is
+    not (user=False), so it never extends the idle window by itself.
+    Positional-only so evals_run's own `trigger=` keyword passes through."""
+    hold = _ev_g("model_hold")
+    if hold is None:
+        return fn(*a, **kw)
+    with hold("evals:" + kind, user=(kind == "manual")):
+        return fn(*a, **kw)
+
+
 def evals_run(model_id=None, trigger="manual", allow_wake=False):
     """Run the 9 cases against the ACTIVE model and record the result.
 
@@ -773,6 +800,11 @@ def evals_run(model_id=None, trigger="manual", allow_wake=False):
     with _EV_LOCK:
         if _EV_STATE.get("running"):
             return {"ok": False, "reason": "a run is already in progress"}
+        # E117: never while a model drill runs — it swaps the served model
+        # under the run. aux_promotion checks _EV_STATE under this same lock
+        # before it starts a drill, so the two exclude each other exactly.
+        if _ev_drill_running():
+            return {"ok": False, "reason": "a model drill is running"}
         _EV_STATE.update(running=True, started=time.time(), note="starting",
                          trigger=str(trigger or "manual"), error=None)
     cases = []
@@ -1070,7 +1102,7 @@ def _ev_tick(now_ts=None):
         return g
     if not g["run"]:
         return g
-    res = evals_run(trigger="scheduled", allow_wake=g["wake"])
+    res = _ev_held("scheduled", evals_run, trigger="scheduled", allow_wake=g["wake"])
     if res.get("ok"):
         # The guard flips only after a completed run, so a crash mid-suite
         # retries on the next tick instead of skipping the day.
@@ -1113,6 +1145,8 @@ def _ev_can_run():
         pass
     if _EV_STATE.get("running"):
         return False, "a run is already in progress", False
+    if _ev_drill_running():
+        return False, "a model drill is running", False
     if _ev_busy_jobs():
         return False, "a chat turn is running right now", False
     try:
@@ -1147,7 +1181,11 @@ def _ev_get(ctx):
 
 def _ev_run_post(ctx):
     body = ctx.body if isinstance(ctx.body, dict) else {}
-    force = bool(body.get("force"))
+    force = body.get("force", False)
+    if not isinstance(force, bool):
+        # a JSON boolean only: bool("false") is True, and force may wake the
+        # model (2026-10-21 audit C59)
+        return ({"ok": False, "error": "force must be true or false"}, 400)
     pw = evals_power()
     if not pw.get("ac"):
         # deliberate: force does NOT override this one
@@ -1163,7 +1201,8 @@ def _ev_run_post(ctx):
             return {"ok": False, "reason": "a run is already in progress"}
     def _go():
         try:
-            evals_run(trigger="manual", allow_wake=bool(force and wakeable))
+            _ev_held("manual", evals_run, trigger="manual",
+                     allow_wake=bool(force and wakeable))
         except Exception as e:                               # pragma: no cover
             _ev_log("manual run failed: %r" % e)
     threading.Thread(target=_go, daemon=True).start()
@@ -1179,7 +1218,10 @@ def _ev_settings_post(ctx):
     patch = {}
     for k in ("enabled", "require_ac", "wake_if_ac"):
         if k in body:
-            patch[k] = bool(body.get(k))
+            if not isinstance(body[k], bool):            # C59: "false" is not off
+                return ({"ok": False,
+                         "error": "%s must be true or false" % k}, 400)
+            patch[k] = body[k]
     for k in ("at_hour", "at_minute", "days"):
         if k in body:
             v = body.get(k)

@@ -46,7 +46,8 @@
     data: null,
     loaded: false,
     busy: false,
-    err: "",
+    err: "",            // the last SAVE failed — only send() sets or clears it
+    loadErr: "",        // the last READ failed — only load() sets or clears it
     note: "",
     restart: false      // "restart the agent backend too" checkbox
   };
@@ -232,7 +233,7 @@
       SEL + " .tbok{margin:10px 0 0;font-size:11.5px;line-height:1.5;color:var(--muted)}" +
       SEL + " .tbbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:12px 0 0}" +
       SEL + " button.tbb{padding:9px 16px;border-radius:10px;font-size:12.5px;" +
-        "font-weight:600;cursor:pointer;border:0;background:var(--iris);color:#fff;" +
+        "font-weight:600;cursor:pointer;border:0;background:var(--iris);color:var(--iris-ink,#fff);" +
         "min-height:40px;transition-property:opacity;transition-duration:150ms;" +
         "transition-timing-function:ease-out}" +
       SEL + " button.tbb.is-quiet{background:var(--chip,rgba(255,255,255,.06));" +
@@ -322,7 +323,7 @@
         '<label class="tbrs"><input type="checkbox" data-restart' +
         (state.restart ? " checked" : "") +
         ">Restart the agent backend too</label></div>" +
-        (state.err ? '<p class="tberr">' + E(state.err) + "</p>" : "") +
+        errHTML(state) +
         (state.note ? '<p class="tbok">' + E(state.note) + "</p>" : "") +
         '<p class="tbfoot">Installing links this copy of Hermes Assistant’s ' +
         '<span class="tbcode">hermes-plugins/tool-budget</span> into ' +
@@ -379,7 +380,7 @@
 
     return head() + '<div class="body"' + (on ? "" : ' data-off="1"') + ">" +
       lede + staleHTML(d) + stats + body + save + pending +
-      (state.err ? '<p class="tberr">' + E(state.err) + "</p>" : "") +
+      errHTML(state) +
       (state.note ? '<p class="tbok">' + E(state.note) + "</p>" : "") +
       '<p class="tbfoot">Enforced by the <span class="tbcode">tool-budget</span> ' +
       "plugin inside the agent, on the seam every tool result passes through, so " +
@@ -408,16 +409,28 @@
     } catch (e) { return null; }
   }
 
+  // R2-27: load() owns S.loadErr and never touches S.err. send() re-syncs with
+  // load() after a failed save, and when load() reset S.err the failure
+  // message vanished in the same tick while the optimistic switch reverted.
   async function load() {
     var j = await jget("/api/tool/budget");
     if (!j) {
-      S.err = "The dashboard did not answer /api/tool/budget.";
+      S.loadErr = "The dashboard did not answer /api/tool/budget.";
       S.loaded = true;
       return;
     }
     S.data = j;
-    S.err = (j.ok === false) ? String(j.error || "Could not read it.") : "";
+    S.loadErr = (j.ok === false) ? String(j.error || "Could not read it.") : "";
     S.loaded = true;
+  }
+
+  // the save error and the read error, each on its own line, either may be ""
+  function errHTML(state) {
+    var out = "";
+    if (state.err) out += '<p class="tberr">' + E(state.err) + "</p>";
+    if (state.loadErr && state.loadErr !== state.err)
+      out += '<p class="tberr">' + E(state.loadErr) + "</p>";
+    return out;
   }
 
   async function send(body, okNote) {
@@ -434,6 +447,7 @@
       return null;
     }
     S.data = j;
+    S.loadErr = "";                    // j IS a fresh read: the full payload
     if (j.restart_error) S.err = "The service restart failed: " + j.restart_error;
     else if (okNote) S.note = okNote;
     paint();
@@ -547,7 +561,7 @@
       loading = true;
       paint();                            // the loading shell, never an empty panel
       try { await load(); }
-      catch (e) { S.err = "Could not read the tool output budget."; S.loaded = true; }
+      catch (e) { S.loadErr = "Could not read the tool output budget."; S.loaded = true; }
       loading = false;
     }
     paint();
@@ -564,7 +578,7 @@
   W.hermesToolBudget = {
     cardHTML: cardHTML, CSS: CSS, savingsLine: savingsLine, phase: phase,
     staleHTML: staleHTML, num: num, kchars: kchars, pct: pct, bytes: bytes,
-    mount: mount, paint: paint, state: S,
+    mount: mount, paint: paint, state: S, load: load, send: send,
     refresh: async function () { S.loaded = false; await mount(); }
   };
 })();

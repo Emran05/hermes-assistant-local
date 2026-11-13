@@ -32,7 +32,10 @@ driving a 27B model on your own Apple Silicon**, with persistent memory,
 graduated permissions, and a dashboard that's alive all day — briefing you,
 watching your feeds, and acting on your Mac *with receipts for every action*.
 
-No inference API keys. No token bills. No transcript leaves the machine.
+No inference API keys. No token bills. Inference stays on this Mac by default:
+the only conversation that leaves it is what you send through Telegram (it
+travels through Telegram's servers) or escalate to Claude (off unless you turn
+it on).
 
 ## What it does
 
@@ -47,26 +50,56 @@ No inference API keys. No token bills. No transcript leaves the machine.
   absorbing it.
 - **Trend Radar** — which topics are *accelerating* across your feeds, from a
   rolling daily ledger. No model calls needed.
-- **Two model lanes, both on demand** — a 27B primary for you, a small 9B for
-  background work, neither running until something actually needs it.
+- **Two model lanes** — a 27B primary for you that starts on demand, and an
+  optional small 9B lane for background work. Nothing starts the 9B for you
+  (`mlx-server-bg.sh` says how); until you do, background work borrows the
+  primary while it is awake and never wakes it.
 - **Idle-suspend** — the primary sleeps after 10 idle minutes (frees ~22 GB) and
   wakes transparently on your next message.
 - **Visible, editable memory** — read, edit and delete what the agent remembers
   about you. A flight recorder logs every tool call with one-click undo where
-  possible.
-- **Graduated trust** — 17 action classes, each Auto / Ask / Never, with hard
-  floors. Nothing irreversible runs without your click.
+  possible. Undo moves a file to the trash only when it can prove the agent
+  created it; Hermes' snapshots skip `.env` files, logs, `build/`, anything
+  gitignored and files over 10 MB, so an edit to one of those says it cannot be
+  undone and leaves your file alone rather than guessing.
+- **Graduated trust** — 19 action classes, each Auto / Ask / Never, with hard
+  floors. Nothing irreversible runs without your click. Auto approves only one
+  simple command it has fully checked: anything chained (`;`, `&&`, `|`, a
+  newline), longer than 512 characters, partly redacted or written so it cannot
+  be read plainly still asks, and every part of a command is held to the
+  strictest class it touches.
 - **Code knowledge graph** — optional [Graphify](https://github.com/Graphify-Labs/graphify)
   integration maps the repo into a queryable graph, synced to Obsidian as
   interlinked notes (`obsidian_sync.py`, `obsidian_daily.py`).
 - **Modular widget hub** — 20+ widgets (markets, HN, GitHub trending, RSS,
   iMessage, Claude-plan usage…), each with a rich pop-out; add, remove, reorder.
+- **Model advisor** — Settings › Agent & Models says which model and background
+  lane fit this Mac for what you use it for, why, and how fast they should be
+  here. Every figure is a labelled estimate with its formula and range, replaced
+  by this Mac's own measurements where its logs have them. It never downloads,
+  switches or restarts anything itself.
+- **GitHub, sandboxed (optional)** — connect a fine-grained token limited to the
+  repositories you pick. The agent edits a local sandbox and asks; only after you
+  approve in the dashboard does Hermes push a `hermes/` branch and open a draft
+  pull request, with a Telegram message per push. The agent never holds the key.
+  The review sheet approves only what it has shown you: a binary file, a very
+  long line or a long run of blank space needs its own tick, and Approve stays
+  off until every line of the diff is on screen. Disconnecting deletes the
+  local mirrors Hermes kept (your sandbox folders stay).
+  Setup and the owner's acceptance run are in
+  [`docs/audits/2026-10-21-deploy-checklist.md`](docs/audits/2026-10-21-deploy-checklist.md)
+  (Round 3).
+- **One motion system** — layout changes slide and numbers count up on vendored
+  Motion, GSAP and anime.js; nothing moves on a background refresh, and Reduce
+  motion (in the app or in macOS) lands everything at once.
 - **Apple Reminders/Notes automation, off by default** — reading either app via AppleScript
   launches it and leaves it open, so the Reminders/Notes widgets, their pop-outs, and the
   Needs-you inbox's reminders collector are gated behind two Settings › Connections switches
   (`apple_apps.reminders` / `.notes`, both off) that show a quiet "off" state instead of
-  triggering the app. With Google Calendar connected, calendar/"today" context comes from
-  there instead — no Apple Calendar fallback.
+  triggering the app. Calendar is separate: the Today widget, the briefs, Needs-you, search
+  and the MCP calendar tools read the macOS Calendar through `icalBuddy`
+  (`brew install ical-buddy`; without it they show no events). Only the chat's context line
+  uses Google Calendar instead, when Google is connected.
 - **Updates that come to you** — Settings › System & Data checks GitHub
   Releases, shows the notes, and applies the update with a live log.
 
@@ -80,7 +113,7 @@ flowchart LR
         upd[aux_update.py + update.sh<br/>version · channel · apply]
         serve[hermes serve :9119<br/>agent sessions over WebSocket]
         mlx[mlx server :8080 — primary<br/>Qwen3.8-27B 4-bit + MTP drafter<br/>ON DEMAND]
-        bg[mlx server :8081 — background lane<br/>Qwen3.5-9B · briefs · watchtower<br/>ON DEMAND]
+        bg[mlx server :8081 — background lane<br/>Qwen3.5-9B · briefs · watchtower<br/>OFF until you start it]
         app --> dash
         dash --> serve
         serve --> mlx
@@ -90,7 +123,7 @@ flowchart LR
     end
     tg[Telegram DM] --> serve
     web[explicit web tools] --> serve
-    claude[Claude Bridge<br/>optional · one master switch] -.-> dash
+    claude[Claude Bridge<br/>optional · off by default] -.-> dash
     gh[(GitHub Releases)] -.-> upd
 ```
 
@@ -100,9 +133,9 @@ flowchart LR
 - **Backend:** one `server.py` on the Python standard library — no pip tree to
   rot. Features arrive as drop-in `aux_*.py` / `aux_*.js` modules.
 - **Safety:** manual approvals by default, notify-only automations, read-only
-  integrations where it matters (Gmail is draft-only *by absence of a send
-  capability*, not by promise), and a same-origin guard in front of the whole
-  local API.
+  integrations where it matters (Gmail, Calendar and Contacts are read-only *by
+  OAuth scope*, not by promise — a reply Hermes drafts is text you send
+  yourself), and a same-origin guard in front of the whole local API.
 
 ### Prompt budget
 
@@ -505,8 +538,10 @@ a millisecond; *model* runs the rules first and then a short pass on a model
 lane **that is already awake**, with a four-second cap and the rules result as
 the fallback. It never wakes a model. Per-app styles decide how far cleanup
 goes: prose for Mail and Notes, casual for Slack and Messages, and verbatim for
-Terminal and VS Code, where punctuation and capitalisation are left exactly as
-spoken. If the dashboard is down the helper inserts the raw transcript rather
+Terminal and VS Code, where punctuation, capitalisation and even "um" and "uh"
+are left exactly as spoken (only false starts are folded). A correction that
+takes back a "don't" or a "not" is never applied: the words go in as you said
+them, because flipping the meaning is worse than an untidy sentence. If the dashboard is down the helper inserts the raw transcript rather
 than making you wait.
 
 **Privacy.** Audio is never stored and never leaves this Mac. *Keep what was
@@ -534,6 +569,9 @@ check that reports what the helper itself says about its three permissions.
   they only cost RAM while you are actually using the assistant.
 - The **[Hermes Agent](https://github.com/NousResearch/hermes-agent) CLI**,
   installed separately (`install.sh` tells you how if it is missing).
+- Optional: **icalBuddy** (`brew install ical-buddy`) for calendar events. The
+  Today widget, the briefs, Needs-you, search and the MCP calendar tools read
+  the macOS Calendar through it; without it they have no calendar.
 
 ## Install
 
@@ -555,8 +593,11 @@ Then:
    walks through every integration.
 2. Open the dashboard at <http://127.0.0.1:7788>, or launch **Hermes
    Assistant.app**. Setup runs on first launch — it reads your Mac's chip, RAM
-   and free disk, shows exactly what ever leaves the machine, recommends a model
+   and free disk, shows what can leave the machine, recommends a model
    that fits, and sets your preferences (re-runnable from Settings › Overview).
+   A model you pick there that still has to download is not made the assistant
+   until its download has finished; if it fails, the sheet says so and your
+   current model stays.
 3. Pick a model in the header pill and let it download the first time (~17 GB).
 
 **First launch of the app.** The bundle is ad-hoc signed, not notarised by
@@ -590,8 +631,22 @@ Two channels, in Settings or via `--channel`:
 | `main` | `origin/main`, the development branch — git checkouts only |
 
 The updater refuses to move a checkout with uncommitted changes (it tells you
-which files), never touches anything under `~/.hermes`, leaves the model servers
-asleep, and logs to `~/.hermes/logs/update.log`. If a release changes `app/`, it
+which files), and the in-app Apply refuses while the assistant is answering a
+message (restarting would lose that reply) unless you confirm. It leaves a
+model server that is asleep asleep, keeps a running one running when the
+update did not change its code, and logs to
+`~/.hermes/logs/update.log`. It does not touch your data — chats, memories,
+settings, `.env`, `state.db`. What it does write under `~/.hermes`: its own log,
+state and lock (`dashboard/update-state.json`, `dashboard/update.lock`), the
+`plugins/tool-budget` and `plugins/approval-gate` links back to this checkout,
+both in `plugins.enabled` of `config.yaml` (after a timestamped backup; a
+`config.yaml` in a form it cannot edit safely is left untouched and the log
+says which line), and what `./install-services.sh` writes (the serve token if
+it is missing, and the on-demand markers on a fresh install). It also restarts
+the Telegram gateway, when one is running under launchd, so Telegram runs the
+updated plugins. The steps after the code swap run from the NEW `update.sh`,
+so an update always finishes with the version it installed; if one is ever
+interrupted after the swap, `./update.sh --post-update` finishes it. If a release changes `app/`, it
 says so rather than silently replacing a bundle whose Full Disk Access grant
 would be dropped.
 
@@ -705,7 +760,8 @@ client with a different scope.
 - **Conversations are scrubbed on the way out**: tool calls, approval prompts
   and status rows are dropped, and tokens, `Bearer` headers and `~/.hermes`
   paths are redacted with the same rules the conversation export uses.
-- **Bounded plain text.** Any single result is capped at 8 KB, and a non-JSON
+- **Bounded plain text.** Any single result is capped at 8 KB — its text and
+  its structured copy each fit that one cap and list the same items — and a non-JSON
   answer from the dashboard is discarded rather than forwarded — no HTML ever
   reaches the model. (`doctor(format="text")` is the one route that answers
   `text/plain`, and only that content type is accepted there.)
@@ -717,19 +773,53 @@ actually saw in the Hub feeds it.
 ## Privacy
 
 - **All inference is local.** Prompts, replies, memory and your calendar and
-  mail content stay on the machine. The model server is a process on
-  `127.0.0.1`, not an API key.
-- **What does go out**, and only when you ask for it: Telegram transport (if you
-  set it up), explicit agent tool calls like web search, weather and news feeds
-  for the hub widgets, and the update check against the GitHub API.
+  mail content stay on the machine unless you turn on the Claude Bridge
+  (below). The model server is a process on `127.0.0.1`, not an API key.
+- **What does go out** is listed row by row in Settings › Connections › Data &
+  Network, the same table the first-run sheet shows: the update check
+  (GitHub), model downloads and every model-server start (Hugging Face), the
+  hourly news feeds and the Hub widgets' sources, the agent's web searches,
+  Telegram (if you set it up), Google (if you connect it), GitHub (if you
+  connect it: the repositories you pick, and the changes you approve), the
+  agent's text-to-speech tool (Microsoft Edge's online voices unless `config.yaml`
+  names a local one) and Apple's speech model the first time you dictate. Not
+  all of it waits for you to ask: the feeds, the widget refreshes (and, while
+  News is on and you have a price rule, a price check every 5 minutes) and the
+  update check run on their own. The unattended web research — an hourly
+  news-research pass while a model is awake and a test search every 6 hours —
+  runs only while **Agent web research** is on (it is off until you turn it on)
+  and News is on.
+- **The agent's own tools are a path out too.** Inside a conversation the
+  agent can run a command in its terminal (`curl`, `git`, `pip`, the `claude`
+  CLI…), use its browser tools or fetch a page, and those reach whatever address
+  it chooses. There is no switch for that row: the controls are which toolsets
+  the agent has and the approval prompts, and Hermes asks only before commands
+  it classes as risky — a plain `curl` is not one of them.
+- **GitHub's notices are security notices.** If you connect GitHub, the
+  Telegram message after each push and the one about a `hermes/` branch Hermes
+  did not push are sent even with both notification switches off and in quiet
+  hours.
 - **The optional Claude Bridge** is the one path that sends text to a hosted
-  model. It is off unless you turn it on, behind a single master switch.
-- **The optional "Uncensored" model** (`Qwen3.8-27B-Uncensored`) is an
-  abliterated build with its refusal behaviour removed. It is **opt-in**, never
-  the default, and you pick it deliberately in the model menu. It is the same
-  27B otherwise. What it writes is yours to own.
-- **Google access is read-and-draft**: `calendar.readonly`, `gmail.readonly`,
-  `gmail.compose`. There is no send scope, by design.
+  model. It is off unless you turn it on. With it on, Claude gets the questions
+  you escalate, the ones the auto-router picks and the ones the agent asks it
+  itself, plus whatever context the caller attaches — and it refuses outright,
+  sending nothing, when the question or its context looks like it holds a
+  password, key or token. **For-You's pass, about every 2 hours,**
+  would send your You-Model profile (goals, projects, interests, preferences,
+  key people's names) and the headlines it matched, so it has **its own
+  switch**, "For-You via Claude", also off by default; it needs both. The
+  Claude child runs with no tools, no MCP servers and none of your
+  `~/.claude` settings.
+- **The optional "Uncensored" models** (`Qwen3.8-27B-Uncensored` and four more
+  abliterated builds) have their refusal behaviour removed.
+  They are **opt-in**, never the default and never recommended, and switching
+  to one asks you to acknowledge that first. What they write is yours to own.
+- **Google access is read-only**: `gmail.readonly`, `calendar.readonly` and
+  `contacts.readonly`, nothing else; a grant that comes back wider is revoked
+  and not stored. Google has no draft-without-send scope (`gmail.compose` can
+  send), so "drafting" means Hermes writes the text and you send it. An older
+  grant, made before the calendar scope was narrowed, also holds read/write
+  `calendar`; the Google card says so and asks you to reconnect.
 - **Battery.** The two model servers are installed **on demand**: they do not
   start at login and are not kept alive. A chat turn, a Telegram message, or
   "Wake now" starts the primary (~30-50 s cold); after ten idle minutes it
@@ -805,14 +895,29 @@ python3 dashboard/doctor.py --quiet    # only what needs attention
 python3 dashboard/doctor.py --json     # the same run, machine-readable
 ```
 
-Eighteen checks in about a quarter of a second: the dashboard and the launchd
-services, the Hermes Agent and its version, the mlx-vlm venv and its pin, the
+Twenty-three checks in about a quarter of a second: the dashboard and the launchd
+services, the two model lanes (probed, never woken), the Hermes Agent and its
+version, the mlx-vlm venv and its pin, the
 Python that does model downloads, every model in the roster (weights complete,
 drafter ready, fits this Mac's RAM), free disk, RAM, macOS, Apple Silicon, Full
-Disk Access, `config.yaml` / `settings.json` / `~/.hermes/config.yaml`, the
-Claude bridge and its master switch, the search index, the Needs-you store,
-first-run setup, the cached update check, and the log directory plus a count of
-recent errors.
+Disk Access, dictation, `config.yaml` / `settings.json` / `~/.hermes/config.yaml`,
+**Hermes config drift**, the Claude bridge and its master switch, the
+Reminders/Notes automation switches, the Google grant (a sign-in Google no
+longer accepts shows here, not only on the Google card), the search index, the
+Needs-you store,
+first-run setup, the cached update check, and the log directory (with every
+service log's size) plus a count of recent errors.
+
+**Hermes config drift** reads `~/.hermes/config.yaml` itself (no `hermes`
+process, no network) and warns on the keys that keep the agent local and gated:
+`approvals.mode` not pinned to `manual` (0.19 makes LLM-reviewed "smart" the
+default), `tts.provider` unset or a cloud voice (0.18 falls back to Microsoft
+Edge), `computer_use` enabled for `cli` (the hub and `hermes -z`) or `telegram`
+without the `approval-gate` plugin, the `local-anything` model key, any enabled
+MCP server and its sampling switch, `sessions.auto_prune` or `agent.max_turns`
+set to a risky value, and any `base_url` or provider that is not this Mac. It
+never edits the file; each finding names the `hermes config set` (or `hermes
+tools disable`) command to run.
 
 | Status | Means |
 | --- | --- |
@@ -838,8 +943,10 @@ rename — launchd holds the file open, and renaming it would leave the service
 writing to an inode with no name. The fresh file opens with the same start
 banner doctor scopes its error count to, so "*N* error lines since the last
 start" still means what it says on the other side of a rotation.
-`~/.hermes/logs/errors.log` is the **agent's** log, not the dashboard's, and is
-left to it — it keeps its own `.1`/`.2` beside it.
+The same copy-truncate covers the other launchd logs — `mlx-server.log`,
+`mlx-bg.log`, `serve.log` and `gateway.error.log` — at the same 8 MB.
+`~/.hermes/logs/errors.log` and `gateway.log` are the **agent's** logs, not the
+dashboard's, and are left to it — it rotates them itself.
 
 ### Quick ones
 
@@ -865,7 +972,8 @@ window caches the page, so restarting the service alone won't refresh it.
 - [x] A real update path — in-app checks plus `./update.sh`.
 - [ ] **One-download `.app`** — bundle the model bootstrap and services into the
       app so there is no `install.sh` step; signed, notarised DMG.
-- [ ] Voice in and out (local STT/TTS).
+- [x] Voice in: local push-to-talk dictation (1.3.0).
+- [ ] Voice out (local text-to-speech by default).
 - [ ] Agent-authored widgets from a declarative `{url, template}` spec.
 - [ ] Screenshot-grounded computer use with snapshot/undo on every action.
 
@@ -903,9 +1011,31 @@ Standing on: [NousResearch Hermes](https://github.com/NousResearch/hermes-agent)
 [Qwen](https://huggingface.co/Qwen) ·
 [Graphify](https://github.com/Graphify-Labs/graphify)
 
+## Third-party code
+
+This repository is MIT-licensed except `dashboard/vendor/gsap/`. The dashboard
+vendors three browser animation libraries under `dashboard/vendor/` (no CDN,
+no build step); `dashboard/vendor/MANIFEST.json` pins each file's version and
+sha256, and `tools/vendor-anim.sh --check` verifies them. Details are in
+[`dashboard/vendor/README.md`](dashboard/vendor/README.md).
+
+| Library | Version | License |
+|---|---|---|
+| Motion (`dashboard/vendor/motion/`) | 14.6.0 | MIT, © Motion B.V. |
+| anime.js (`dashboard/vendor/anime/`) | 4.5.0 | MIT, © Julian Garnier |
+| GSAP core, Flip, CustomEase (`dashboard/vendor/gsap/`) | 3.15.0 | GSAP Standard "No Charge" License (Webflow), **not MIT** |
+
+The GSAP files are distributed under GreenSock's Standard "No Charge" License
+(<https://gsap.com/standard-license>, effective 2025-04-30). Keep their
+`@license` banners intact, and do not use GSAP to build a no-code visual
+animation tool (the licence prohibits one that competes with Webflow), so this
+project never ships an animation builder on it.
+`dashboard/vendor/gsap/LICENSE.md` is the notice.
+
 ## License
 
-MIT — see [LICENSE](LICENSE). © 2026 Emran Nasseri. Placeholders like
+MIT — see [LICENSE](LICENSE), except `dashboard/vendor/gsap/` (see Third-party
+code). © 2026 Emran Nasseri. Placeholders like
 `123456789`, `@your_hermes_bot` and `/Users/you` are yours to fill in.
 
 Hermes Assistant is a wrapper around, and is not affiliated with, NousResearch's

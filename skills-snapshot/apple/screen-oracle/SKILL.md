@@ -9,14 +9,14 @@ metadata:
   hermes:
     tags: [screenshot, vision, OCR, screen, macOS, read-only, error-explain, extract]
     category: apple
-    related_skills: [computer-use, ocr-and-documents]
+    related_skills: [mac-control, ocr-and-documents]
 ---
 
 # Screen Oracle
 
 Answer questions about whatever is on the user's screen right now. Capture → `vision_analyze` → answer (or extract to an artifact). This skill is a **pure read path**:
 
-- **NEVER click, type, scroll, or move the mouse.** If the task requires interaction ("close that dialog", "click retry"), STOP, load the `computer-use` skill instead, and tell the user you are escalating to it.
+- **NEVER click, type, scroll, or move the mouse.** If the task requires interaction ("close that dialog", "click retry"), STOP, load the `mac-control` skill instead (its approval-gated `computer_use` path), and tell the user you are escalating to it.
 - Captures are scratch files in `~/.hermes/cache/screen-oracle/`. Delete them after answering. **NO silent screen archive, ever.** Saving anything outside the cache (e.g. to ~/Desktop) is a write — propose it and let the approval flow run.
 - **HARD INVARIANT — credentials:** if a capture contains passwords, 2FA/OTP codes, credit-card numbers, seed phrases, or filled credential fields, summarize *around* them ("a password field, filled") — **never transcribe the values**, not into the answer, not into an artifact, not into memory.
 
@@ -31,10 +31,10 @@ Two capture paths exist. Pick deliberately:
 | Situation | Use | Why |
 |---|---|---|
 | Quick look-and-answer ("what's this error?") | `terminal` → `scripts/grab.sh` | Cheap, fast, region/window-precise, no MCP round-trip |
-| Interaction might follow (user may ask you to click next) | `computer_use` tool, action `screenshot` | Same pixel space cua will click in later; cua-driver (com.trycua.driver) has its own TCC grant so it **always works**, and runs in the background — doesn't steal the cursor |
+| Interaction might follow (user may ask you to click next) | `computer_use` tool, action `capture` (`mode: "vision"` for a plain image) | Same pixel space cua will click in later; cua-driver (com.trycua.driver) has its own TCC grant so it **always works**, and runs in the background — doesn't steal the cursor |
 | Need one window or region only | `grab.sh window "App"` / `grab.sh region X,Y,W,H` | Smaller image = sharper, cheaper vision_analyze |
-| Multi-display | `computer_use` `switch_display` then `screenshot`; or `grab.sh full 2` | screencapture `-D n` selects display n (1-based) |
-| Terminal capture comes back black/empty | `computer_use` screenshot | See gotcha below |
+| Multi-display | `grab.sh full 2` | screencapture `-D n` selects display n (1-based). `computer_use` has no display switch: its `capture` is per window and never spans monitors |
+| Terminal capture comes back black/empty | `computer_use` action `capture` | See gotcha below |
 
 Recipes:
 
@@ -55,11 +55,11 @@ bash ~/.hermes/skills/apple/screen-oracle/scripts/grab.sh region 0,0,1200,400
 bash ~/.hermes/skills/apple/screen-oracle/scripts/grab.sh list-windows
 ```
 
-**Gotcha — black/empty screencapture:** `screencapture` needs a Screen Recording TCC grant for the *spawning context*. Build-time test (2026-07-05, interactive terminal spawned by the hermes host): **real image, not black — terminal path verified working.** But under a different launch context (launchd, `hermes serve` restart after an OS update) it may silently produce a black or near-empty PNG. `grab.sh` warns on suspiciously small files; if vision_analyze reports a black/blank image, fall back to the `computer_use` screenshot tool and record which path works in memory as a `§` entry (e.g. `§ screen-oracle: terminal screencapture OK as of <date>` or `§ screen-oracle: terminal capture BLACK under serve — use computer_use screenshot`), so future sessions don't re-discover it.
+**Gotcha — black/empty screencapture:** `screencapture` needs a Screen Recording TCC grant for the *spawning context*. Build-time test (2026-07-05, interactive terminal spawned by the hermes host): **real image, not black — terminal path verified working.** But under a different launch context (launchd, `hermes serve` restart after an OS update) it may silently produce a black or near-empty PNG. `grab.sh` warns on suspiciously small files; if vision_analyze reports a black/blank image, fall back to the `computer_use` tool, action `capture` (`mode: "vision"`), and record which path works in memory as a `§` entry (e.g. `§ screen-oracle: terminal screencapture OK as of <date>` or `§ screen-oracle: terminal capture BLACK under serve — use computer_use capture`), so future sessions don't re-discover it.
 
 **Gotcha — first System Events call:** `window`/`frontmost`/`list-windows` use osascript System Events, which needs an Automation/Accessibility grant; the very first call from a fresh context may fail or stall once while macOS shows the consent prompt. Retry once before concluding it's broken.
 
-**Gotcha — Retina 2x:** grab.sh coordinates (`region`, window bounds) are in screen *points*; the PNG comes out at 2x *pixels* on Retina. If you later hand coordinates from an analyzed image to `computer_use`, divide pixel coordinates by the scale factor (usually 2) — or better, take a fresh `computer_use` screenshot and work in its coordinate space.
+**Gotcha — Retina 2x:** grab.sh coordinates (`region`, window bounds) are in screen *points*; the PNG comes out at 2x *pixels* on Retina. If you later hand coordinates from an analyzed image to `computer_use`, divide pixel coordinates by the scale factor (usually 2) — or better, take a fresh `computer_use` action `capture` and work in its coordinate space.
 
 ## 2. vision_analyze prompt cookbook
 
@@ -95,7 +95,7 @@ When the user wants the text *kept*, not just answered:
 ### "Explain this error"
 1. `grab.sh frontmost` (the dialog is almost always on the frontmost app; if the user names the app, `grab.sh window "App"`).
 2. `vision_analyze` with the **error-verbatim** prompt.
-3. Answer with: the exact error text, what it means, and the concrete fix (commands/steps). If the fix requires clicking something, say so and offer to escalate to the `computer-use` skill — do not click from here.
+3. Answer with: the exact error text, what it means, and the concrete fix (commands/steps). If the fix requires clicking something, say so and offer to escalate to the `mac-control` skill — do not click from here.
 4. `grab.sh clean`.
 
 ### "Pull the numbers out of this dashboard"
@@ -114,7 +114,7 @@ When the user wants the text *kept*, not just answered:
 ## 5. Hygiene & hard rules
 
 - Scratch captures live **only** in `~/.hermes/cache/screen-oracle/`; grab.sh auto-deletes anything older than 1 hour, and you should `grab.sh clean` immediately after answering on sensitive screens. No silent screen archive, ever.
-- This skill **never clicks** — zero `computer_use` actions except `screenshot`/`switch_display`. Interaction requests = escalate to the `computer-use` skill, explicitly.
+- This skill **never clicks** — zero `computer_use` actions except `capture`. Interaction requests = escalate to the `mac-control` skill, explicitly.
 - **Never transcribe** passwords, 2FA codes, or credential-field contents — summarize around them. This applies to answers, artifacts, memory, and Telegram replies alike.
 - Everything stays on this machine. The only thing that may leave is the user's own locked Telegram reply, and only if they asked for one.
 - Timestamps in answers: 12-hour format.

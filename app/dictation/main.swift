@@ -7,7 +7,9 @@
 // main app bundle is frozen (rebuilding it changes its ad-hoc cdhash and drops
 // its Full Disk Access grant — see CLAUDE.md, Message Center), so dictation gets
 // its own small bundle that can be rebuilt freely.  It talks to the dashboard
-// over loopback HTTP and nothing else; audio never leaves this Mac.
+// over loopback HTTP and nothing else; audio never leaves this Mac.  The one
+// download is macOS's own: Apple's speech model for a locale, fetched the
+// first time it is needed and announced in the menu (AnalyzerSupport).
 //
 // WHAT IT DOES
 //   hold the hotkey (default: Right Option) -> capture with AVAudioEngine and
@@ -276,15 +278,39 @@ enum Perms {
     }
 }
 
+/// What the SFSpeechRecognizer fallback does with the current authorization
+/// (2026-10-21 audit C123).  Nothing in the helper used to ASK, so the status
+/// stayed .notDetermined forever: on macOS 14/15 — where the fallback is the
+/// only engine — every hold ended "speech recognition is not authorized" and
+/// macOS never even listed the helper under Speech Recognition.  Now the first
+/// gesture asks (the microphone's pattern: that press is spent on the prompt,
+/// the next one dictates).  Pure, so t_c123_speech_auth.py can run it.
+enum SpeechAuth {
+    enum Step: Equatable { case proceed, ask, refuse }
+
+    static func step(_ status: SFSpeechRecognizerAuthorizationStatus) -> Step {
+        switch status {
+        case .authorized: return .proceed
+        case .notDetermined: return .ask
+        case .denied, .restricted: return .refuse
+        @unknown default: return .refuse
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // transcription
 // ---------------------------------------------------------------------------
 
 /// A live (streaming) transcription session.  `feed` is called from the audio
 /// tap thread; `finish` is called once, from anywhere, and returns the text.
+/// `cancel` ends it with no transcript at all — the key went up before the
+/// recorder started, or the hold was a tap (C122).  After either, the other
+/// is a no-op.
 protocol LiveSession: AnyObject {
     func feed(_ buffer: AVAudioPCMBuffer)
     func finish(_ done: @escaping (String, String?) -> Void)   // (text, error)
+    func cancel()
 }
 
 enum EngineKind {
@@ -333,7 +359,15 @@ enum AnalyzerSupport {
 
     /// Ask the system for the locale's asset.  Returns a human sentence
     /// describing what happened, or nil when nothing was needed.
-    static func installAssetsIfNeeded(_ transcriber: SpeechTranscriber) async -> String? {
+    ///
+    /// This is the helper's one network side effect, and it is macOS's, not
+    /// ours: AssetInventory downloads Apple's speech model for the locale the
+    /// first time it is needed.  No audio and no text is sent, but it IS a
+    /// download from Apple, so it is said out loud — `willDownload` is awaited
+    /// before it starts (the menu shows it) and the log says so (2026-10-21
+    /// audit C56: Settings used to claim nothing here reaches the network).
+    static func installAssetsIfNeeded(_ transcriber: SpeechTranscriber,
+                                      willDownload: ((String) async -> Void)? = nil) async -> String? {
         if await installed() { return nil }
         guard await supported() else {
             return "the speech model does not support \(locale().identifier(.bcp47))"
@@ -341,8 +375,12 @@ enum AnalyzerSupport {
         do {
             if let request = try await AssetInventory.assetInstallationRequest(
                 supporting: [transcriber]) {
+                let tag = locale().identifier(.bcp47)
+                log("downloading the \(tag) speech model from Apple (one-time system asset; "
+                    + "no audio or text is sent)")
+                await willDownload?(tag)
                 try await request.downloadAndInstall()
-                return "downloaded the \(locale().identifier(.bcp47)) speech model"
+                return "downloaded the \(tag) speech model from Apple"
             }
             return nil
         } catch {
@@ -396,6 +434,8 @@ final class AnalyzerLive: LiveSession {
     private var format: AVAudioFormat?
     private let lock = NSLock()
     private var closed = false
+    /// What `start` had to do about the speech asset, if anything (C56).
+    private(set) var assetNote: String?
 
     init() {
         transcriber = AnalyzerSupport.makeTranscriber()
@@ -404,10 +444,13 @@ final class AnalyzerLive: LiveSession {
     }
 
     /// Must be awaited before the first `feed`.  Throws when the analyzer will
-    /// not start at all, which is the caller's cue to fall back.
-    func start() async throws {
-        if let note = await AnalyzerSupport.installAssetsIfNeeded(transcriber) {
+    /// not start at all, which is the caller's cue to fall back.  `onDownload`
+    /// is told the locale when macOS has to fetch its speech model first (C56).
+    func start(onDownload: ((String) async -> Void)? = nil) async throws {
+        if let note = await AnalyzerSupport.installAssetsIfNeeded(transcriber,
+                                                                  willDownload: onDownload) {
             log(note)
+            assetNote = note
         }
         format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber])
         collector = Task { () -> String in
@@ -446,6 +489,19 @@ final class AnalyzerLive: LiveSession {
                 text = (try? await collector?.value) ?? ""
             }
             done(text.trimmingCharacters(in: .whitespacesAndNewlines), err)
+        }
+    }
+
+    func cancel() {
+        lock.lock()
+        if closed { lock.unlock(); return }
+        closed = true
+        lock.unlock()
+        feeder.finish()
+        let collector = self.collector
+        Task {
+            await analyzer.cancelAndFinishNow()
+            collector?.cancel()
         }
     }
 }
@@ -503,6 +559,12 @@ final class LegacyLive: LiveSession {
         DispatchQueue.global().asyncAfter(deadline: .now() + 6.0) { [weak self] in
             self?.settle()
         }
+    }
+
+    func cancel() {
+        lock.lock(); settled = true; doneCb = nil; lock.unlock()
+        request.endAudio()
+        task?.cancel()
     }
 
     private func settle() {
@@ -726,8 +788,116 @@ final class HotkeyMonitor {
 }
 
 // ---------------------------------------------------------------------------
+// push-to-talk intent (2026-10-21 audit C122)
+// ---------------------------------------------------------------------------
+//
+// The key being DOWN and a transcription session EXISTING are two different
+// facts.  On the SpeechAnalyzer path the session only exists after an
+// `await live.start()` that takes 100 ms to seconds (longer the first time,
+// while the speech asset downloads).  The old endDictation() returned early on
+// `session == nil`, so a release inside that window was thrown away, and the
+// recorder then started with the key already up and ran until the 60 s
+// watchdog: microphone live, nobody holding the key, "Listening…" in the menu.
+//
+// This struct owns the intent and the Controller asks it before every
+// transition.  It is pure (no AppKit, no clock of its own), which is what lets
+// tools/tests/unit/t_c122_ptt_gate.py compile and drive it on its own.
+
+struct PushToTalk {
+    /// A hold shorter than this is a tap, or Right Option / AltGr used as a
+    /// modifier in a chord — not dictation.  Its session is discarded unheard.
+    static let minHoldMs: Double = 250
+
+    enum Phase: Equatable { case idle, starting, live }
+
+    private(set) var phase: Phase = .idle
+    private(set) var pressed = false
+    private var pressedAt: Double = 0
+    private(set) var lastHoldMs: Double = 0
+
+    /// Key down.  True: bring an engine up for this press.  False: there is
+    /// nothing to start — a session is already live, or a start from an
+    /// earlier press is still in flight and now serves this one.
+    mutating func press(at ms: Double) -> Bool {
+        if phase == .live { return false }
+        pressed = true
+        pressedAt = ms
+        if phase == .starting { return false }
+        phase = .starting
+        return true
+    }
+
+    enum Ready: Equatable {
+        case capture               // the key is still down: start the recorder
+        case abandon(meant: Bool)  // it is up: tear down, record nothing; `meant`
+                                   // = it was a real hold, so say why
+    }
+
+    /// The engine finished starting.  It records ONLY while the key is down.
+    mutating func engineReady() -> Ready {
+        guard phase == .starting, pressed else {
+            phase = .idle
+            return .abandon(meant: lastHoldMs >= PushToTalk.minHoldMs)
+        }
+        phase = .live
+        return .capture
+    }
+
+    /// The engine or the recorder could not start, or the press was spent on
+    /// a permission prompt.  The key may still be down; its release is then
+    /// a no-op.
+    mutating func failed() { phase = .idle }
+
+    enum Release: Equatable {
+        case none     // no live session; a start in flight sees `pressed == false`
+        case discard  // a tap or a chord: stop, transcribe nothing, say nothing
+        case finish   // a real hold: stop and transcribe
+    }
+
+    /// Key up — or the watchdog (`forced`), which always finishes.
+    mutating func release(at ms: Double, forced: Bool = false) -> Release {
+        if pressed { lastHoldMs = max(0, ms - pressedAt) }
+        pressed = false
+        guard phase == .live else { return .none }
+        phase = .idle
+        if !forced && lastHoldMs < PushToTalk.minHoldMs { return .discard }
+        return .finish
+    }
+}
+
+// ---------------------------------------------------------------------------
 // text insertion
 // ---------------------------------------------------------------------------
+
+/// The Accessibility splice, in the units AX speaks (2026-10-21 audit C125).
+///
+/// kAXSelectedTextRangeAttribute is a CFRange over the value's UTF-16 code
+/// units — NSString/NSRange semantics.  The old splice indexed `Array(value)`
+/// (Characters) with it and clamped against `value.count`, so every emoji (one
+/// Character, two units) or decomposed accent before the caret moved the
+/// insertion point, and a selection replaced the wrong characters.  Pure and
+/// AppKit-free, so tools/tests/unit/t_c125_ax_splice.py compiles and
+/// runs it on its own.
+enum AXSplice {
+    /// (merged value, caret location just after the inserted text), both in
+    /// UTF-16 units.  No selection (or an unreadable one) means the end; a
+    /// range that pokes outside the value is cut to the part inside it (the
+    /// end is computed overflow-safe — these are another app's numbers).
+    static func apply(_ value: String, range: CFRange?, insert text: String) -> (String, Int) {
+        let ns = value as NSString
+        var loc = ns.length
+        var len = 0
+        if let r = range {
+            loc = max(0, min(ns.length, r.location))
+            let (sum, over) = r.location.addingReportingOverflow(r.length)
+            // An overflow past Int.min is an empty range, not "everything".
+            let end = over ? (r.length > 0 ? ns.length : loc) : max(loc, min(ns.length, sum))
+            len = end - loc
+        }
+        let merged = ns.replacingCharacters(in: NSRange(location: loc, length: len), with: text)
+        return (merged, loc + (text as NSString).length)
+    }
+}
 
 struct InsertResult {
     let ok: Bool
@@ -787,27 +957,22 @@ enum Inserter {
         else { return false }
 
         var rangeRef: CFTypeRef?
-        var loc = value.count
-        var len = 0
+        var selection: CFRange?
         if AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString,
                                          &rangeRef) == .success,
            let r = rangeRef, CFGetTypeID(r) == AXValueGetTypeID() {
             var cf = CFRange(location: 0, length: 0)
             if AXValueGetValue(unsafeBitCast(r, to: AXValue.self), .cfRange, &cf) {
-                loc = max(0, min(value.count, cf.location))
-                len = max(0, min(value.count - loc, cf.length))
+                selection = cf
             }
         }
-        let chars = Array(value)
-        let head = String(chars[0..<loc])
-        let tail = String(chars[(loc + len)...])
-        let merged = head + text + tail
+        let (merged, caret) = AXSplice.apply(value, range: selection, insert: text)
         guard AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString,
                                            merged as CFTypeRef) == .success
         else { return false }
         // Put the caret after what we inserted; a field that refuses this is
         // still correctly filled, so the return value is deliberately ignored.
-        var after = CFRange(location: loc + text.count, length: 0)
+        var after = CFRange(location: caret, length: 0)
         if let axr = AXValueCreate(.cfRange, &after) {
             _ = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, axr)
         }
@@ -1116,6 +1281,12 @@ final class Controller: NSObject, NSApplicationDelegate {
     private var watchdog: Timer?
     private var stoppedByWatchdog = false
 
+    /// The key's intent, apart from the session (C122), and how many released
+    /// dictations are still being transcribed, cleaned or inserted — so an older
+    /// one finishing never repaints a newer one as idle or failed.
+    private var ptt = PushToTalk()
+    private var pending = 0
+
     // --- lifecycle -------------------------------------------------------
 
     func applicationDidFinishLaunching(_ note: Notification) {
@@ -1202,17 +1373,49 @@ final class Controller: NSObject, NSApplicationDelegate {
         targetName = front.localizedName ?? ""
         startedAt = nowMs()
         lastNote = ""
+        // The press is recorded BEFORE anything starts, so a release during the
+        // start below is seen by it (C122).  A start from an earlier press that
+        // is still in flight serves this press instead of a second engine.
+        guard ptt.press(at: startedAt) else { return }
 
         if #available(macOS 26.0, *), engineKind == .analyzer {
             let live = AnalyzerLive()
             Task { @MainActor in
                 do {
-                    try await live.start()
-                    self.startCapture(live)
+                    try await live.start(onDownload: { tag in
+                        // Awaited, so the menu says it BEFORE the download starts
+                        // and a late repaint cannot bring the line back after it.
+                        await MainActor.run {
+                            self.lastNote = "Downloading the \(tag) speech model from Apple "
+                                + "(one time, no audio is sent)…"
+                            self.rebuildMenu()
+                            self.sendHeartbeat()
+                        }
+                    })
+                    if let n = live.assetNote { self.lastNote = n }
+                    self.engineReady(live)
+                    if live.assetNote != nil {
+                        // The asset state changed under us; the status kept saying
+                        // "missing" until a relaunch.  Ask, do not assume.
+                        Task { @MainActor in
+                            self.assetInstalled = await AnalyzerSupport.installed()
+                            self.rebuildMenu()
+                            self.sendHeartbeat()
+                        }
+                    }
                 } catch {
-                    log("SpeechAnalyzer refused (\(error.localizedDescription)) — falling back")
-                    self.engineKind = .legacy
-                    self.startLegacy()
+                    // For THIS press only (C123).  The downgrade used to be
+                    // sticky for the life of the process, so one refusal (asset
+                    // not installed yet while offline, a download failure) sent
+                    // every later press to the fallback until a relaunch.
+                    log("SpeechAnalyzer refused (\(error.localizedDescription)) — using "
+                        + "SFSpeechRecognizer for this dictation; the next one tries again")
+                    if self.ptt.pressed {
+                        self.startLegacy()
+                    } else {
+                        self.ptt.failed()
+                        self.settle(.idle)
+                    }
                 }
             }
         } else {
@@ -1221,13 +1424,55 @@ final class Controller: NSObject, NSApplicationDelegate {
     }
 
     private func startLegacy() {
+        switch SpeechAuth.step(SFSpeechRecognizer.authorizationStatus()) {
+        case .proceed:
+            break
+        case .ask:
+            ptt.failed()
+            lastNote = "Allow Speech Recognition for \(kAppName), then hold the key again."
+            settle(.idle)
+            SFSpeechRecognizer.requestAuthorization { [weak self] status in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    self.lastNote = status == .authorized ? ""
+                        : "Speech Recognition was declined — System Settings › Privacy & "
+                          + "Security › Speech Recognition."
+                    self.rebuildMenu()
+                    self.sendHeartbeat()
+                }
+            }
+            return
+        case .refuse:
+            ptt.failed()
+            lastNote = "Speech Recognition is off for this helper — System Settings › "
+                + "Privacy & Security › Speech Recognition."
+            settle(.error)
+            return
+        }
         let live = LegacyLive()
         do {
             try live.start()
-            startCapture(live)
+            engineReady(live)
         } catch {
+            ptt.failed()
             lastNote = error.localizedDescription
-            setState(.error)
+            settle(.error)
+        }
+    }
+
+    /// An engine finished starting.  It records only while the key is still
+    /// down; otherwise it is torn down and the microphone never opens (C122).
+    private func engineReady(_ live: LiveSession) {
+        switch ptt.engineReady() {
+        case .capture:
+            startCapture(live)
+        case .abandon(let meant):
+            live.cancel()
+            if meant {
+                lastNote = "Released before the speech engine was ready — nothing was "
+                    + "recorded. Hold the key a moment longer."
+            }
+            settle(.idle)
         }
     }
 
@@ -1239,8 +1484,10 @@ final class Controller: NSObject, NSApplicationDelegate {
             armWatchdog()
         } catch {
             session = nil
+            ptt.failed()
+            live.cancel()
             lastNote = error.localizedDescription
-            setState(.error)
+            settle(.error)
         }
     }
 
@@ -1257,19 +1504,31 @@ final class Controller: NSObject, NSApplicationDelegate {
     }
 
     private func endDictation() {
-        guard let live = session else { return }
+        let forced = stoppedByWatchdog
+        stoppedByWatchdog = false
+        // C122: the release is recorded even when there is no session yet — an
+        // engine start still in flight reads it and never opens the microphone.
+        let verdict = ptt.release(at: nowMs(), forced: forced)
+        guard verdict != .none, let live = session else { return }
         session = nil
         watchdog?.invalidate()
         watchdog = nil
         recorder.stop()
+        if verdict == .discard {
+            // A tap, or Right Option held as a modifier in a chord: not dictation.
+            live.cancel()
+            settle(.idle)
+            return
+        }
+        pending += 1
         setState(.cleaning)
         let duration = nowMs() - startedAt
         let bundle = targetBundle, name = targetName, pid = targetPid
-        let engine = engineKind.label
-        let stopNote = stoppedByWatchdog
+        // The engine THIS dictation used: the fallback is per press now (C123).
+        let engine = (live is LegacyLive ? EngineKind.legacy : engineKind).label
+        let stopNote = forced
             ? "stopped after \(Int(Controller.kMaxSessionSeconds)) s"
             : ""
-        stoppedByWatchdog = false
         // Nothing here captures `self` off the main thread: the two hops back to
         // main take a weak reference, and the cleanup call is a static that needs
         // no instance at all.
@@ -1291,15 +1550,32 @@ final class Controller: NSObject, NSApplicationDelegate {
     }
 
     private func finishEmpty(_ err: String?, stopNote: String) {
+        pending = max(0, pending - 1)
         lastNote = Controller.note(err ?? "nothing was heard", stopNote)
-        setState(.error)
+        settle(.error)
+    }
+
+    /// The icon after a dictation ends.  While a newer dictation is starting or
+    /// listening, an older one finishing only refreshes the menu (its note still
+    /// shows) — it must not paint the newer one as idle or failed (C122).  While
+    /// an older one is still being cleaned, the icon says THAT, whatever this one
+    /// ended as: a tap discarded after the recorder started had already painted
+    /// "listening", and leaving it there showed a live microphone that was off.
+    private func settle(_ s: StatusIcon.State) {
+        if ptt.phase != .idle {
+            rebuildMenu()
+            sendHeartbeat()
+            return
+        }
+        setState(pending > 0 ? .cleaning : s)
     }
 
     private func deliver(_ cleaned: String, into pid: pid_t, appName: String, stopNote: String) {
+        pending = max(0, pending - 1)
         let res = Inserter.insert(cleaned, into: pid, appName: appName)
         if res.ok {
             lastNote = stopNote
-            setState(.idle)
+            settle(.idle)
             return
         }
         // Refused text is never dropped.  Secure input, focus that moved, both
@@ -1312,7 +1588,7 @@ final class Controller: NSObject, NSApplicationDelegate {
         }
         lastNote = Controller.note(why, stopNote)
         log("insert failed: \(lastNote)")
-        setState(.error)
+        settle(.error)
     }
 
     /// One note line out of a reason and an optional "why it ended" suffix.

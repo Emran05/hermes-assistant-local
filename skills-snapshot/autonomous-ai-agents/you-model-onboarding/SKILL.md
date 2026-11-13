@@ -73,7 +73,8 @@ Frame it warmly and honestly, e.g.:
 
 > "I'd like to spend about ten minutes learning what to watch for on your behalf — goals,
 > what you're building right now, who matters. Everything I save, I'll show you first, and
-> it all stays on this Mac where you can edit or delete it. Ready?"
+> it is stored on this Mac where you can edit or delete it. Before we finish I'll tell you
+> exactly when any of it can leave. Ready?"
 
 When they agree, create any missing scaffolding (this never overwrites existing files):
 
@@ -140,7 +141,10 @@ ask the next question.
 ## Step 4 — Wrap up
 
 Recap what was saved, file by file, in 3–6 lines. Tell them where it lives: the **Mind →
-Your Model** card in the dashboard, where every entry can be edited or deleted, and nothing
-ever leaves the Mac. Invite corrections: "Anything there I got wrong or you'd rather I
+Your Model** card in the dashboard, where every entry can be edited or deleted. Say plainly
+when it can leave the Mac: to Claude only with Claude escalation on, and For-You's hourly
+picks only with "For-You via Claude" on as well; and if Telegram briefings are set up, the
+morning brief quotes the goal each top For-You pick matched. Settings › Connections › Data
+& Network lists every one of these. Invite corrections: "Anything there I got wrong or you'd rather I
 forget?" — and honor deletions immediately (propose, confirm, then remove via the same card
 or `/api/memory/save`).

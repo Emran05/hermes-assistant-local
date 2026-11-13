@@ -1,51 +1,57 @@
-# ~/.hermes/config.yaml
-# Personal assistant agent — M5 Mac, headless, always-on.
-# Reach: Telegram (locked to your user ID). Autonomy: draft-and-approve.
-# Reliable integrations: Google Calendar, Gmail, Discord.
-# Secrets live in ~/.hermes/.env (see env.example), NOT in this file.
+# ~/.hermes/config.yaml — the seed install.sh copies onto a fresh Mac (only when
+# there is no config yet; it never overwrites one).
+#
+# Every key here is one Hermes Agent 0.18 actually reads. Change values with
+# `hermes config set <key> <value>` rather than by hand. Secrets live in
+# ~/.hermes/.env (see env.example), NOT in this file.
+#
+# `python3 dashboard/doctor.py` holds this file against the keys that keep the
+# agent local and gated (the "Hermes config drift" line) and names the command
+# for anything it flags. It never edits it.
 
 # ---------------------------------------------------------------------------
-# MODEL / PROVIDER
-# The local MLX server is exposed as an OpenAI-compatible endpoint.
-# Start it with mlx-server.sh (see that file). Hermes just points at it.
+# MODEL — the local MLX server (mlx-server.sh, OpenAI-compatible, on demand).
+# The dashboard's model menu rewrites model.default when you switch models.
+# No api_key: Hermes sends a placeholder to a custom endpoint that has none.
 # ---------------------------------------------------------------------------
 model:
+  default: mlx-community/Qwen3.8-27B-4bit
   provider: custom
-  name: "Qwen3-30B-A3B-Instruct-2507-4bit"   # label; should match the served model name
-  base_url: "http://127.0.0.1:8080/v1"
-  api_key_env: "LOCAL_MODEL_KEY"    # any non-empty string; local server ignores it
-  context_window: 65536             # Hermes requires >= 64k; keep KV cache sane
+  base_url: http://127.0.0.1:8080/v1
+  context_length: 65536             # Hermes requires >= 64k; keep the KV cache sane
 
-# Optional cloud fallback if the local box is down. Off by default — fully local.
-# fallback:
-#   provider: openrouter
-#   model: "anthropic/claude-sonnet-4-6"
+# The optional background lane (mlx-server-bg.sh, :8081). The dashboard sends
+# its briefing / watchtower one-shots here with `--provider custom:bg` while
+# that lane is up. Nothing starts it for you — see the README.
+custom_providers:
+  - name: bg
+    base_url: http://127.0.0.1:8081/v1
+    model: mlx-community/Qwen3.5-9B-4bit
+    context_length: 65536
 
-# ---------------------------------------------------------------------------
-# AUXILIARY MODELS (side tasks: summarization, dangerous-command classify, etc.)
-# Point these at the SAME local model so nothing leaves the machine.
-# ---------------------------------------------------------------------------
+# Side tasks (summarisation, the smart-approval reviewer) run on the SAME local
+# model, so a key you add later for something else never pulls them off the Mac.
 auxiliary:
   compression:
-    provider: "main"
-    model: ""            # empty = reuse main chat model
-  command_approval:
-    provider: "main"
-    model: ""            # local classifier for the approve/deny gate
+    provider: main
+  approval:
+    provider: main
 
 # ---------------------------------------------------------------------------
-# AGENT BEHAVIOR — the draft-and-approve safety posture
+# SAFETY — pinned here, not left to upstream defaults that move between releases
 # ---------------------------------------------------------------------------
+approvals:
+  mode: manual                      # you approve dangerous commands (0.19+ defaults to "smart")
+  cron_mode: deny                   # scheduled jobs never auto-approve
+
 agent:
-  timezone: "America/New_York"      # adjust to yours; drives "plan my day"
-  max_turns: 60
-  human_delay: false
-  # Require explicit approval before ANY command/tool that writes or sends.
-  approval:
-    mode: "always"                  # every write/send action pauses for /approve
-    # Read-only tools (list calendar, read email, read Discord) run freely;
-    # only state-changing / outbound actions hit the gate.
-    auto_approve_readonly: true
+  max_turns: 60                     # 0.18 defaults to 90, 0.20+ to 500
+
+# text_to_speech defaults to Microsoft Edge's cloud voices when this is unset.
+# piper synthesises on the Mac; until piper-tts is installed in the agent's
+# venv the tool returns an error instead of reaching the cloud.
+tts:
+  provider: piper
 
 # ---------------------------------------------------------------------------
 # DISPLAY — what you see in Telegram
@@ -87,40 +93,14 @@ platforms:
           - verbose
 
 # ---------------------------------------------------------------------------
-# MCP SERVERS — the integrations.
-# Calendar + Gmail via Google MCP; Discord via the gateway (not MCP).
-# Notion stub included but commented until you want it.
-# Tokens/paths come from .env — never inline secrets here.
+# NOT seeded, on purpose
 # ---------------------------------------------------------------------------
-mcp_servers:
-  # --- Google Calendar + Gmail -------------------------------------------
-  # Uses a Google MCP server; OAuth creds path set in .env.
-  google:
-    command: npx
-    args: ["-y", "@google/mcp-workspace"]   # verify exact package at install time
-    env:
-      GOOGLE_OAUTH_CREDENTIALS: "${GOOGLE_OAUTH_CREDENTIALS}"
-      GOOGLE_MCP_SCOPES: "calendar.readonly,gmail.readonly,gmail.compose"
-      # NOTE scopes: read calendar, read gmail, DRAFT gmail (compose) only.
-      # No gmail.send scope on purpose — drafts only, you send after approve.
-
-  # --- Notion (phase 2 — uncomment when ready) ---------------------------
-  # notion:
-  #   command: npx
-  #   args: ["-y", "@notionhq/notion-mcp-server"]
-  #   env:
-  #     NOTION_TOKEN: "${NOTION_TOKEN}"
-
-# ---------------------------------------------------------------------------
-# CRON — proactive "plan my day" nudge. Draft only; you approve sends.
-# ---------------------------------------------------------------------------
-cron:
-  jobs:
-    - name: "morning-agenda"
-      schedule: "0 7 * * *"          # 7:00am daily
-      platform: telegram
-      prompt: >
-        Read today's Google Calendar events and my unread Gmail from the last
-        24h. Draft a concise morning agenda: schedule, top 3 priorities, and any
-        emails that look like they need a reply. Present it to me — do NOT send
-        anything or modify anything without approval.
+# * No MCP servers. Google is connected through the dashboard (Settings ›
+#   Connections), which never requests a send-capable Gmail scope. An entry
+#   under `mcp_servers:` is enabled by default, starts its own process (an
+#   `npx` one is downloaded from npm at start) and, unless you set
+#   `sampling: {enabled: false}`, may ask this model for completions. The
+#   doctor's drift check lists every enabled one.
+# * No scheduled jobs. The morning brief, midday pulse and evening wrap come
+#   from the dashboard (Settings › Proactive). Hermes' own scheduler keeps its
+#   jobs in ~/.hermes/cron/jobs.json (`hermes cron`), not in this file.

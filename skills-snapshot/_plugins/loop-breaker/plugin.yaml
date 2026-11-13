@@ -1,7 +1,8 @@
 name: loop-breaker
-version: 1.0.0
-description: "Hard guard against degenerate tool-call loops — blocks the 3rd+ identical tool call (same name + same args) within a turn, so the agent can't waste iterations re-issuing the same search/command. Nudges it to vary or conclude."
+version: 1.1.0
+description: "Hard guard against degenerate read loops — blocks the 3rd+ identical READ-ONLY tool call (web_search, read_file, search_files... same name + same args) within a turn once the earlier calls returned the same successful answer with nothing state-changing in between (a changed answer or a failure does not count; three identical failures block the next retry), so the agent can't waste iterations re-issuing the same search. Stateful tools (computer_use, process, terminal, patch) are never blocked. Nudges it to vary or conclude."
 author: "Hermes Assistant (local)"
 hooks:
   - pre_tool_call
+  - post_tool_call
   - on_session_end

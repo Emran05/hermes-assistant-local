@@ -270,7 +270,7 @@
       // bar + footer
       SEL + " .dcbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:12px 0 0}" +
       SEL + " button.dcb{padding:9px 16px;border-radius:10px;font-size:12.5px;" +
-        "font-weight:600;cursor:pointer;border:0;background:var(--iris);color:#fff;" +
+        "font-weight:600;cursor:pointer;border:0;background:var(--iris);color:var(--iris-ink,#fff);" +
         "min-height:40px;transition-property:opacity;transition-duration:150ms;" +
         "transition-timing-function:ease-out}" +
       SEL + " button.dcb:disabled{opacity:.45;cursor:default}" +
@@ -483,9 +483,12 @@
     html += '<p class="dcfoot">' +
       E(inst.rebuild_note || "") + " Microphone and Accessibility are granted in " +
       "System Settings › Privacy &amp; Security; the helper asks for them the " +
-      "first time you use it. Nothing here reaches the network: transcription " +
-      "runs on device and the cleanup model, when it is used at all, is the " +
-      "local lane on this Mac.</p>";
+      "first time you use it. Transcription runs on device and the cleanup " +
+      "model, when it is used at all, is the local lane on this Mac. One thing " +
+      "does reach the network: on macOS 26, the first time you dictate in a " +
+      "language whose speech model is not on this Mac yet, macOS downloads that " +
+      "model from Apple — once, and no audio or text is sent. The helper says so " +
+      "in its menu while it happens.</p>";
 
     return html + "</div>";
   }
@@ -519,11 +522,16 @@
   }
 
   async function save(patch) {
+    // Only a save that CARRIES the rules settles them.  The cleanup radio and
+    // the history switch save one key each; clearing `dirty` there let load()
+    // replace the editor with the server's copy, throwing away every unsaved
+    // dictionary and per-app row (2026-10-08 audit, P3).
+    var rules = !!patch && ("dictionary" in patch || "app_styles" in patch);
     S.busy = true; S.err = ""; paint();
     try {
       var res = await jpost("/api/dictation/settings", patch);
       if (res && res.ok === false) throw new Error(res.error || "save failed");
-      S.dirty = false;
+      if (rules) S.dirty = false;
       S.saved = Date.now();
       await load();
     } catch (e) {

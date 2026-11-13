@@ -109,7 +109,7 @@
         "transition-property:background-color,border-color,opacity;transition-duration:150ms;" +
         "transition-timing-function:ease-out}" +
       SEL + " button.docb:disabled{opacity:.5;cursor:default}" +
-      SEL + " button.docgo{border:0;background:var(--iris,#6b8afd);color:#fff;font-weight:600}" +
+      SEL + " button.docgo{border:0;background:var(--iris,#6b8afd);color:var(--iris-ink,#fff);font-weight:600}" +
       SEL + " .docwhen{font-size:11.5px;color:var(--faint);margin-left:auto;" +
         "font-variant-numeric:tabular-nums}" +
       SEL + " .docsum{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:0 0 4px}" +

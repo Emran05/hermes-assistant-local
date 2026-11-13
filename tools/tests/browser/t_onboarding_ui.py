@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Headless UI harness for aux_onboarding.js (release 1.1.1).
+"""Headless UI harness for aux_onboarding.js (release 1.1.1; round 3: 1.4.0).
 
 Serves the REAL dashboard/index.html on the dashboard origin through Playwright
 routes (so relative /aux_*.js loads resolve), and routes every /api/** call to a
@@ -14,6 +14,18 @@ Covers:
   * keyboard navigation: Tab is trapped, Enter advances, Esc is swallowed on a
     first run and closes on a re-run
   * the sheet paints the app's --ground token in both themes (token inheritance)
+  * round 3: a step registered through window.hermesOnboardingSteps (the
+    extra-steps hook) — order, "Step n of 5", Skip, a save() err keeping the
+    step, its applied/summary lines on the Ready step, its status row — and
+    the models step delegated to a stub window.hermesAdvisor whose routes
+    (/api/advisor/state, /api/advisor/answers) are fixtures here, with the
+    sheet's own action row under it quoting the plan's size
+
+Hermetic: every request is answered by page.route() from the worktree's files
+and the fixtures below — nothing reaches a server, and /vendor/* is not served
+(the motion runtime takes its instant path, so screenshots are end states;
+tools/tests/browser/t_onboarding_real.js runs the motion on the real
+libraries). SKIPs cleanly (exit 0) without Playwright or its Chromium.
 """
 import json
 import os
@@ -21,7 +33,12 @@ import re
 import sys
 import tempfile
 
-from playwright.sync_api import sync_playwright
+try:
+    from playwright.sync_api import sync_playwright
+except Exception as _e:                      # not installed: the suite cannot run here
+    print("SKIP Playwright for Python is not installed (%s)" % type(_e).__name__)
+    print("TESTS 0 passed 0 failed")
+    sys.exit(0)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.environ.get("HERMES_REPO") or os.path.dirname(
@@ -142,7 +159,70 @@ def state_fixture(ram=64, done=False, chip="Apple M5 Max", laptop=True,
 
 
 CUR = {"state": state_fixture(64, done=False)}
-CALLS = {"apply": [], "done": 0, "reset": 0, "download": 0}
+CALLS = {"apply": [], "done": 0, "reset": 0, "download": 0,
+         "adv_state": 0, "adv_answers": []}
+
+# the stub advisor's /api/advisor/state (only the fields the stub reads)
+ADV_STATE = {"ok": True, "version": 1, "result": {"ok": True, "recommended": {
+    "kind": "recommended", "label": "Recommended",
+    "primary": {"id": "mlx-community/Qwen3.8-27B-4bit", "label": "Qwen3.8-27B"},
+    "background": {"id": "mlx-community/Qwen3.5-9B-4bit", "label": "Qwen3.5-9B"},
+    "download_gb": 23.0, "why": "Fits with room to spare (36 of 48 GB)."}}}
+
+# a step another module registers BEFORE aux_onboarding.js loads (contract 1)
+EXTRA_STEP_JS = r"""
+(window.hermesOnboardingSteps = window.hermesOnboardingSteps || []).push({
+  key: "harness", title: "Harness step", sub: "Registered by the test, before the sheet loaded",
+  eyebrow: "Connections", after: "prefs", optional: true,
+  render: function (ctx) {
+    return '<p class="onb-p hx">An extra step body.</p>' +
+      '<div class="onb-row"><div class="onb-row-txt"><span class="onb-row-l">A field</span></div>' +
+      '<div class="onb-row-ctl"><input class="onb-time hx-in" aria-label="Harness field"></div></div>';
+  },
+  wire: function (node, ctx) { window.__hxWired = (window.__hxWired || 0) + 1; window.__hxCtx = ctx; },
+  save: function (ctx) {
+    window.__hxSaves = (window.__hxSaves || 0) + 1;
+    return Promise.resolve(window.__hxReply || { applied: ["Harness: saved by its own step"] });
+  },
+  statusRow: function (det) { return ["ok", "Harness", "A row from the registered step"]; },
+  summary: function (ctx) { return ["Harness: its summary line"]; }
+});
+"""
+
+# a stand-in for aux_advisor.js's window.hermesAdvisor (contract 2)
+ADVISOR_STUB_JS = r"""
+window.hermesAdvisor = { v: 1, step: {
+  render: function (ctx) {
+    return '<div class="adv-stub"><ul class="onb-stats"><li><span class="onb-stat-k">Chip</span>' +
+      '<span class="onb-stat-v">Apple M5 Max</span></li></ul>' +
+      '<fieldset role="group" aria-label="What will you use it for?" style="border:0;padding:0">' +
+      '<label class="onb-sw"><input type="checkbox" data-use="code">' +
+      '<span class="onb-sw-t" aria-hidden="true"></span><span class="onb-sw-l">Coding help</span></label>' +
+      '</fieldset><p class="onb-p adv-plan">Reading this Mac…</p></div>';
+  },
+  wire: function (node, ctx) {
+    window.__advWires = (window.__advWires || 0) + 1;
+    fetch("/api/advisor/state").then(function (r) { return r.json(); }).then(function (st) {
+      var rec = st.result.recommended, p = node.querySelector(".adv-plan");
+      if (p) p.textContent = rec.primary.label + " as the assistant, " + rec.background.label +
+        " for background work";
+      if (!window.__advPicked) {
+        window.__advPicked = 1;
+        ctx.setPick({ primary: rec.primary.id, background: rec.background.id,
+                      download_gb: rec.download_gb });
+      }
+    });
+  },
+  save: function (ctx) {
+    return fetch("/api/advisor/answers", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ uses: ["chat", "agent"], priority: "balanced" }) })
+      .then(function (r) {
+        if (r.status === 400) return r.json().then(function (j) { return { err: (j.errors || []).join(" · ") }; });
+        return {};
+      }).catch(function () { return {}; });
+  }
+} };
+"""
 
 STATIC = {"/": "index.html", "/index.html": "index.html"}
 MIME = {".js": "application/javascript", ".html": "text/html",
@@ -182,6 +262,24 @@ def install_routes(page):
             return route.fulfill(status=200, content_type="application/json",
                                  body=json.dumps({"ok": True, "done": False}))
 
+        # ---- round 3: the model advisor's routes (the stub advisor uses them)
+        if path == "/api/advisor/state":
+            CALLS["adv_state"] += 1
+            return route.fulfill(status=200, content_type="application/json",
+                                 body=json.dumps(ADV_STATE))
+        if path == "/api/advisor/answers":
+            body = {}
+            try:
+                body = json.loads(req.post_data or "{}")
+            except Exception:
+                pass
+            CALLS["adv_answers"].append(body)
+            if CUR.get("adv_400"):
+                return route.fulfill(status=400, content_type="application/json",
+                                     body=json.dumps({"ok": False, "errors": [CUR["adv_400"]]}))
+            return route.fulfill(status=200, content_type="application/json",
+                                 body=json.dumps({"ok": True, "answers": body}))
+
         # ---- a real download must NEVER be reachable from a test -----------
         if path == "/api/models/download":
             CALLS["download"] += 1
@@ -203,6 +301,15 @@ def install_routes(page):
         if path.startswith("/api/"):
             return route.fulfill(status=200, content_type="application/json",
                                  body=json.dumps({"ok": True}))
+
+        # ---- modules that change the sheet's shape -------------------------
+        # The legacy models body and the four built-in steps are what [1]-[8]
+        # check, and [9]/[10] bring their own extra step and advisor stand-in.
+        # Once index.html loads the real aux_advisor.js (it replaces the models
+        # body) and aux_github.js (it registers a step), they are answered 404
+        # here so this suite stays deterministic; each has its own suite.
+        if path in ("/aux_advisor.js", "/aux_github.js"):
+            return route.fulfill(status=404, body="")
 
         # ---- static files off disk ------------------------------------------
         fn = STATIC.get(path)
@@ -245,7 +352,12 @@ SHOT_PATHS = []
 
 def run():
     with sync_playwright() as pw:
-        browser = pw.chromium.launch()
+        try:
+            browser = pw.chromium.launch()
+        except Exception as e:               # Playwright without its Chromium
+            print("SKIP Playwright's Chromium could not start (%s)" % str(e).splitlines()[0][:120])
+            print("TESTS 0 passed 0 failed")
+            sys.exit(0)
         ctx = browser.new_context(viewport={"width": 1180, "height": 860},
                                   device_scale_factor=2)
         page = ctx.new_page()
@@ -303,19 +415,29 @@ def run():
         page.evaluate("window.hermesOnboarding.go(0)")
         page.wait_for_timeout(150)
         t1 = page.inner_text("#onb-sheet")
-        check("step 1 lists all five egress paths",
-              all(w in t1 for w in ("GitHub", "Telegram", "Claude", "Google",
-                                    "Weather, markets and news feeds")), t1[:200])
-        check("step 1 table has 5 body rows",
+        # C52: the row count follows NETWORK_FACTS instead of a hard-coded 5
+        nfacts = page.evaluate("window.hermesOnboarding.NETWORK_FACTS.length")
+        ntoggles = page.evaluate(
+            "window.hermesOnboarding.NETWORK_FACTS.filter(f => f.toggle).length")
+        check("step 1 lists every egress path",
+              all(w in t1 for w in ("GitHub", "Hugging Face", "News sites",
+                                    "Telegram", "Claude", "Google")), t1[:200])
+        check("step 1 table has one body row per NETWORK_FACTS entry",
               page.eval_on_selector_all("#onb-sheet table.onb-net tbody tr",
-                                        "e=>e.length") == 5)
-        check("the wired toggles are live checkboxes (3 of 5 rows)",
+                                        "e=>e.length") == nfacts)
+        check("the wired toggles are live checkboxes",
               page.eval_on_selector_all(
-                  "#onb-sheet table.onb-net input[data-pref]", "e=>e.length") == 3)
+                  "#onb-sheet table.onb-net input[data-pref]", "e=>e.length") == ntoggles)
+        check("R2-43: the unattended web search row has its own switch, Off by default",
+              page.eval_on_selector_all(
+                  "#onb-sheet table.onb-net input[data-pref='web_research']",
+                  "e=>e.map(x=>x.checked)") == [False])
+        check("R2-43: the News switch sits on the feeds row as well as the alerts row",
+              page.eval_on_selector_all(
+                  "#onb-sheet table.onb-net input[data-pref='news']", "e=>e.length") == 2)
         check("networkTableHTML is exported for the Data & Network panel",
               page.evaluate("() => typeof window.hermesOnboarding.networkTableHTML "
-                            "=== 'function' && "
-                            "window.hermesOnboarding.NETWORK_FACTS.length === 5"))
+                            "=== 'function'"))
         check("read-only mode renders no inputs (the future panel's use)",
               page.evaluate("""() => {
                 const h = window.hermesOnboarding.networkTableHTML(
@@ -338,6 +460,17 @@ def run():
               page.inner_text("#onb-sheet .onb-go").strip() == "Download recommended")
         check("secondary 'I'll choose later' is offered",
               "choose later" in page.inner_text("#onb-sheet .onb-foot"))
+        # C63: 'later' is its own action and sends no model pick
+        CALLS["apply"][:] = []
+        page.click("#onb-sheet .onb-foot button[data-act='later']")
+        page.wait_for_timeout(300)
+        check("C63: 'I'll choose later' sends no model pick to apply",
+              not any("primary" in b or "background" in b for b in CALLS["apply"]),
+              CALLS["apply"])
+        check("...and moves on to step 3",
+              page.evaluate("() => window.hermesOnboarding.state.step") == 2)
+        page.evaluate("window.hermesOnboarding.go(1)")
+        page.wait_for_timeout(150)
         check("alternatives are listed as a compact list",
               page.eval_on_selector_all("#onb-sheet ul.onb-alts li", "e=>e.length") >= 2)
         check("no card inside a card",
@@ -492,6 +625,17 @@ def run():
         check("no 'choose later' secondary when there is nothing to fetch",
               "choose later" not in page.inner_text("#onb-sheet .onb-foot"))
         SHOT_PATHS.append(shot(page, "64gb-light-2-models-already-downloaded"))
+        # C63: Continue used to send nothing — the picks never reached apply
+        CALLS["apply"][:] = []
+        page.click("#onb-sheet .onb-go")
+        page.wait_for_timeout(400)
+        mb = [b for b in CALLS["apply"] if "primary" in b]
+        check("C63: Continue posts the picks, with no download",
+              len(mb) == 1 and mb[0].get("primary") == M27B and
+              mb[0].get("background") == M9B and mb[0].get("download") is False,
+              CALLS["apply"])
+        check("...and advances to step 3",
+              page.evaluate("() => window.hermesOnboarding.state.step") == 2)
 
         # ==================================================================
         print("\n[5] done:true — the sheet must NOT appear")
@@ -586,6 +730,167 @@ def run():
         check("the page body never scrolls horizontally",
               page.evaluate("() => document.documentElement.scrollWidth <= "
                             "document.documentElement.clientWidth + 1"))
+
+        # ==================================================================
+        print("\n[9] round 3: a step registered through the extra-steps hook")
+        hpage = ctx.new_page()
+        herrs = []
+        hpage.on("pageerror", lambda e: herrs.append(
+            {"msg": str(e), "stack": (getattr(e, "stack", "") or "")}))
+        install_routes(hpage)
+        hpage.add_init_script(EXTRA_STEP_JS)      # BEFORE aux_onboarding.js loads
+        CUR["state"] = state_fixture(64, done=False)
+        CALLS["apply"][:] = []
+        hpage.goto(ORIGIN + "/", wait_until="domcontentloaded")
+        hpage.wait_for_function(JS_OPEN, timeout=8000)
+        check("the pre-load push is adopted: welcome, models, prefs, harness, done",
+              hpage.evaluate("window.hermesOnboarding.steps().join(',')") ==
+              "welcome,models,prefs,harness,done",
+              hpage.evaluate("window.hermesOnboarding.steps()"))
+        check("'Step 1 of 5'", hpage.inner_text("#onb-sheet .onb-step-n").strip() == "Step 1 of 5")
+        hpage.evaluate("window.hermesOnboarding.go(2)")
+        hpage.wait_for_timeout(150)
+        check("its status row joins the Connections rows",
+              "A row from the registered step" in hpage.inner_text("#onb-sheet"))
+        hpage.click("#onb-sheet .onb-go")          # prefs -> harness
+        hpage.wait_for_timeout(350)
+        check("Continue on prefs lands on the extra step",
+              hpage.evaluate("window.hermesOnboarding.steps()[window.hermesOnboarding.state.step]")
+              == "harness")
+        t9 = hpage.inner_text("#onb-sheet")
+        check("its own title, eyebrow and body render", "Harness step" in t9 and
+              "CONNECTIONS" in t9.upper() and "An extra step body." in t9, t9[:300])
+        check("...wired with the step's body node", hpage.evaluate("window.__hxWired") >= 1)
+        check("an extra step offers Skip next to Continue",
+              hpage.eval_on_selector_all("#onb-sheet .onb-foot button[data-act='skip']",
+                                         "e=>e.length") == 1)
+        for theme in ("light", "dark"):
+            set_theme(hpage, theme)
+            hpage.wait_for_timeout(120)
+            SHOT_PATHS.append(shot(hpage, "64gb-%s-4-extra-step" % theme))
+        set_theme(hpage, "light")
+        hpage.fill("#onb-sheet .hx-in", "typed by the owner")
+        hpage.evaluate("window.__hxReply = {err: 'That key cannot see the repository.'}")
+        hpage.click("#onb-sheet .onb-go")
+        hpage.wait_for_timeout(300)
+        check("save() {err}: the sheet stays on the step",
+              hpage.evaluate("window.hermesOnboarding.steps()[window.hermesOnboarding.state.step]")
+              == "harness")
+        check("...the error shows in the sheet's error line",
+              hpage.inner_text("#onb-sheet .onb-err").strip() ==
+              "That key cannot see the repository." and hpage.is_visible("#onb-sheet .onb-err"))
+        check("...and what the owner typed is still there (no re-render)",
+              hpage.input_value("#onb-sheet .hx-in") == "typed by the owner")
+        check("...and focus is still inside the sheet (the action row), not parked on <body>",
+              hpage.evaluate("() => !!document.activeElement && "
+                             "document.activeElement !== document.body && "
+                             "!!document.activeElement.closest('#onb-sheet')"))
+        SHOT_PATHS.append(shot(hpage, "64gb-light-4-extra-step-error"))
+        saves = hpage.evaluate("window.__hxSaves")
+        hpage.click("#onb-sheet .onb-foot button[data-act='skip']")
+        hpage.wait_for_timeout(300)
+        check("Skip goes on to Ready WITHOUT calling save()",
+              hpage.evaluate("window.hermesOnboarding.state.step") == 4 and
+              hpage.evaluate("window.__hxSaves") == saves)
+        hpage.evaluate("window.hermesOnboarding.go(3)")
+        hpage.wait_for_timeout(200)
+        hpage.keyboard.press("Escape")
+        hpage.wait_for_timeout(150)
+        check("first run: Esc on the extra step is swallowed", hpage.evaluate(JS_OPEN))
+        hpage.evaluate("window.__hxReply = null")
+        hpage.click("#onb-sheet .onb-go")
+        hpage.wait_for_timeout(350)
+        t9b = hpage.inner_text("#onb-sheet")
+        check("a clean save(): its applied line and summary() line are on the Ready step",
+              "Harness: saved by its own step" in t9b and "Harness: its summary line" in t9b,
+              t9b[:500])
+        check("'Step 5 of 5' and Start", hpage.inner_text("#onb-sheet .onb-step-n").strip() ==
+              "Step 5 of 5" and hpage.inner_text("#onb-sheet .onb-go").strip() == "Start")
+        small9 = hpage.evaluate("""() => {
+          const bad = [];
+          document.querySelectorAll('#onb-sheet .onb-foot button').forEach(e => {
+            const r = e.getBoundingClientRect();
+            if (r.width && r.height < 39.5) bad.push(e.textContent + ':' + Math.round(r.height));
+          });
+          return bad;
+        }""")
+        check("every action-row button has a >=40px hit area", small9 == [], small9)
+        mine9 = [e for e in herrs if "aux_onboarding" in (e["stack"] or "")]
+        check("no page error from aux_onboarding.js with the extra step", mine9 == [], mine9[:3])
+        hpage.close()
+
+        # ==================================================================
+        print("\n[10] round 3: the models step through a (stub) model advisor")
+        apage = ctx.new_page()
+        aerrs = []
+        apage.on("pageerror", lambda e: aerrs.append(
+            {"msg": str(e), "stack": (getattr(e, "stack", "") or "")}))
+        install_routes(apage)
+        apage.add_init_script(ADVISOR_STUB_JS)
+        CUR["state"] = state_fixture(64, done=False)
+        CUR.pop("adv_400", None)
+        CALLS["apply"][:] = []
+        CALLS["adv_answers"][:] = []
+        CALLS["adv_state"] = 0
+        apage.goto(ORIGIN + "/", wait_until="domcontentloaded")
+        apage.wait_for_function(JS_OPEN, timeout=8000)
+        apage.evaluate("window.hermesOnboarding.go(1)")
+        apage.wait_for_function("() => /Qwen3\\.8-27B as the assistant/.test("
+                                "(document.querySelector('#onb-sheet .adv-plan')||{}).textContent||'')",
+                                timeout=4000)
+        t10 = apage.inner_text("#onb-sheet")
+        check("the advisor renders the models step's body (its own routes, stubbed here)",
+              apage.eval_on_selector_all("#onb-sheet .onb-adv .adv-stub", "e=>e.length") == 1
+              and CALLS["adv_state"] >= 1)
+        check("...instead of the legacy recommendation block",
+              apage.eval_on_selector_all("#onb-sheet .onb-rec", "e=>e.length") == 0)
+        check("...under the sheet's own heading", "Your Mac, and the brain that fits it" in t10)
+        check("the action row quotes the advisor's plan: 'Download recommended (~23 GB)'",
+              apage.inner_text("#onb-sheet .onb-go").strip() == "Download recommended (~23 GB)",
+              apage.inner_text("#onb-sheet .onb-go"))
+        geo = apage.evaluate("""() => {
+          const b = document.querySelector('#onb-sheet .onb-adv').getBoundingClientRect();
+          const f = document.querySelector('#onb-sheet .onb-foot').getBoundingClientRect();
+          return [b.top, f.top];
+        }""")
+        check("...and sits BELOW the advisor body", geo[0] < geo[1], geo)
+        check("setPick repainted only the action row (the advisor wired once)",
+              apage.evaluate("window.__advWires") == 1, apage.evaluate("window.__advWires"))
+        for theme in ("light", "dark"):
+            set_theme(apage, theme)
+            apage.wait_for_timeout(120)
+            SHOT_PATHS.append(shot(apage, "64gb-%s-2-models-advisor" % theme))
+        set_theme(apage, "light")
+        CUR["adv_400"] = "uses: 'uncensored' needs uncensored_ack: true"
+        apage.click("#onb-sheet .onb-foot button[data-act='later']")
+        apage.wait_for_timeout(350)
+        check("the advisor's 400 keeps the sheet on the models step",
+              apage.evaluate("window.hermesOnboarding.state.step") == 1)
+        check("...with its errors in the error line",
+              "needs uncensored_ack" in apage.inner_text("#onb-sheet .onb-err"))
+        check("...and nothing was posted to /api/onboarding/apply",
+              not any("primary" in b for b in CALLS["apply"]), CALLS["apply"])
+        CUR.pop("adv_400", None)
+        apage.click("#onb-sheet .onb-foot button[data-act='later']")
+        apage.wait_for_timeout(350)
+        check("'later' after a clean save: the answers were posted, no model pick, step 3",
+              len(CALLS["adv_answers"]) == 2 and apage.evaluate("window.hermesOnboarding.state.step") == 2
+              and not any("primary" in b for b in CALLS["apply"]), CALLS["adv_answers"])
+        apage.evaluate("window.hermesOnboarding.go(1)")
+        apage.wait_for_timeout(250)
+        CALLS["apply"][:] = []
+        apage.click("#onb-sheet .onb-go")          # Download recommended (~23 GB)
+        apage.wait_for_timeout(400)
+        dl = [b for b in CALLS["apply"] if b.get("download") is True]
+        check("Download posts the advisor's picks to apply, download:true",
+              len(dl) == 1 and dl[0].get("primary") == M27B and dl[0].get("background") == M9B,
+              CALLS["apply"])
+        check("...and the progress block shows under the advisor body",
+              "Downloading" in apage.inner_text("#onb-sheet .onb-dl"))
+        check("/api/models/download was never called", CALLS["download"] == 0, CALLS["download"])
+        mine10 = [e for e in aerrs if "aux_onboarding" in (e["stack"] or "")]
+        check("no page error from aux_onboarding.js with the advisor", mine10 == [], mine10[:3])
+        apage.close()
 
         browser.close()
 

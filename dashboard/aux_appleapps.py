@@ -74,10 +74,14 @@ def _aa_get_handler(ctx):
 def _aa_post_handler(ctx):
     b = ctx.body if isinstance(getattr(ctx, "body", None), dict) else {}
     patch = {}
-    if "reminders" in b:
-        patch["reminders"] = bool(b.get("reminders"))
-    if "notes" in b:
-        patch["notes"] = bool(b.get("notes"))
+    for k in ("reminders", "notes"):
+        if k in b:
+            # a JSON boolean only: bool("false") is True, and these two
+            # switches decide whether an Apple app is launched and scripted
+            # (2026-10-21 audit C59)
+            if not isinstance(b[k], bool):
+                return ({"ok": False, "error": "%s must be true or false" % k}, 400)
+            patch[k] = b[k]
     if not patch:
         return ({"ok": False,
                  "error": "nothing to change — send 'reminders' and/or "

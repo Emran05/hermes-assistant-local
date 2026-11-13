@@ -19,11 +19,15 @@ halves were wrong:
 (docs/audits/reproduce_20260910.py's duplicate_fallback() showed both.)
 
 AFTER: hermes_rpc stamps `submit_sent` (the request bytes left the socket),
-`submitted` (serve acknowledged) and `tool_events` on the job.  The one-shot
-fallback runs ONLY when nothing was submitted, and it uses `chat["serve_key"]`
-— falling back to a brand-new session, and saying so, if the CLI cannot resolve
-it.  After submission the job finishes with an explicit "check the conversation
-before repeating an action" instead of re-running anything.
+`submitted` (serve acknowledged) and `tool_events` on the job.  After submission
+the job finishes with an explicit "check the conversation before repeating an
+action" instead of re-running anything.
+
+2026-10-21 (audit C36/C118): there is no one-shot fallback BEFORE submission
+either.  `hermes -z` auto-approves every non-hardline command with the whole
+`cli` toolset, and it ignores `--continue`, so the "resume on the serve_key"
+half of A04 could never have resumed anything.  Sections 2-4 now pin that the
+CLI is never invoked and the reply says nothing was run.
 
 Real functions, extracted with `ast`.  No dashboard, no serve backend, no
 model, no subprocess: `hermes_rpc.run_turn` and `run_agent` are stubs and the
@@ -120,10 +124,12 @@ def worker_namespace(scratch, rec):
     definitions("dashboard/server.py",
                 ["read_json", "write_json", "chat_path", "load_chat",
                  "_new_message_id", "stamp_message_ids", "_save_chat_locked",
-                 "save_chat", "save_chat_update", "_finish_chat_job"], ns)
-    # the module-level regex _chat_worker uses to spot the CLI's
-    # "No session found matching '<id>'." — taken from the real source, not
-    # re-typed here, so a change to it is caught rather than duplicated.
+                 "save_chat", "save_chat_update", "_finish_chat_job", "_clear_awaiting_reply",
+                 # write_json's C27 move-aside of a corrupt target
+                 "_json_unparsable", "_quarantine_corrupt"], ns)
+    # _CLI_NO_SESSION_RE (the CLI's "No session found matching") was removed
+    # with the fallback it served (C118); taken from the source if a build
+    # still has it, so this harness runs against either.
     ns["re"] = re
     tree = ast.parse((REPO / "dashboard/server.py").read_text())
     for node in tree.body:
@@ -133,7 +139,6 @@ def worker_namespace(scratch, rec):
             mod = ast.fix_missing_locations(
                 ast.Module(body=[node], type_ignores=[]))
             exec(compile(mod, "server.py", "exec"), ns)
-    assert "_CLI_NO_SESSION_RE" in ns, "_CLI_NO_SESSION_RE not found in server.py"
     definitions("dashboard/server.py", ["_chat_worker"], ns)
     return ns
 
@@ -181,67 +186,62 @@ def test_no_retry_after_submit():
 
 
 # ---------------------------------------------------------------------------
-# 2. a pre-submission failure DOES fall back — with the right session id
+# 2-4. a pre-submission failure runs NOTHING (C36/C118) and says so
 # ---------------------------------------------------------------------------
+def _refused(label, sid, chat, prompt, no_client=False):
+    with tempfile.TemporaryDirectory(prefix="hermes-a04-") as d:
+        rec = Recorder("before-submit", serve_key=chat.get("serve_key", ""))
+        ns = worker_namespace(Path(d), rec)
+        if no_client:                     # `import hermes_rpc` failed at boot
+            ns["hermes_rpc"] = None
+        ns["save_chat"](sid, chat)
+        job = new_job()
+        ns["_chat_worker"](job, sid, prompt)
+        check("C36 (%s): the one-shot CLI is NOT invoked" % label,
+              rec.continued == [], rec.continued)
+        check("...so nothing ran (%s)" % label, rec.actions == [], rec.actions)
+        check("the turn is reported as failed and finished (%s)" % label,
+              job["ok"] is False and job["done"] is True, job)
+        check("the reply says nothing was run (%s)" % label,
+              "nothing was run" in job["reply"], job["reply"])
+        check("the reply names the backend that is down (%s)" % label,
+              "hermes serve" in job["reply"], job["reply"])
+        check("the status line no longer claims one-shot mode (%s)" % label,
+              "one-shot mode" not in job["status"], job["status"])
+        msgs = [m["text"] for m in ns["load_chat"](sid)["messages"]]
+        check("the refusal is persisted after the user turn (%s)" % label,
+              msgs == [chat["messages"][0]["text"], job["reply"]], msgs)
+        check("the durable serve key is untouched (%s)" % label,
+              ns["load_chat"](sid).get("serve_key", "")
+              == chat.get("serve_key", ""))
+        svc = "com.hermes.dashboard" if no_client else "com.hermes.serve"
+        check("the restart hint names the service that needs it (%s)" % label,
+              svc in job["reply"], job["reply"])
+
+
 def test_fallback_uses_serve_key():
-    with tempfile.TemporaryDirectory(prefix="hermes-a04-") as d:
-        rec = Recorder("before-submit", serve_key="20260910_120000_abc123")
-        ns = worker_namespace(Path(d), rec)
-        ns["save_chat"]("chat-abc", {"serve_key": "20260910_120000_abc123",
-                                     "messages": [{"role": "user",
-                                                   "text": "Summarise this"}]})
-        job = new_job()
-        ns["_chat_worker"](job, "chat-abc", "Summarise this")
-
-        check("THE FIX: --continue gets the DURABLE serve key, not 'chat-abc'",
-              rec.continued == ["20260910_120000_abc123"], rec.continued)
-        check("the dashboard conversation key is never passed to the CLI",
-              "chat-abc" not in rec.continued, rec.continued)
-        check("the fallback answered", job["ok"] is True and job["done"] is True,
-              job)
-        check("the answer is persisted",
-              [m["text"] for m in ns["load_chat"]("chat-abc")["messages"]]
-              == ["Summarise this", "Done"])
+    _refused("a saved serve_key", "chat-abc",
+             {"serve_key": "20260910_120000_abc123",
+              "messages": [{"role": "user", "text": "Summarise this"}]},
+             "Summarise this")
 
 
-# ---------------------------------------------------------------------------
-# 3. no serve_key yet (first turn) -> a NEW session, no bogus --continue
-# ---------------------------------------------------------------------------
 def test_fallback_without_a_key():
-    with tempfile.TemporaryDirectory(prefix="hermes-a04-") as d:
-        rec = Recorder("before-submit")
-        ns = worker_namespace(Path(d), rec)
-        ns["save_chat"]("chat-new", {"messages": [{"role": "user",
-                                                   "text": "Hello"}]})
-        job = new_job()
-        ns["_chat_worker"](job, "chat-new", "Hello")
-        check("a conversation with no serve_key starts a NEW CLI session",
-              rec.continued == [None], rec.continued)
-        check("it answered", job["ok"] is True, job)
+    _refused("no serve_key yet", "chat-new",
+             {"messages": [{"role": "user", "text": "Hello"}]}, "Hello")
 
 
-# ---------------------------------------------------------------------------
-# 4. the CLI cannot resolve the key -> retry once as a new session, and SAY so
-# ---------------------------------------------------------------------------
 def test_unresolvable_key():
-    with tempfile.TemporaryDirectory(prefix="hermes-a04-") as d:
-        # serve minted a key but never persisted a row for it
-        rec = Recorder("before-submit", serve_key="a-key-the-cli-knows")
-        ns = worker_namespace(Path(d), rec)
-        ns["save_chat"]("chat-x", {"serve_key": "a-key-the-cli-never-stored",
-                                   "messages": [{"role": "user",
-                                                 "text": "Hi"}]})
-        job = new_job()
-        ns["_chat_worker"](job, "chat-x", "Hi")
-        check("it tries the saved key first, then a fresh session",
-              rec.continued == ["a-key-the-cli-never-stored", None],
-              rec.continued)
-        check("the user is told the old session could not be resumed",
-              "could not be resumed" in job["reply"], job["reply"])
-        check("and that the new one has no memory of the conversation",
-              "no memory" in job["reply"], job["reply"])
-        check("nothing was submitted, so running once here is safe",
-              rec.actions == ["CLI repeated the requested write"], rec.actions)
+    _refused("a key the CLI never stored", "chat-x",
+             {"serve_key": "a-key-the-cli-never-stored",
+              "messages": [{"role": "user", "text": "Hi"}]}, "Hi")
+
+
+def test_no_serve_client():
+    _refused("hermes_rpc failed to import", "chat-y",
+             {"serve_key": "20260910_120000_abc123",
+              "messages": [{"role": "user", "text": "Hi again"}]}, "Hi again",
+             no_client=True)
 
 
 # ---------------------------------------------------------------------------
@@ -308,8 +308,8 @@ def test_on_sent_callback():
           'job.get("submit_sent")' in worker and 'job.get("submitted")' in worker)
     check("the worker no longer passes the dashboard session key to run_agent",
           "run_agent(prompt, session=session)" not in worker)
-    check("the worker uses the chat's serve_key",
-          'meta.get("serve_key")' in worker)
+    check("C36: the worker never shells out to the one-shot CLI at all",
+          "run_agent(" not in worker)
 
 
 def main():
@@ -317,12 +317,14 @@ def main():
           "submission (docs/audits/2026-09-10-codebase-audit.md)")
     print("\n1. the audit probe: a drop AFTER prompt.submit")
     test_no_retry_after_submit()
-    print("\n2. a drop BEFORE prompt.submit falls back on the durable key")
+    print("\n2. a drop BEFORE prompt.submit runs nothing (C36/C118)")
     test_fallback_uses_serve_key()
     print("\n3. no serve_key yet")
     test_fallback_without_a_key()
-    print("\n4. the CLI cannot resolve the saved key")
+    print("\n4. a saved key the CLI could never resolve")
     test_unresolvable_key()
+    print("\n4b. the serve client never loaded (hermes_rpc import failed)")
+    test_no_serve_client()
     print("\n5. hermes_rpc's submitted/tool-event bookkeeping")
     test_on_sent_callback()
     print("\nTESTS %d passed %d failed" % (PASSES[0], len(FAILS)))

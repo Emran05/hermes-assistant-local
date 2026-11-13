@@ -18,6 +18,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.environ.get("HERMES_REPO") or os.path.dirname(
     os.path.dirname(os.path.dirname(_HERE)))
 AUX = os.path.join(REPO, "dashboard", "aux_evals.py")
+sys.path.insert(0, os.path.join(REPO, "tools", "tests", "lib"))
+import server_real  # noqa: E402  the REAL settings_update & co (C84)
 
 TMP = tempfile.mkdtemp(prefix="evals-test-")
 SETTINGS = os.path.join(TMP, "settings.json")
@@ -60,31 +62,13 @@ def _write_json(p, obj):
 _STATE_LOCK = threading.Lock()
 
 
-def settings_update(mutate_fn):
-    """Stand-in for server.py's settings_update() — ONE locked
-    read-modify-write of settings.json, the only way an aux module is allowed
-    to write it since the 2026-09-10 audit (A01)."""
-    with _STATE_LOCK:
-        s = _read_json(SETTINGS, {})
-        if not isinstance(s, dict):
-            s = {}
-        out = mutate_fn(s)
-        if isinstance(out, dict):
-            s = out
-        _write_json(SETTINGS, s)
-        return json.loads(json.dumps(s))
-
-
 G.update({
     "DATA": TMP,
     "MODEL_URL": "http://127.0.0.1:8080/v1/models",
-    "SETTINGS_FILE": SETTINGS,
     "CHAT_JOBS": CHAT_JOBS,
-    "_state_lock": _STATE_LOCK,
-    "settings_update": settings_update,
-    "get_settings": lambda: _read_json(SETTINGS, {}) or {},
-    "write_json": _write_json,
-    "read_json": _read_json,
+    # server.py's own settings_update / settings_set / get_settings /
+    # read_json / write_json, sharing the module's _state_lock (C84)
+    **server_real.settings_api(SETTINGS, _STATE_LOCK),
     "active_model": lambda: STATE["active"],
     "model_online": lambda: STATE["online"],
     "agent_paused": lambda: STATE["paused"],
@@ -354,7 +338,7 @@ _write_json(SETTINGS, {"evals": {"enabled": True, "at_hour": 0,
                                  "wake_if_ac": False, "days": 1}})
 G["_ev_meta_set"]("last_sched_date", "")
 n0 = sqlite3.connect(dbp).execute("SELECT COUNT(*) FROM runs").fetchone()[0]
-out = G["_ev_tick"]()
+out = G["_ev_tick"](NOW)        # 14:00 today: a real clock after 23:00 is "slept through"
 n1 = sqlite3.connect(dbp).execute("SELECT COUNT(*) FROM runs").fetchone()[0]
 check("tick ran the suite", out.get("run") is True and n1 == n0 + 1, (out, n0, n1))
 check("tick recorded trigger=scheduled",
@@ -362,7 +346,7 @@ check("tick recorded trigger=scheduled",
           "SELECT trigger FROM runs ORDER BY id DESC LIMIT 1").fetchone()[0] == "scheduled")
 check("tick set the guard", G["_ev_meta_get"]("last_sched_date") == TODAY,
       G["_ev_meta_get"]("last_sched_date"))
-out2 = G["_ev_tick"]()
+out2 = G["_ev_tick"](NOW)
 n2 = sqlite3.connect(dbp).execute("SELECT COUNT(*) FROM runs").fetchone()[0]
 check("second tick same day is a no-op", out2.get("run") is False and n2 == n1,
       (out2, n1, n2))
@@ -512,7 +496,13 @@ _write_json(SETTINGS, {"evals": {"enabled": True, "at_hour": 13, "at_minute": 0,
 G["_ev_meta_set"]("last_sched_date", "")
 G["_EV_MEM_GUARD"] = ""
 before = n_runs()
-out = G["_ev_tick"](now_ts=at(23, 30))
+# the card reads `last` by ts (then id): run after 23:30 on the real clock, the
+# manual rows above are NEWER than a skip pinned at 23:30, so the skip is
+# stamped no earlier than the newest row (a tie goes to the newer id). That is
+# still before midnight, i.e. today, and still after the 23:00 cutoff.
+_newest = sqlite3.connect(dbp).execute("SELECT MAX(ts) FROM runs").fetchone()[0] or 0
+SKIP_AT = max(at(23, 30), _newest)
+out = G["_ev_tick"](now_ts=SKIP_AT)
 check("tick marks the day done without running",
       out["run"] is False and out["mark_done"] is True and
       out["reason"] == "slept through the window", out)
@@ -532,7 +522,7 @@ check("the skip row is what the card reads as `last`",
       (last, lcases))
 check("the guard flipped so it is written once", G["_ev_meta_get"]("last_sched_date") == TODAY,
       G["_ev_meta_get"]("last_sched_date"))
-out2 = G["_ev_tick"](now_ts=at(23, 31))
+out2 = G["_ev_tick"](now_ts=max(at(23, 31), SKIP_AT))
 check("a second tick that day writes nothing more", n_runs() == before + 1, n_runs())
 
 # ------------------------------------------- 11. a dead store never loops
@@ -575,12 +565,12 @@ _write_json(SETTINGS, {"evals": {"enabled": True, "at_hour": 0, "at_minute": 0,
                                  "days": 1}})
 G["_ev_meta_set"]("last_sched_date", "")
 G["_EV_MEM_GUARD"] = ""
-out = G["_ev_tick"]()
+out = G["_ev_tick"](NOW)        # a pinned 14:00, never the real (possibly 23:xx) clock
 check("the suite ran once", out["run"] is True and ran["n"] == 1, (out, ran["n"]))
 check("the in-memory guard was set too", G["_EV_MEM_GUARD"] == TODAY, G["_EV_MEM_GUARD"])
 G["_ev_meta_set"]("last_sched_date", "")     # the store loses the guard
 n_before = n_runs()
-out = G["_ev_tick"]()
+out = G["_ev_tick"](NOW)
 check("a lost guard does NOT buy a second run",
       out["run"] is False and out["reason"] == "already ran today", out)
 check("still one completion", ran["n"] == 1, ran["n"])
@@ -609,9 +599,9 @@ check("settings.json holds the CLAMPED values, not the raw ones",
       (stored.get("at_hour"), stored.get("at_minute"), stored.get("days")) == (23, 0, 30),
       stored)
 r = G["_POSTS"]["/api/evals/settings"](Ctx({"enabled": "sure"}))
-check("a truthy string is stored as a real bool",
-      _read_json(SETTINGS, {})["evals"]["enabled"] is True,
-      _read_json(SETTINGS, {})["evals"])
+check("a string is not a bool: 400, and nothing stored (C59)",
+      isinstance(r, tuple) and r[1] == 400
+      and "enabled" not in _read_json(SETTINGS, {}).get("evals", {}), r)
 
 # ----------------------------------- 14. an evals.db from 1.2.3 migrates
 print("\n== 14. migration of a pre-`errors` db ==")

@@ -21,9 +21,11 @@ is ledgered, every job is run once by hand before it's trusted, and the whole
 fleet is audited weekly.** This is the skill that keeps every other skill honest.
 
 Core safety fact you design around, never against: **an unattended cron run
-inherits fail-closed approvals.** Nothing and nobody is present to click
-"approve", so any approval-gated action (writes outside safe dirs, dangerous
-terminal patterns, deletes) simply fails. Therefore a cron body must be
+has nobody to approve anything.** Whatever is flagged — dangerous terminal
+patterns (`approvals.cron_mode: deny`), desktop actions and writes to shell rc
+files, LaunchAgents, ~/.hermes or the install dir (the approval-gate plugin) —
+simply fails, and whatever is NOT flagged (an ordinary file write, a delete
+Hermes does not pattern-match) runs unreviewed. Therefore a cron body must be
 **read-tier + notify-tier ONLY**: read files, web_search/web_extract, curl to
 loopback GETs, memory reads, and `hermes send --to telegram` for delivery.
 Never write a cron that assumes a grant. If a scheduled task genuinely needs a
@@ -171,8 +173,10 @@ the audit is that the fleet never silently accretes.
 - **Ping-on-nothing** — a job that messages "no updates today". Fix: `[SILENT]`
   contract in the prompt, always.
 - **Approval-assuming cron** — a body that tries to write/delete/install
-  unattended. It will fail closed every run and show up as a zombie. Fix:
-  read/notify-tier body; gated work becomes a notification asking the user.
+  unattended. Nobody is there to approve: whatever Hermes or the approval-gate
+  flags is blocked every run (a zombie), and whatever they do not flag runs
+  unreviewed. Fix: read/notify-tier body; gated work becomes a notification
+  asking the user.
 - **Overlapping schedules** — several jobs firing the same minute pile local-LLM
   load (RAM/TTFT). Fix: stagger minutes; check `/api/metrics` during audit.
 - **Unbounded output** — "summarize the news" grows without a threshold. Fix:
@@ -187,23 +191,31 @@ the audit is that the fleet never silently accretes.
 
 ## 6. SNAPSHOT
 
-After any fleet change (create/edit/remove), fold the roster into the config
-snapshot so the fleet is documented and restorable:
+After any fleet change (create/edit/remove), make sure the fleet is documented
+and restorable: re-read `~/.hermes/cron/jobs.json` (READ) and confirm every job
+has its `cron-ledger.md` entry. That pair is the complete restorable
+description of the fleet: jobs.json says *what runs*, the ledger says *why*.
 
-```bash
-curl -s -X POST http://127.0.0.1:7788/api/config/export -H 'Content-Type: application/json' -d '{}'
-```
-
-and verify `~/.hermes/cron/jobs.json` is covered by the snapshot context. The
-pair (jobs.json + cron-ledger.md) is the complete restorable description of
-the fleet: jobs.json says *what runs*, the ledger says *why*.
+Do NOT `POST /api/config/export`. The dashboard's config snapshot does not
+contain cron jobs at all (its sections are layout, settings, models,
+permissions and agent config), and an export overwrites the owner's own
+`~/.hermes/dashboard/state-snapshot.json`. If the owner wants a config
+snapshot, they export it from Settings themselves. `GET /api/config/snapshot` is a read-only preview if
+you need to look.
 
 ## Gotchas
 
 - Schedules are stored 24-hour internally but are ALWAYS echoed to the user in
   12-hour form ("daily 6:45 AM", never "06:45").
-- `hermes -z` one-shots (and every unattended cron run) **cannot approve
-  anything** — approval-gated calls fail closed. Design bodies read/notify-tier.
+- Nobody can approve anything in a `hermes -z` one-shot or an unattended cron
+  run, and the two do NOT behave alike. A cron run blocks the terminal
+  commands Hermes flags as dangerous (`approvals.cron_mode: deny`, the
+  default). `hermes -z` runs in YOLO mode: Hermes auto-approves every
+  dangerous command except its hard-coded floor (rm -rf /, mkfs, shutdown...).
+  In both, the approval-gate plugin blocks computer_use desktop actions and
+  writes to shell rc files, LaunchAgents, ~/.hermes and the install dir.
+  Anything nobody flags just runs. Design bodies read/notify-tier and never
+  rely on an approval prompt to stop them.
 - Deleting or editing a cron requires the user's approval of an audit plan (or
   an explicit user request) first. Pausing a misfiring zombie mid-incident is
   acceptable; say so in the next message and put it in the audit.

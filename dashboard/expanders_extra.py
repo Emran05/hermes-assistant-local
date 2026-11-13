@@ -656,8 +656,12 @@ def expand_messages():
                 return {"available": False, "grant": True,
                         "reason": "Full Disk Access needed to read Messages."}
 
-            now = time.time()
-            today_apple_ns = int((now - (now % 86400) - 978307200) * 1e9)
+            # LOCAL midnight, as MessagesSync does (Calendar.current.startOfDay);
+            # `now - now % 86400` was UTC midnight, hours off anywhere but UTC
+            lt = time.localtime()
+            midnight = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,
+                                    0, 0, 0, 0, 0, -1))
+            today_apple_ns = int((midnight - 978307200) * 1e9)
             convos, total_unread, today_count = [], 0, 0
 
             for c in chats:
@@ -912,6 +916,45 @@ def expand_recent():
         return {"available": False,
                 "reason": "recent scan failed (%s)" % type(e).__name__}
 
+
+def _files_reveal_handler(ctx):
+    """POST /api/files/reveal {path} — show a Recent Activity file in Finder
+    (B18). The rows used to hand a file:// URL to window.open, which the app
+    shell passes to NSWorkspace.open: that OPENS the file with its default
+    handler, so a .command/.app/.terminal in a granted folder RAN on one click.
+    `open -R` only selects it in a Finder window. Only paths inside a folder
+    the owner granted (realpath, so a symlink cannot point out of one)."""
+    body = ctx.body if isinstance(ctx.body, dict) else {}
+    p = body.get("path")
+    if (not isinstance(p, str) or not p or len(p) > 4096 or "\x00" in p
+            or not os.path.isabs(p)):
+        return ({"ok": False, "error": "bad path"}, 400)
+    rp = os.path.realpath(p)
+    inside = False
+    for d in (get_access().get("dirs") or []):
+        try:
+            rd = os.path.realpath(d)
+            if os.path.commonpath([rp, rd]) == rd:
+                inside = True
+                break
+        except (TypeError, ValueError):
+            continue
+    if not inside:
+        return ({"ok": False, "error": "not in a granted folder"}, 403)
+    if not os.path.lexists(rp):
+        return ({"ok": False, "error": "not found"}, 404)
+    try:
+        r = subprocess.run(["/usr/bin/open", "-R", rp], capture_output=True,
+                           timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ({"ok": False, "error": "could not reveal"}, 500)
+    if r.returncode != 0:
+        return ({"ok": False, "error": "could not reveal"}, 500)
+    return {"ok": True}
+
+
+register_post("/api/files/reveal", _files_reveal_handler)
+
 # ===== folders =====
 def expand_folders():
     """Rich manager for the folders the user has granted the assistant.
@@ -1112,7 +1155,7 @@ NEWS_DESK_SECTIONS = [
         ("https://feeds.arstechnica.com/arstechnica/index", "Ars Technica"),
     ]),
     ("World", [
-        ("http://feeds.bbci.co.uk/news/world/rss.xml", "BBC World"),
+        ("https://feeds.bbci.co.uk/news/world/rss.xml", "BBC World"),
         ("https://feeds.npr.org/1004/rss.xml", "NPR World"),
         ("https://www.aljazeera.com/xml/rss/all.xml", "Al Jazeera"),
     ]),
@@ -1195,6 +1238,7 @@ def _news_parse_feed(url, label=None, limit=10):
                 desc = raw_d
             elif ct in ("pubDate", "published", "updated", "date") and not date_raw:
                 date_raw = (c.text or "").strip()
+        link = _http_url(link)          # B18: a feed picks the scheme
         if not title or not link:
             continue
         title_c = _strip_html(title, 160)
@@ -1278,9 +1322,28 @@ def _sys_net_bytes():
     return ib, ob
 
 
+def _sys_ram_pct():
+    """RAM in use, % (unrounded), from ONE vm_stat read; None if it fails.
+    hw.memsize is read once per process."""
+    global _SYS_MEMSIZE
+    try:
+        vm = subprocess.run(["vm_stat"], capture_output=True, text=True,
+                            timeout=3).stdout
+        pg = 16384
+        st = dict(re.findall(r'^"?([\w -]+)"?:\s+(\d+)', vm, re.M))
+        free = (int(st.get("Pages free", 0)) + int(st.get("Pages inactive", 0))
+                + int(st.get("Pages purgeable", 0))) * pg
+        if _SYS_MEMSIZE is None:
+            _SYS_MEMSIZE = int(subprocess.run(
+                ["/usr/sbin/sysctl", "-n", "hw.memsize"], capture_output=True,
+                text=True, timeout=3).stdout)
+        return 100.0 * (1 - free / _SYS_MEMSIZE)
+    except Exception:
+        return None
+
+
 def _sys_sample():
     """One {ts, cpu_pct, ram_pct, net_in_bytes, net_out_bytes} sample."""
-    global _SYS_MEMSIZE
     ts = int(time.time())
     cpu = None
     try:  # ps aggregation: sum %CPU across processes / cores (responsive)
@@ -1299,21 +1362,9 @@ def _sys_sample():
                             (os.cpu_count() or 1)), 1)
         except Exception:
             pass
-    ram = None
-    try:
-        vm = subprocess.run(["vm_stat"], capture_output=True, text=True,
-                            timeout=3).stdout
-        pg = 16384
-        st = dict(re.findall(r'^"?([\w -]+)"?:\s+(\d+)', vm, re.M))
-        free = (int(st.get("Pages free", 0)) + int(st.get("Pages inactive", 0))
-                + int(st.get("Pages purgeable", 0))) * pg
-        if _SYS_MEMSIZE is None:
-            _SYS_MEMSIZE = int(subprocess.run(
-                ["/usr/sbin/sysctl", "-n", "hw.memsize"], capture_output=True,
-                text=True, timeout=3).stdout)
-        ram = round(100.0 * (1 - free / _SYS_MEMSIZE), 1)
-    except Exception:
-        pass
+    ram = _sys_ram_pct()
+    if ram is not None:
+        ram = round(ram, 1)
     nin = nout = None
     try:
         nin, nout = _sys_net_bytes()
@@ -1323,14 +1374,82 @@ def _sys_sample():
             "net_in_bytes": nin, "net_out_bytes": nout}
 
 
+# C90: the sampler used to spawn ps + vm_stat + netstat every 5 s forever,
+# window or no window, and /api/sys (system_status, below) spawned vm_stat +
+# sysctl again on every call. system_status now answers from the newest
+# sample, and the sampler runs only while somebody is looking: the window has
+# fetched /api/hub (hub_data stamps _hub_client_at, C53; refreshHub polls it
+# every 60 s while visible) or the System pop-out (expand_system, the one
+# reader of the history) within SYS_IDLE_S. /api/sys deliberately does NOT
+# count: the app's menu-bar item polls it every 15 s for as long as the app
+# runs (main.swift fetchMenuInfo), window or no window, so counting it would
+# keep the sampler awake forever. Without a fresh sample system_status reads
+# one vm_stat itself. Going idle drops the history: the pop-out draws it as
+# "the last 30 minutes", and aux_watchtower's _sys_now() reads SYS_HISTORY[-1]
+# as "now" — with the deque empty it takes a fresh sample instead of trusting
+# an hours-old one.
+SYS_IDLE_S = 180         # same as HUB_PREWARM_IDLE_S: three missed hub polls
+SYS_FRESH_S = 7          # 5 s tick + up to 1 s lost to int() in a sample's ts
+_sys_client_at = [0.0]   # when the System pop-out (expand_system) last answered
+
+
+def _sys_watched(now=None):
+    hub = globals().get("_hub_client_at") or [0.0]
+    now = time.time() if now is None else now
+    return now - max(_sys_client_at[0], hub[0]) <= SYS_IDLE_S
+
+
 def system_sampler_loop():
-    """Infinite daemon loop: one sample every 5s into SYS_HISTORY."""
+    """Daemon loop: one sample every 5 s into SYS_HISTORY while watched (C90)."""
+    idle = False
     while True:
         try:
-            SYS_HISTORY.append(_sys_sample())
+            if _sys_watched():
+                SYS_HISTORY.append(_sys_sample())
+                idle = False
+            elif not idle:
+                SYS_HISTORY.clear()
+                idle = True
         except Exception:
             pass
         time.sleep(5)
+
+
+def system_status():
+    """REPLACEMENT for server.py's system_status() (C90): same keys, same
+    meaning. ram_pct comes from the newest SYS_HISTORY sample (the same
+    vm_stat formula) while it is fresh; without one (sampler idle or not
+    started) this reads vm_stat once itself, as server.py's did, and leaves
+    the history to the sampler. It is not a watch signal (see above).
+    cpu_pct stays the 1-min load average: a syscall, not a process."""
+    now = time.time()
+    try:
+        s = SYS_HISTORY[-1]
+    except IndexError:
+        s = None
+    if isinstance(s, dict) and now - (s.get("ts") or 0) < SYS_FRESH_S:
+        ram = s.get("ram_pct")
+    else:
+        ram = _sys_ram_pct()
+    disk = shutil.disk_usage("/")
+    try:
+        cores = os.cpu_count() or 1
+        cpu_pct = min(99, round(100 * os.getloadavg()[0] / cores))
+    except OSError:
+        cpu_pct = None
+    return {
+        "model_online": model_online(),
+        "disk_free_gb": round(disk.free / 1e9),
+        "disk_pct": round(100 * disk.used / disk.total),
+        "ram_pct": round(ram) if ram is not None else None,
+        "cpu_pct": cpu_pct,
+        "uptime_min": round((time.time() - STARTED) / 60),
+    }
+
+
+# the hub's System tile captured server.py's function when WIDGETS was built
+if isinstance((globals().get("WIDGETS") or {}).get("system"), dict):
+    WIDGETS["system"]["provider"] = system_status
 
 
 def _sys_history_lists():
@@ -1353,6 +1472,8 @@ def _sys_history_lists():
 
 def expand_system():
     """REPLACEMENT: everything the current expand_system returns + history."""
+    _sys_client_at[0] = time.time()       # the history is on screen (C90)
+
     def ps(sort_flag):
         try:
             out = subprocess.run(["ps", "-Aceo", "pid,pcpu,pmem,comm", sort_flag],
@@ -1665,12 +1786,43 @@ def expand_markets():
         return {"error": "markets unavailable (" + type(e).__name__ + ")"}
 
 
+_MKT_SRCH_TTL = 60      # seconds a search answer is reused
+_MKT_SRCH_CAP = 64      # live search keys kept at most
+
+
+def _mkt_srch_evict(now=None):
+    """C17: _cached never evicts, and a search key is per typed query, so every
+    distinct query the add-ticker box ever sent stayed in _widget_cache until a
+    settings POST cleared the whole dict. Drop the expired search keys and keep
+    at most _MKT_SRCH_CAP live ones (oldest out). Only this family: the other
+    keys are bounded by configuration."""
+    now = time.time() if now is None else now
+    live = []
+    for k in [k for k in list(_widget_cache)
+              if isinstance(k, str) and k.startswith("mkt_srch:")]:
+        hit = _widget_cache.get(k)
+        try:
+            ts = float(hit[0])
+        except (TypeError, ValueError, IndexError):
+            ts = 0.0
+        if now - ts >= _MKT_SRCH_TTL:
+            _widget_cache.pop(k, None)
+        else:
+            live.append((ts, k))
+    if len(live) >= _MKT_SRCH_CAP:
+        live.sort()
+        for _ts, k in live[:len(live) - _MKT_SRCH_CAP + 1]:
+            _widget_cache.pop(k, None)
+
+
 def market_search(q):
     """Yahoo unauthenticated symbol search -> top 8 equity/ETF matches.
     Wire as: GET /api/markets/search?q=  ->  market_search(q)."""
     q = str(q or "").strip()[:60]
     if not q:
         return {"q": q, "results": []}
+    if ("mkt_srch:" + q.lower()) not in _widget_cache:
+        _mkt_srch_evict()               # room for the key about to be added
 
     def fetch():
         try:
@@ -1693,9 +1845,54 @@ def market_search(q):
             if len(out) >= 8:
                 break
         return {"q": q, "results": out}
-    return _cached("mkt_srch:" + q.lower(), 60, fetch)
+    return _cached("mkt_srch:" + q.lower(), _MKT_SRCH_TTL, fetch)
 
 # ---- console_pro ----
+# C91 (2026-10-21 audit): messages.timestamp has no index of its own, so
+# ORDER BY / WHERE on it full-scanned state.db's messages table on every 3 s
+# Console poll. The timeline now walks the rowid backwards, and the window
+# queries start from _CONSOLE_FLOOR: the lowest id that can carry a timestamp
+# inside the window. It stays a valid lower bound as the window moves forward
+# (a later cutoff can only match a subset) and for every row added later (ids
+# only grow, AUTOINCREMENT), so each poll re-scans just the rows between the
+# old floor and the new one. Keyed on the file's inode, so a replaced state.db
+# starts over. One tuple, swapped atomically: request threads share it.
+_CONSOLE_FLOOR = [None]          # (file key, cutoff, floor id)
+
+
+def _console_id_floor(con, cutoff):
+    """Lowest messages.id whose row can have timestamp >= cutoff."""
+    try:
+        st = os.stat(STATE_DB)
+        key = (st.st_dev, st.st_ino)
+    except OSError:
+        key = None
+    lo = 0
+    cur = _CONSOLE_FLOOR[0]
+    if cur and key is not None and cur[0] == key and cutoff >= cur[1]:
+        lo = cur[2]
+        # Still the same database? Below a valid floor every row is older
+        # than the window. A file rewritten IN PLACE keeps its inode (`hermes
+        # import` writes state.db with open("wb")) and may number its rows
+        # differently; then the row just below the floor sits in the window,
+        # and the cached bound would hide the whole day. One rowid seek.
+        below = con.execute(
+            "SELECT timestamp FROM messages WHERE id < ? "
+            "ORDER BY id DESC LIMIT 1", (lo,)).fetchone()
+        if below is not None and (below[0] or 0) >= cutoff:
+            lo = 0
+    row = con.execute(
+        "SELECT id FROM messages WHERE id >= ? AND timestamp >= ? "
+        "ORDER BY id LIMIT 1", (lo, cutoff)).fetchone()
+    if row is not None:
+        floor = row[0]
+    else:                         # nothing in the window yet: only newer rows can be
+        mx = con.execute("SELECT MAX(id) FROM messages").fetchone()[0]
+        floor = (mx or 0) + 1
+    _CONSOLE_FLOOR[0] = (key, cutoff, floor)
+    return floor
+
+
 def console_activity():
     """Live timeline of every tool call across all surfaces (dashboard,
     Telegram, CLI) plus aggregate stats: calls today, per-source split,
@@ -1724,13 +1921,15 @@ def console_activity():
     con.row_factory = sqlite3.Row
 
     # ---- timeline events (shape unchanged: 60 newest) ----
+    # newest by rowid (a backwards walk that stops at 80), not by timestamp
+    # (unindexed: a full scan + sort per poll); `out` is re-sorted by ts below
     out = []
     try:
         rows = con.execute(
             "SELECT m.role, m.content, m.tool_calls, m.tool_name, m.timestamp, "
             "s.source FROM messages m JOIN sessions s ON m.session_id = s.id "
             "WHERE m.tool_calls IS NOT NULL OR m.tool_name IS NOT NULL "
-            "ORDER BY m.timestamp DESC LIMIT 80").fetchall()
+            "ORDER BY m.id DESC LIMIT 80").fetchall()
     except sqlite3.Error:
         rows = []
     for r in rows:
@@ -1755,13 +1954,17 @@ def console_activity():
     out.sort(key=lambda e: -(e["ts"] or 0))
 
     # ---- stats: today + rolling 24h, from the tool_calls JSON ----
+    cutoff = min(midnight, hour_start - 23 * 3600)
     try:
-        cutoff = min(midnight, hour_start - 23 * 3600)
+        floor = _console_id_floor(con, cutoff)
+    except sqlite3.Error:
+        floor = 0                 # no bound: the old full scan, still correct
+    try:
         srows = con.execute(
             "SELECT m.timestamp AS ts, m.tool_calls AS tc, s.source AS src "
             "FROM messages m JOIN sessions s ON m.session_id = s.id "
-            "WHERE m.tool_calls IS NOT NULL AND m.timestamp >= ?",
-            (cutoff,)).fetchall()
+            "WHERE m.id >= ? AND m.tool_calls IS NOT NULL AND m.timestamp >= ?",
+            (floor, cutoff)).fetchall()
         tool_counts = {}
         for r in srows:
             ts = r["ts"] or 0
@@ -1799,9 +2002,13 @@ def console_activity():
         # "active" = session produced a message in the last 15 minutes.
         # (ended_at is unreliable: CLI sessions are often never closed —
         # ended_at IS NULL matched 109 sessions on the live DB.)
+        # now - 900 is inside the window, so `floor` bounds it too. NOT
+        # INDEXED: otherwise the planner walks all of idx_messages_session
+        # (covering, but still every row) instead of the rowid range.
         stats["active_sessions"] = con.execute(
-            "SELECT COUNT(DISTINCT session_id) FROM messages "
-            "WHERE timestamp >= ?", (now - 900,)).fetchone()[0]
+            "SELECT COUNT(DISTINCT session_id) FROM messages NOT INDEXED "
+            "WHERE id >= ? AND timestamp >= ?",
+            (floor, now - 900)).fetchone()[0]
     except sqlite3.Error:
         pass
     con.close()

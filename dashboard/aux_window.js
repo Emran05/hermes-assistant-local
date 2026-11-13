@@ -50,9 +50,23 @@
   function schedule() { clearTimeout(timer); timer = setTimeout(post, 120); }
 
   window.addEventListener('resize', schedule);
+  // aux_glass.js lights the glass under the pointer: it toggles data-glint
+  // and rewrites --mx/--my in the lit element's style every frame. Neither
+  // moves anything, so they must not cost a header re-measure per frame.
+  function moves(recs) {
+    for (var i = 0; i < recs.length; i++) {
+      var r = recs[i];
+      if (r.type === 'attributes') {
+        if (r.attributeName === 'data-glint') continue;
+        if (r.attributeName === 'style' && r.target.hasAttribute &&
+            r.target.hasAttribute('data-glint')) continue;
+      }
+      schedule(); return;
+    }
+  }
   var h0 = hdr();
   if (h0) {
-    new MutationObserver(schedule).observe(h0, { childList: true, subtree: true, attributes: true });
+    new MutationObserver(moves).observe(h0, { childList: true, subtree: true, attributes: true });
     if (window.ResizeObserver) new ResizeObserver(schedule).observe(h0);
   }
   // Fonts, the model pill and late chips all settle after load — re-measure a few times.

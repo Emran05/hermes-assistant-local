@@ -164,6 +164,13 @@
   }
 
   function renderData(grid, data) {
+    // the approvals poll re-renders too: a switch that has focus keeps it
+    try {
+      var cur = doc().getElementById("mind-extra-shortcuts"), a = doc().activeElement;
+      if (refocusTog == null && cur && a && cur.contains(a) && a.classList.contains("sb-tog")) {
+        var r = a.closest(".sb-row"); if (r) refocusTog = r.getAttribute("data-id");
+      }
+    } catch (e) {}
     var list = (data && data.shortcuts) || [];
     var pending = (data && data.pending) || [];
     var tiny = data.available === false ? "unavailable"
@@ -204,12 +211,15 @@
         '<div class="sb-name">' + E(s.name) + "</div>" +
         '<div class="sb-desc tiny">' + E(meta) + (s.exposed ? " · tier: always ask" : "") + "</div>" +
         (last ? '<div class="sb-last tiny">' + E(last) + "</div>" : "") +
-        '<div class="sb-status" data-st="' + E(s.id) + '"></div>' +
+        '<div class="sb-status" role="status" data-st="' + E(s.id) + '"></div>' +
         "</div>" +
         (s.exposed && !s.missing
           ? '<button class="sb-run" title="Runs through the gated bus — you will confirm first">' + PLAY_SVG + "Run</button>"
           : "") +
-        '<span class="sb-tog' + (s.exposed ? " on" : "") + '" role="switch" aria-checked="' +
+        // a real switch (C94): named after its shortcut, a Tab stop, Enter/Space
+        // in wire() — it used to be an unnamed, unfocusable span
+        '<span class="sb-tog' + (s.exposed ? " on" : "") + '" role="switch" tabindex="0" aria-label="' +
+        E("Expose " + s.name + " to the agent") + '" aria-checked="' +
         (s.exposed ? "true" : "false") + '" title="' +
         (s.exposed ? "Exposed to the agent (click to remove)" : "Not exposed (click to expose)") +
         '"><span class="sb-knob"></span></span>' +
@@ -225,6 +235,17 @@
     if (!card) return;
     card.setAttribute("data-pending", pendingSig(data));
     wire(card, grid);
+    if (lastResult && Date.now() < lastResult.until) setStatus(card, lastResult.id, lastResult.text, lastResult.isErr);
+    // a toggle re-renders the whole card: put focus back on the switch that
+    // was just flipped instead of dropping it on <body>
+    if (refocusTog != null) {
+      var want = refocusTog; refocusTog = null;
+      each(card.querySelectorAll(".sb-row"), function (row) {
+        if (row.getAttribute("data-id") !== want) return;
+        var t = row.querySelector(".sb-tog");
+        if (t) { try { t.focus({ preventScroll: true }); } catch (e) {} }
+      });
+    }
     try {
       if (typeof revealStagger === "function") revealStagger(card.querySelectorAll(".sb-row"), 30);
     } catch (e) {}
@@ -252,25 +273,44 @@
     el.className = "sb-status" + (isErr ? " err" : "");
   }
 
+  var refocusTog = null;       // id of the switch to re-focus after a re-render
+
   function wire(card, grid) {
     // expose / unexpose toggles
     each(card.querySelectorAll(".sb-row"), function (row) {
       var id = row.getAttribute("data-id");
       var name = row.getAttribute("data-name");
       var tog = row.querySelector(".sb-tog");
+      if (tog) tog.addEventListener("keydown", function (e) {
+        if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
+        e.preventDefault();
+        if (e.repeat) return;                 // a held key flips once, not once per save
+        tog.click();
+      });
       if (tog) tog.addEventListener("click", async function () {
+        // a held Enter repeats: one flip per save, the switch says it is busy
+        if (tog.getAttribute("aria-disabled") === "true") return;
         var want = !tog.classList.contains("on");
+        var hadFocus = false;                 // read before confirm() can move it
+        try { hadFocus = document.activeElement === tog; } catch (e) {}
         if (want && typeof confirm === "function") {
           if (!confirm('Expose “' + name + '” to the agent?\n\nIt still cannot run ' +
             "silently — every run will ask for your approval.")) return;
         }
         tog.classList.toggle("on", want);
-        var res = await postJSON("/api/shortcuts/config", { id: id, exposed: want, source: "ui" });
+        tog.setAttribute("aria-checked", want ? "true" : "false");
+        tog.setAttribute("aria-disabled", "true");
+        var res = null;
+        try { res = await postJSON("/api/shortcuts/config", { id: id, exposed: want, source: "ui" }); }
+        catch (e) { res = null; }            // network error: revert below, never stay busy
+        tog.removeAttribute("aria-disabled");
         if (!res || res.ok === false) {
           tog.classList.toggle("on", !want);
+          tog.setAttribute("aria-checked", want ? "false" : "true");
           setStatus(card, id, (res && res.error) || "Couldn’t save.", true);
           return;
         }
+        if (hadFocus) refocusTog = id;
         refresh(grid).catch(function () {});
       });
 
@@ -314,38 +354,56 @@
     });
   }
 
+  // The run result outlives the refresh that follows it (2026-10-08 P3: the
+  // re-render 1.2s later used to wipe an error before it could be read).
+  var lastResult = null;       // {id, text, isErr, until}
   function showResult(card, grid, id, res) {
     if (!res) { setStatus(card, id, "No response.", true); return; }
+    var text, isErr = false;
     if (res.status === "done" || (res.ok && !res.needs_approval && res.status !== "denied")) {
       var out = (res.output || "").trim();
-      setStatus(card, id, "Ran in " + (res.duration_s || 0) + "s" +
-        (out ? " · " + out.slice(0, 300) : ""), false);
+      text = "Ran in " + (res.duration_s || 0) + "s" + (out ? " · " + out.slice(0, 300) : "");
     } else if (res.status === "denied") {
-      setStatus(card, id, "Denied — nothing was run.", false);
+      text = "Denied — nothing was run.";
     } else {
-      setStatus(card, id, (res.error || res.message || "Failed.").slice(0, 300), true);
+      text = (res.error || res.message || "Failed.").slice(0, 300); isErr = true;
     }
+    setStatus(card, id, text, isErr);
+    lastResult = { id: id, text: text, isErr: isErr, until: Date.now() + 15000 };
     setTimeout(function () { refresh(grid).catch(function () {}); }, 1200);
   }
 
   // ---- light poll: surface agent-requested approvals while the card is visible
-  var pollTimer = null;
+  // E92 (C88): a hidden window is not polled; a tick skipped while hidden is
+  // made up once on visibilitychange.
+  var pollTimer = null, pollMissed = false, pollVisWired = false;
   function armPoll() {
     var d = doc(); if (!d) return;
+    if (!pollVisWired) {
+      pollVisWired = true;
+      d.addEventListener("visibilitychange", function () {
+        if (d.hidden || !pollMissed || !pollTimer) return;
+        pollMissed = false; pollOnce(d);
+      });
+    }
     if (pollTimer) return;
-    pollTimer = setInterval(async function () {
-      var card = d.getElementById("mind-extra-shortcuts");
-      if (!card || !card.isConnected) { clearInterval(pollTimer); pollTimer = null; return; }
-      if (card.offsetParent === null) return;      // Mind view not visible
-      var data;
-      try { data = await (await fetch("/api/shortcuts", { cache: "no-store" })).json(); }
-      catch (e) { return; }
-      if (!data || data.ok === false) return;
-      if (pendingSig(data) !== (card.getAttribute("data-pending") || "")) {
-        var grid = d.getElementById("view-mind");
-        if (grid) renderData(grid, data);
-      }
+    pollTimer = setInterval(function () {
+      if (d.hidden) { pollMissed = true; return; }
+      pollOnce(d);
     }, 10000);
+  }
+  async function pollOnce(d) {
+    var card = d.getElementById("mind-extra-shortcuts");
+    if (!card || !card.isConnected) { clearInterval(pollTimer); pollTimer = null; return; }
+    if (card.offsetParent === null) return;      // Mind view not visible
+    var data;
+    try { data = await (await fetch("/api/shortcuts", { cache: "no-store" })).json(); }
+    catch (e) { return; }
+    if (!data || data.ok === false) return;
+    if (pendingSig(data) !== (card.getAttribute("data-pending") || "")) {
+      var grid = d.getElementById("view-mind");
+      if (grid) renderData(grid, data);
+    }
   }
 
   // expose for the headless render harness / manual invocation

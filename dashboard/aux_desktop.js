@@ -339,14 +339,28 @@
 
   // ---- wiring --------------------------------------------------------------
   function wireStatic() {
-    var send = $("desk-send"), task = $("desk-task");
-    if (send && task) {
-      send.onclick = function () { submitTask(task, send); };
-      task.addEventListener("keydown", function (e) {
-        if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); submitTask(task, send); }
-      });
-    }
+    wireCompose($("view-desktop"), function () { refresh(true); });
   }
+
+  // Wire a rendered compose card (#desk-task / #desk-send / #desk-status) under
+  // `root`. #view-desktop uses it, and so does aux_agent's Screen rail, which
+  // renders the same markup through renderDesktop() — the rail used to show
+  // the box with nothing wired to it (B26). Idempotent per Send button, so a
+  // caller may run it after every re-render. `after` runs once a task is done.
+  function wireCompose(root, after) {
+    root = root || document;
+    var send = root.querySelector("#desk-send"), task = root.querySelector("#desk-task");
+    var status = root.querySelector("#desk-status");
+    if (!send || !task || send.__deskWired) return false;
+    send.__deskWired = true;
+    var go = function () { submitTask(task, send, status, after); };
+    send.onclick = go;
+    task.addEventListener("keydown", function (e) {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); go(); }
+    });
+    return true;
+  }
+  window.deskWireCompose = wireCompose;
 
   function wireLive() {
     var cap = $("desk-cap"), ref = $("desk-refresh");
@@ -377,10 +391,67 @@
     return "desktop-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   }
 
-  function submitTask(task, send) {
+  // index.html's own send path, resolved at call time: the turn streams into
+  // the visible chat with its inline approval box, which a job polled from here
+  // never could (nothing in the main window can answer an approval for a job
+  // it is not streaming).
+  function chatSend() {
+    try { return (typeof sendMsg === "function") ? sendMsg : null; } catch (e) { return null; }
+  }
+
+  function submitTask(task, send, status, after) {
     var text = (task.value || "").trim();
-    var status = $("desk-status");
     if (!text) { if (status) status.textContent = "Type a task first."; return; }
+    var viaChat = chatSend();
+    if (viaChat) {
+      var cs = $("send"), ci = $("input"), staged = 0;
+      try { staged = (typeof attachments !== "undefined" && attachments && attachments.length) || 0; } catch (e) {}
+      if (cs && cs.disabled) {
+        if (status) status.textContent = "The assistant is still answering — send this when it is done.";
+        return;
+      }
+      // sendMsg() clears the chat composer and takes its staged files with it
+      if ((ci && (ci.value || "").trim()) || staged) {
+        if (status) status.textContent = "Your chat has an unsent message — send or clear it first.";
+        return;
+      }
+      send.disabled = true;
+      if (status) status.textContent = "Sending to your assistant…";
+      // R2-33: the task stays in the box until /api/chat has taken the turn,
+      // and goes back with the reason when it was not sent (busy elsewhere,
+      // refused, dashboard unreachable) — sendMsg says which.
+      var restore = function () { if (!(task.value || "").trim()) task.value = text; };
+      var p;
+      try {
+        p = Promise.resolve(viaChat(text, { accepted: function () {
+          if ((task.value || "").trim() === text) task.value = "";
+          if (status) status.textContent = "Sent — it is running in the chat; any approval appears there.";
+        } }));
+      } catch (e) { p = Promise.reject(e); }
+      p.then(function (r) {
+        if (r && typeof r === "object") {
+          if (r.sent === false) {
+            restore();
+            if (status) status.textContent = r.message || "That was not sent.";
+            return;
+          }
+          if (r.ok === false) {
+            if (status) status.textContent = "The task ended with an error — see the chat.";
+            return;
+          }
+        } else if ((task.value || "").trim() === text) {
+          task.value = "";            // a send path that reports nothing: as before
+        }
+        if (status) status.textContent = "Done — the reply is in the chat.";
+      }, function () {
+        restore();
+        if (status) status.textContent = "Could not reach the assistant.";
+      }).then(function () {
+        send.disabled = false;
+        if (after) { try { after(); } catch (e) {} }
+      });
+      return;
+    }
     send.disabled = true;
     if (status) status.textContent = "Sending to your assistant…";
     var sid = newSession();
@@ -394,14 +465,14 @@
         return;
       }
       task.value = "";
-      pollJob(d.job, status, send);
+      pollJob(d.job, status, send, after);
     }).catch(function () {
       if (status) status.textContent = "Could not reach the assistant.";
       send.disabled = false;
     });
   }
 
-  function pollJob(job, status, send) {
+  function pollJob(job, status, send, after) {
     var tries = 0;
     (function step() {
       tries++;
@@ -411,15 +482,15 @@
           if (!d || d.gone) { if (status) status.textContent = "Task finished."; send.disabled = false; return; }
           if (d.approval) {
             // Consequential — approval is out-of-band in the chat, never here (§4.9).
-            if (status) status.textContent = "Needs your approval — open the chat (right) to approve.";
+            if (status) status.textContent = "Needs your approval — open the chat to approve.";
             send.disabled = false;
-            refresh(true);
+            if (after) after();
             return;
           }
           if (d.done) {
             if (status) status.textContent = d.reply ? ("Done: " + String(d.reply).slice(0, 120)) : "Done.";
             send.disabled = false;
-            refresh(true);
+            if (after) after();
             return;
           }
           if (status) status.textContent = d.status ? ("Working… " + d.status) : "Working…";

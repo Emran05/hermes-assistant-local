@@ -1,0 +1,521 @@
+{
+ "_about": "Public Hugging Face metadata of the round-3 curated roster entries, read 2026-10-26 at the pinned sha (model info ?blobs=true, config.json, tokenizer_config.json, shard index, chat template), plus the header-only strict-load dry run on mlx_vlm 0.6.14 / mlx 0.32.1. No weights were downloaded. Regenerate only by re-verifying by hand. The digiflow DeepSeek-V4-Pro 9B entry was added the same way on 2026-11-12 (its own verified_at; its template is compared with the xtools-at source it was converted from, and weights_check records how its weights were tied to the abliterated source).",
+ "controls": {
+  "negative": {
+   "NEGDROP:Youssofal/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit": {
+    "error": "ValueError: Missing 1 parameters: \nlanguage_model.model.layers.0.input_layernorm.weight.",
+    "mutation": "removed language_model.model.layers.0.input_layernorm.weight",
+    "strict_load": "FAIL"
+   },
+   "NEGDROP:mlx-community/Qwen3.8-27B-4bit": {
+    "error": "ValueError: Missing 1 parameters: \nlanguage_model.model.layers.0.input_layernorm.weight.",
+    "mutation": "removed language_model.model.layers.0.input_layernorm.weight",
+    "strict_load": "FAIL"
+   },
+   "NEGQ:Youssofal/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit": {
+    "error": "ValueError: Expected shape (256, 2048, 8) but received shape (256, 2048, 16) for parameter language_model.model.layers.0.mlp.switch_mlp.down_proj.scales",
+    "mutation": "quant scales of language_model.model.layers.0.mlp.switch_mlp.down_proj.scales -> [256, 2048, 16]",
+    "strict_load": "FAIL"
+   },
+   "NEGSHAPE:mlx-community/Qwen3.6-35B-A3B-4bit": {
+    "error": "ValueError: Expected shape (2048,) but received shape (2049,) for parameter language_model.model.layers.0.input_layernorm.weight",
+    "mutation": "shape of language_model.model.layers.0.input_layernorm.weight -> [2049]",
+    "strict_load": "FAIL"
+   },
+   "NEGSHAPE:mlx-community/Qwen3.8-27B-4bit": {
+    "error": "ValueError: Expected shape (5120,) but received shape (5121,) for parameter language_model.model.layers.0.input_layernorm.weight",
+    "mutation": "shape of language_model.model.layers.0.input_layernorm.weight -> [5121]",
+    "strict_load": "FAIL"
+   }
+  },
+  "positive": "mlx-community/Qwen3.8-27B-4bit"
+ },
+ "mlx": "0.32.1",
+ "mlx_vlm": "0.6.14",
+ "repos": {
+  "AutisticAF/Huihui-Qwen3.8-27B-abliterated-mlx-4Bit": {
+   "architectures": [
+    "Qwen3_5ForConditionalGeneration"
+   ],
+   "auto_map": false,
+   "chat_template_sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+   "files": {
+    ".gitattributes": 1570,
+    "README.md": 1090,
+    "chat_template.jinja": 8952,
+    "config.json": 4089,
+    "generation_config.json": 202,
+    "model-00001-of-00003.safetensors": 5328325554,
+    "model-00002-of-00003.safetensors": 5354185158,
+    "model-00003-of-00003.safetensors": 4450532795,
+    "model.safetensors.index.json": 189789,
+    "tokenizer.json": 19989343,
+    "tokenizer_config.json": 1135
+   },
+   "has_vision_config": false,
+   "index_shards": [
+    "model-00001-of-00003.safetensors",
+    "model-00002-of-00003.safetensors",
+    "model-00003-of-00003.safetensors"
+   ],
+   "license": "apache-2.0",
+   "max_position_embeddings": 262144,
+   "model_type": "qwen3_5",
+   "num_experts": null,
+   "num_hidden_layers": 64,
+   "quantization": {
+    "bits": 4,
+    "group_size": 64,
+    "mode": "affine",
+    "override_bits": [],
+    "per_layer_overrides": 0
+   },
+   "sha": "38be24605816962135f58d9ee8649891b1c78637",
+   "strict_load": {
+    "model_params": 1847,
+    "processor_class": "Qwen3VLProcessor",
+    "strict_load": "PASS",
+    "tensors": 1847,
+    "tokenizer_class": "TokenizersBackend",
+    "tool_parser": "qwen3_coder",
+    "vision_tower": false
+   },
+   "subfolder": null,
+   "text_model_type": "qwen3_5_text",
+   "tokenizer_class": "TokenizersBackend"
+  },
+  "PocketAiHub/Qwen3.8-27B-Abliterated-MLX": {
+   "architectures": [
+    "Qwen3_5ForConditionalGeneration"
+   ],
+   "auto_map": false,
+   "chat_template_sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+   "files": {
+    ".gitattributes": 1799,
+    "2bit/abliteration-manifest.json": 1367,
+    "2bit/artifact-manifest.json": 4012,
+    "2bit/chat_template.jinja": 8952,
+    "2bit/config.json": 4932,
+    "2bit/generation_config.json": 202,
+    "2bit/model-00001-of-00003.safetensors": 5362277859,
+    "2bit/model-00002-of-00003.safetensors": 5172986098,
+    "2bit/model-00003-of-00003.safetensors": 476774751,
+    "2bit/model.safetensors.index.json": 218281,
+    "2bit/preprocessor_config.json": 390,
+    "2bit/processor_config.json": 991,
+    "2bit/tokenizer.json": 19989493,
+    "2bit/tokenizer_config.json": 1165,
+    "2bit/validation-summary.json": 2937,
+    "2bit/video_preprocessor_config.json": 385,
+    "2bit/vocab.json": 6722759,
+    "4bit/abliteration-manifest.json": 1367,
+    "4bit/artifact-manifest.json": 3955,
+    "4bit/chat_template.jinja": 8952,
+    "4bit/config.json": 4932,
+    "4bit/generation_config.json": 202,
+    "4bit/model-00001-of-00003.safetensors": 5343268662,
+    "4bit/model-00002-of-00003.safetensors": 5354185130,
+    "4bit/model-00003-of-00003.safetensors": 5357087557,
+    "4bit/model.safetensors.index.json": 218281,
+    "4bit/preprocessor_config.json": 390,
+    "4bit/processor_config.json": 991,
+    "4bit/tokenizer.json": 19989325,
+    "4bit/tokenizer_config.json": 1165,
+    "4bit/validation-summary.json": 3020,
+    "4bit/video_preprocessor_config.json": 385,
+    "4bit/vocab.json": 6722759,
+    "6bit/abliteration-manifest.json": 1367,
+    "6bit/artifact-manifest.json": 4311,
+    "6bit/chat_template.jinja": 8952,
+    "6bit/config.json": 4932,
+    "6bit/generation_config.json": 202,
+    "6bit/model-00001-of-00005.safetensors": 5362726174,
+    "6bit/model-00002-of-00005.safetensors": 5344282130,
+    "6bit/model-00003-of-00005.safetensors": 5331479350,
+    "6bit/model-00004-of-00005.safetensors": 5331479370,
+    "6bit/model-00005-of-00005.safetensors": 1407912945,
+    "6bit/model.safetensors.index.json": 218281,
+    "6bit/preprocessor_config.json": 390,
+    "6bit/processor_config.json": 991,
+    "6bit/tokenizer.json": 19989325,
+    "6bit/tokenizer_config.json": 1165,
+    "6bit/validation-summary.json": 2869,
+    "6bit/video_preprocessor_config.json": 385,
+    "6bit/vocab.json": 6722759,
+    "8bit/abliteration-manifest.json": 1367,
+    "8bit/artifact-manifest.json": 4489,
+    "8bit/chat_template.jinja": 8952,
+    "8bit/config.json": 4932,
+    "8bit/generation_config.json": 202,
+    "8bit/model-00001-of-00006.safetensors": 5317707581,
+    "8bit/model-00002-of-00006.safetensors": 5354102610,
+    "8bit/model-00003-of-00006.safetensors": 5354184694,
+    "8bit/model-00004-of-00006.safetensors": 5337309653,
+    "8bit/model-00005-of-00006.safetensors": 5292848464,
+    "8bit/model-00006-of-00006.safetensors": 2845065477,
+    "8bit/model.safetensors.index.json": 218281,
+    "8bit/preprocessor_config.json": 390,
+    "8bit/processor_config.json": 991,
+    "8bit/tokenizer.json": 19989325,
+    "8bit/tokenizer_config.json": 1165,
+    "8bit/validation-summary.json": 2868,
+    "8bit/video_preprocessor_config.json": 385,
+    "8bit/vocab.json": 6722759,
+    "LICENSE": 11544,
+    "README.md": 5829,
+    "abliteration-manifest.json": 1367,
+    "benchmarks/validation-summary.json": 15653,
+    "bf16/abliteration-manifest.json": 1367,
+    "bf16/artifact-manifest.json": 5313,
+    "bf16/chat_template.jinja": 8952,
+    "bf16/config.json": 4727,
+    "bf16/generation_config.json": 202,
+    "bf16/model-00001-of-00011.safetensors": 5229165261,
+    "bf16/model-00002-of-00011.safetensors": 5321764754,
+    "bf16/model-00003-of-00011.safetensors": 5321764861,
+    "bf16/model-00004-of-00011.safetensors": 5321764870,
+    "bf16/model-00005-of-00011.safetensors": 5343801131,
+    "bf16/model-00006-of-00011.safetensors": 5321764862,
+    "bf16/model-00007-of-00011.safetensors": 5321764852,
+    "bf16/model-00008-of-00011.safetensors": 5321764844,
+    "bf16/model-00009-of-00011.safetensors": 5343801175,
+    "bf16/model-00010-of-00011.safetensors": 4323452933,
+    "bf16/model-00011-of-00011.safetensors": 2542796942,
+    "bf16/model.safetensors.index.json": 115835,
+    "bf16/preprocessor_config.json": 390,
+    "bf16/processor_config.json": 991,
+    "bf16/tokenizer.json": 19989325,
+    "bf16/tokenizer_config.json": 1165,
+    "bf16/validation-summary.json": 2940,
+    "bf16/video_preprocessor_config.json": 385,
+    "bf16/vocab.json": 6722759,
+    "release-manifest.json": 19199
+   },
+   "has_vision_config": true,
+   "index_shards": [
+    "model-00001-of-00003.safetensors",
+    "model-00002-of-00003.safetensors",
+    "model-00003-of-00003.safetensors"
+   ],
+   "license": "apache-2.0",
+   "max_position_embeddings": 262144,
+   "model_type": "qwen3_5",
+   "num_experts": null,
+   "num_hidden_layers": 64,
+   "quantization": {
+    "bits": 4,
+    "group_size": 64,
+    "mode": "affine",
+    "override_bits": [],
+    "per_layer_overrides": 0
+   },
+   "sha": "1e90b68cc16d79e3f44b3ade10257f99f4b7baff",
+   "strict_load": {
+    "model_params": 2180,
+    "processor_class": "Qwen3VLProcessor",
+    "strict_load": "PASS",
+    "tensors": 2180,
+    "tokenizer_class": "Qwen2Tokenizer",
+    "tool_parser": "qwen3_coder",
+    "vision_tower": true
+   },
+   "subfolder": "4bit",
+   "text_model_type": "qwen3_5_text",
+   "tokenizer_class": "Qwen2Tokenizer"
+  },
+  "Youssofal/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit": {
+   "architectures": [
+    "Qwen3_5MoeForConditionalGeneration"
+   ],
+   "auto_map": false,
+   "chat_template_sha256": "e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259",
+   "files": {
+    ".gitattributes": 1570,
+    "README.md": 3701,
+    "chat_template.jinja": 7764,
+    "config.json": 139757,
+    "configuration.json": 58,
+    "generation_config.json": 242,
+    "mlx_variant_metadata.json": 17215,
+    "model-00001-of-00005.safetensors": 5316442786,
+    "model-00002-of-00005.safetensors": 5346060414,
+    "model-00003-of-00005.safetensors": 5344741500,
+    "model-00004-of-00005.safetensors": 5280926562,
+    "model-00005-of-00005.safetensors": 2423241917,
+    "model-vision-00001-of-00001.safetensors": 893179497,
+    "model.safetensors.index.json": 209752,
+    "preprocessor_config.json": 390,
+    "processor_config.json": 1312,
+    "tokenizer.json": 19989343,
+    "tokenizer_config.json": 1176,
+    "video_preprocessor_config.json": 385
+   },
+   "has_vision_config": true,
+   "index_shards": [
+    "model-00001-of-00005.safetensors",
+    "model-00002-of-00005.safetensors",
+    "model-00003-of-00005.safetensors",
+    "model-00004-of-00005.safetensors",
+    "model-00005-of-00005.safetensors",
+    "model-vision-00001-of-00001.safetensors"
+   ],
+   "license": "apache-2.0",
+   "max_position_embeddings": 262144,
+   "model_type": "qwen3_5_moe",
+   "num_experts": 256,
+   "num_hidden_layers": 40,
+   "quantization": {
+    "bits": 4,
+    "group_size": 64,
+    "mode": "affine",
+    "override_bits": [
+     4,
+     6
+    ],
+    "per_layer_overrides": 512
+   },
+   "sha": "fb27c56fe8af376b08d2722091866e7d15eb31dc",
+   "strict_load": {
+    "model_params": 2090,
+    "processor_class": "Qwen3VLProcessor",
+    "strict_load": "PASS",
+    "tensors": 2090,
+    "tokenizer_class": "TokenizersBackend",
+    "tool_parser": "qwen3_coder",
+    "vision_tower": true
+   },
+   "subfolder": null,
+   "text_model_type": "qwen3_5_moe_text",
+   "tokenizer_class": "TokenizersBackend"
+  },
+  "digiflow/DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-MLX-4bit": {
+   "architectures": [
+    "Qwen3_5ForConditionalGeneration"
+   ],
+   "auto_map": false,
+   "chat_template_sha256": "f7e41c826a3eea86dbd6ed2e204f0fc03262fcf720144e1dbb9b6d3e44e333a1",
+   "files": {
+    ".gitattributes": 1570,
+    "README.md": 2823,
+    "added_tokens.json": 904,
+    "chat_template.jinja": 8736,
+    "config.json": 3874,
+    "generation_config.json": 142,
+    "model-00001-of-00002.safetensors": 5349769710,
+    "model-00002-of-00002.safetensors": 600449850,
+    "model.safetensors.index.json": 123592,
+    "preprocessor_config.json": 781,
+    "processor_config.json": 989,
+    "special_tokens_map.json": 876,
+    "tokenizer.json": 19989339,
+    "tokenizer_config.json": 10575,
+    "video_preprocessor_config.json": 817,
+    "vocab.json": 5234494
+   },
+   "has_vision_config": true,
+   "index_shards": [
+    "model-00001-of-00002.safetensors",
+    "model-00002-of-00002.safetensors"
+   ],
+   "license": "apache-2.0",
+   "max_position_embeddings": 262144,
+   "model_type": "qwen3_5",
+   "num_experts": null,
+   "num_hidden_layers": 32,
+   "quantization": {
+    "bits": 4,
+    "group_size": 64,
+    "mode": "affine",
+    "override_bits": [],
+    "per_layer_overrides": 0
+   },
+   "sha": "6471ad9cbc5f4de34601d52380bfc0fabdfffc7f",
+   "strict_load": {
+    "model_params": 1260,
+    "processor_class": "Qwen3VLProcessor",
+    "strict_load": "PASS",
+    "tensors": 1260,
+    "tokenizer_class": "TokenizersBackend",
+    "tool_parser": "qwen3_coder",
+    "vision_tower": true
+   },
+   "subfolder": null,
+   "text_model_type": "qwen3_5_text",
+   "tokenizer_class": "TokenizersBackend",
+   "verified_at": "2026-11-12",
+   "weights_check": "dequantized mlp.down_proj rows match laewr/DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic-MLX-4bit@b6243d1 (mlx_lm.convert of the same source) within 0.1% in layers 0, 5, 12, 20, 30; both differ from mlx-community/DeepSeek-V4-Pro-Qwen3.5-9B-4bit (the non-abliterated base) by 5-9% only in the abliterated layers 12 and 20"
+  },
+  "mlx-community/Qwen3.6-35B-A3B-4bit": {
+   "architectures": [
+    "Qwen3_5MoeForConditionalGeneration"
+   ],
+   "auto_map": false,
+   "chat_template_sha256": "e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259",
+   "files": {
+    ".gitattributes": 1570,
+    "README.md": 724,
+    "chat_template.jinja": 7764,
+    "config.json": 23591,
+    "configuration.json": 58,
+    "generation_config.json": 202,
+    "model-00001-of-00004.safetensors": 5288196018,
+    "model-00002-of-00004.safetensors": 5368472749,
+    "model-00003-of-00004.safetensors": 5368324139,
+    "model-00004-of-00004.safetensors": 4377211365,
+    "model.safetensors.index.json": 215755,
+    "preprocessor_config.json": 390,
+    "processor_config.json": 1312,
+    "tokenizer.json": 19989343,
+    "tokenizer_config.json": 1139,
+    "video_preprocessor_config.json": 385,
+    "vocab.json": 6722759
+   },
+   "has_vision_config": true,
+   "index_shards": [
+    "model-00001-of-00004.safetensors",
+    "model-00002-of-00004.safetensors",
+    "model-00003-of-00004.safetensors",
+    "model-00004-of-00004.safetensors"
+   ],
+   "license": "apache-2.0",
+   "max_position_embeddings": 262144,
+   "model_type": "qwen3_5_moe",
+   "num_experts": 256,
+   "num_hidden_layers": 40,
+   "quantization": {
+    "bits": 4,
+    "group_size": 64,
+    "mode": "affine",
+    "override_bits": [
+     8
+    ],
+    "per_layer_overrides": 80
+   },
+   "sha": "38740b847e4cb78f352aba30aa41c76e08e6eb46",
+   "strict_load": {
+    "model_params": 2090,
+    "processor_class": "Qwen3VLProcessor",
+    "strict_load": "PASS",
+    "tensors": 2090,
+    "tokenizer_class": "TokenizersBackend",
+    "tool_parser": "qwen3_coder",
+    "vision_tower": true
+   },
+   "subfolder": null,
+   "text_model_type": "qwen3_5_moe_text",
+   "tokenizer_class": "TokenizersBackend"
+  },
+  "mlx-community/Qwen3.8-27B-4bit": {
+   "architectures": [
+    "Qwen3_5ForConditionalGeneration"
+   ],
+   "auto_map": false,
+   "chat_template_sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+   "files": {
+    ".gitattributes": 1570,
+    "README.md": 632,
+    "chat_template.jinja": 8952,
+    "config.json": 4932,
+    "generation_config.json": 202,
+    "model-00001-of-00003.safetensors": 5343268662,
+    "model-00002-of-00003.safetensors": 5354185130,
+    "model-00003-of-00003.safetensors": 5357087557,
+    "model.safetensors.index.json": 218281,
+    "preprocessor_config.json": 390,
+    "processor_config.json": 991,
+    "tokenizer.json": 19989325,
+    "tokenizer_config.json": 1165,
+    "video_preprocessor_config.json": 385,
+    "vocab.json": 6722759
+   },
+   "has_vision_config": true,
+   "index_shards": [
+    "model-00001-of-00003.safetensors",
+    "model-00002-of-00003.safetensors",
+    "model-00003-of-00003.safetensors"
+   ],
+   "license": "apache-2.0",
+   "max_position_embeddings": 262144,
+   "model_type": "qwen3_5",
+   "num_experts": null,
+   "num_hidden_layers": 64,
+   "quantization": {
+    "bits": 4,
+    "group_size": 64,
+    "mode": "affine",
+    "override_bits": [],
+    "per_layer_overrides": 0
+   },
+   "sha": "10c35caafbb80f7dc6a7a432cdd11af10a6d4818",
+   "strict_load": {
+    "model_params": 2180,
+    "processor_class": "Qwen3VLProcessor",
+    "strict_load": "PASS",
+    "tensors": 2180,
+    "tokenizer_class": "Qwen2Tokenizer",
+    "tool_parser": "qwen3_coder",
+    "vision_tower": true
+   },
+   "subfolder": null,
+   "text_model_type": "qwen3_5_text",
+   "tokenizer_class": "Qwen2Tokenizer"
+  },
+  "vanch007/Huihui-Qwen3.5-9B-abliterated-mlx-4bit": {
+   "architectures": [
+    "Qwen3_5ForConditionalGeneration"
+   ],
+   "auto_map": false,
+   "chat_template_sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+   "files": {
+    ".gitattributes": 1570,
+    "README.md": 2065,
+    "chat_template.jinja": 7756,
+    "config.json": 2968,
+    "model-00001-of-00002.safetensors": 5349771222,
+    "model-00002-of-00002.safetensors": 600449850,
+    "model.safetensors.index.json": 123592,
+    "preprocessor_config.json": 390,
+    "processor_config.json": 1300,
+    "tokenizer.json": 19989343,
+    "tokenizer_config.json": 1139,
+    "video_preprocessor_config.json": 385,
+    "vocab.json": 6722759
+   },
+   "has_vision_config": true,
+   "index_shards": [
+    "model-00001-of-00002.safetensors",
+    "model-00002-of-00002.safetensors"
+   ],
+   "license": null,
+   "max_position_embeddings": 262144,
+   "model_type": "qwen3_5",
+   "num_experts": null,
+   "num_hidden_layers": 32,
+   "quantization": {
+    "bits": 4,
+    "group_size": 64,
+    "mode": "affine",
+    "override_bits": [],
+    "per_layer_overrides": 0
+   },
+   "sha": "7b094180782d187b6f76242d085882914e6af181",
+   "strict_load": {
+    "model_params": 1260,
+    "processor_class": "Qwen3VLProcessor",
+    "strict_load": "PASS",
+    "tensors": 1260,
+    "tokenizer_class": "TokenizersBackend",
+    "tool_parser": "qwen3_coder",
+    "vision_tower": true
+   },
+   "subfolder": null,
+   "text_model_type": "qwen3_5_text",
+   "tokenizer_class": "TokenizersBackend"
+  }
+ },
+ "stock_templates": {
+  "mlx-community/Qwen3.5-9B-4bit": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+  "xtools-at/DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic": "f7e41c826a3eea86dbd6ed2e204f0fc03262fcf720144e1dbb9b6d3e44e333a1"
+ },
+ "verified_at": "2026-10-26"
+}

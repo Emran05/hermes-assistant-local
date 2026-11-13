@@ -258,6 +258,41 @@ else
   info "the services step below does."
 fi
 
+# approval-gate puts computer_use desktop actions and writes to shell rc files,
+# LaunchAgents, ~/.hermes and this install dir behind Hermes' own approval
+# prompt (the dashboard card / Telegram), and blocks them in unattended runs
+# (`hermes -z`, cron), which have no prompt at all. Same link + enable steps.
+AG_SRC="$ROOT/hermes-plugins/approval-gate"
+AG_DST="$HERMES_DIR/plugins/approval-gate"
+if [ ! -f "$AG_SRC/__init__.py" ]; then
+  warn "hermes-plugins/approval-gate is missing from this checkout — skipped"
+elif [ "$DRY" = "1" ]; then
+  plan "link $AG_DST -> hermes-plugins/approval-gate"
+  plan "add approval-gate to plugins.enabled in $HERMES_DIR/config.yaml (backed up first)"
+else
+  mkdir -p "$HERMES_DIR/plugins"
+  if [ -L "$AG_DST" ] && [ "$(readlink "$AG_DST")" = "$AG_SRC" ]; then
+    oky "approval-gate already linked"
+  else
+    if [ -e "$AG_DST" ] && [ ! -L "$AG_DST" ]; then
+      mv "$AG_DST" "$AG_DST.old-$(date +%Y%m%d-%H%M%S)"
+      warn "moved an existing $AG_DST aside"
+    fi
+    ln -sfn "$AG_SRC" "$AG_DST"
+    oky "linked ~/.hermes/plugins/approval-gate -> hermes-plugins/approval-gate"
+  fi
+  if [ -f "$HERMES_DIR/config.yaml" ]; then
+    if ag_out="$("${PY:-python3}" "$ROOT/hermes-plugins/plugin_enable.py" \
+                 approval-gate --config "$HERMES_DIR/config.yaml" 2>&1)"; then
+      oky "plugins.enabled: $ag_out"
+    else
+      warn "could not enable approval-gate: $ag_out"
+    fi
+  else
+    warn "no config.yaml yet — run this script again to enable approval-gate"
+  fi
+fi
+
 # ===========================================================================
 # 5. model server backend (optional isolated venv)
 # ===========================================================================

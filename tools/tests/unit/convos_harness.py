@@ -12,24 +12,47 @@ SP   = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.environ.get("HERMES_REPO") or os.path.dirname(
     os.path.dirname(os.path.dirname(SP)))
 REPO = os.path.join(ROOT, "dashboard")
-# The owner's REAL home, captured before HOME is pointed at the throwaway.
-REAL_HOME = os.path.expanduser("~")
 HOME = tempfile.mkdtemp(prefix="hermes-convos-")
-PORT = "7799"
+# a FREE loopback port, not a fixed one: two checkouts (or two worktrees)
+# running the unit tier at once used to collide on "Address already in use"
+import socket as _socket                         # noqa: E402
+_s = _socket.socket(); _s.bind(("127.0.0.1", 0))
+PORT = str(_s.getsockname()[1]); _s.close()
 
 # ---- throwaway HOME --------------------------------------------------------
 shutil.rmtree(HOME, ignore_errors=True)
 CH = os.path.join(HOME, ".hermes", "dashboard", "chats")
 os.makedirs(CH, exist_ok=True)
 
-# REAL_HOME, not expanduser(): this line moves the day someone reorders the
-# file and the HOME redirect below lands first.
-REAL = os.path.join(REAL_HOME, ".hermes", "dashboard", "chats")
+# No conversation is borrowed from the owner's store any more (S2 seam: a unit
+# suite never reads ~/.hermes).  The two stored-shape conversations below
+# carry what save_chat writes — rev, per-message ids, serve_sid/serve_key and
+# tool/approval/status rows — which is what the borrowed files exercised.
 copied = []
-for fn in ("chat-2026-08-31-qglb4.json", "autoroute-test-1787079206.json"):
-    src = os.path.join(REAL, fn)
-    if os.path.exists(src):
-        shutil.copy2(src, os.path.join(CH, fn)); copied.append(fn)
+for _sid, _obj in (
+        ("chat-2026-08-31-fixt1", {
+            "title": "Plan the greenhouse irrigation", "rev": 7,
+            "serve_sid": "sid-ephemeral-1a2b", "serve_key": "durable-key-fixture",
+            "messages": [
+                {"id": "a1b2c3d4e5f6", "role": "user", "ts": 1788000000.0,
+                 "text": "How should I lay out the drip lines?"},
+                {"id": "a1b2c3d4e5f7", "role": "tool", "tool": "terminal",
+                 "ts": 1788000001.0, "text": "ls output"},
+                {"id": "a1b2c3d4e5f8", "role": "bot", "ts": 1788000002.0,
+                 "text": "One manifold per bench.", "status": None},
+            ]}),
+        ("autoroute-test-fixture", {
+            "title": "", "rev": 2, "messages": [
+                {"id": "b1b2c3d4e5f6", "role": "user", "ts": 1788000100.0,
+                 "text": "think hard: should I refactor the scheduler?"},
+                {"id": "b1b2c3d4e5f7", "role": "bot", "ts": 1788000101.0,
+                 "text": "Probably not yet.",
+                 "deep": {"model": "sonnet", "ms": 900, "reason": "score 3.0"}},
+            ]})):
+    with open(os.path.join(CH, _sid + ".json"), "w") as _fh:
+        json.dump(_obj, _fh, indent=1)
+    os.utime(os.path.join(CH, _sid + ".json"), (1788000200.0, 1788000200.0))
+    copied.append(_sid)
 
 def wr(sid, obj, mtime=None):
     p = os.path.join(CH, sid + ".json")
@@ -141,7 +164,7 @@ import atexit as _atexit
 _atexit.register(lambda: print("TESTS %d passed %d failed"
                                % (TOTAL[0] - len(FAIL), len(FAIL))))
 
-print("copied real chats:", copied)
+print("stored-shape chats:", copied)
 
 # ================= 1. search =================
 print("\n--- GET /api/sessions/search")

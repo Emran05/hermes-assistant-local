@@ -1,9 +1,10 @@
 # aux_config.py — Config-as-Code Snapshot/Restore (P1.6).
 #
-# Makes the dashboard's mutable runtime state (which lives OUTSIDE the repo in
-# ~/.hermes/) versionable INSIDE the repo as ONE deterministic, diffable
-# artifact: docs/state-snapshot.json.  Export captures a strict ALLOWLIST;
-# import validates + restores it (dry-run plan first, then atomic apply).
+# Makes the dashboard's mutable runtime state (which lives in ~/.hermes/)
+# exportable as ONE deterministic, diffable artifact:
+# ~/.hermes/dashboard/state-snapshot.json (it used to be docs/state-snapshot.json
+# in the install tree — see CFG_SNAPSHOT_PATH).  Export captures a strict
+# ALLOWLIST; import validates + restores it (dry-run plan first, then atomic apply).
 #
 # Aux-registry integration (ZERO server.py edits): exec'd into server.py's
 # globals by the aux-module loader, so it may use these server globals:
@@ -28,6 +29,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 from datetime import datetime
 
@@ -47,8 +49,19 @@ except Exception:          # pragma: no cover — defensive only
 SNAPSHOT_SCHEMA = 1
 SNAPSHOT_KIND = "hermes-state-snapshot"
 CFG_REPO_ROOT = os.path.dirname(HERE)                       # dashboard/ -> repo
-CFG_SNAPSHOT_PATH = os.path.join(CFG_REPO_ROOT, "docs", "state-snapshot.json")
-CFG_SNAPSHOT_RELPATH = "docs/state-snapshot.json"           # reported (no abs paths in JSON)
+# The export lives with the rest of the dashboard's data, NOT in the install
+# tree (2026-10-21 audit C64).  docs/state-snapshot.json was anchored to the
+# code: a tarball update's `rsync --delete` deleted the owner's export (the
+# file is export-ignored), on a git checkout every Export dirtied a tracked
+# file and the updater then refused to run, and any scratch-HOME harness that
+# exercised Export overwrote the repo's copy.  DATA follows HOME, so a
+# harness now writes its own scratch tree.  The old path is still READ —
+# status and a file import fall back to it while no new export exists — so a
+# snapshot exported before the move can still be restored; it is never written.
+CFG_SNAPSHOT_PATH = os.path.join(DATA, "state-snapshot.json")
+CFG_SNAPSHOT_RELPATH = "~/.hermes/dashboard/state-snapshot.json"  # reported (no abs paths in JSON)
+CFG_SNAPSHOT_LEGACY = os.path.join(CFG_REPO_ROOT, "docs", "state-snapshot.json")
+CFG_SNAPSHOT_LEGACY_RELPATH = "docs/state-snapshot.json"
 CFG_BACKUPS = os.path.join(DATA, "snapshot-backups")        # NOT in the repo
 CFG_MAX_BYTES = 256 * 1024
 CFG_BODY_MAX = 512 * 1024
@@ -87,7 +100,7 @@ CFG_ENTROPY_PATTERN = r"\b[A-Za-z0-9+/=_-]{48,}\b"
 # module-load side effects (never let them take the hub down)
 # --------------------------------------------------------------------------
 try:
-    os.makedirs(CFG_BACKUPS, exist_ok=True)
+    os.makedirs(CFG_BACKUPS, mode=0o700, exist_ok=True)
 except Exception as _e:                                     # pragma: no cover
     print("[aux_config] mkdir %s failed: %s" % (CFG_BACKUPS, _e))
 
@@ -215,21 +228,157 @@ def _cfg_clean_settings(raw):
     return out
 
 
+# B27: the roster schema a snapshot carries. It used to be id/label/ram/note
+# only, so an import rewrote models.json with every custom model's backend,
+# template_args and drafter stripped (it then loaded on mlx-lm with thinking
+# on) and deleted every model the snapshot did not list. Every field below is
+# validated; an invalid one is DROPPED, never rewritten. `trust_remote_code`
+# is deliberately absent: it is only ever the owner's hand edit of
+# models.json, never something a config file (or an agent with curl) can set.
+CFG_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,94}[A-Za-z0-9])?"
+                             r"/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,94}[A-Za-z0-9])?$")
+CFG_SUBFOLDER_RE = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
+CFG_GLOB_RE = re.compile(r"^[A-Za-z0-9._*?/\[\]-]{1,80}$")
+CFG_TA_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,39}$")
+
+
+def _cfg_model_id(v):
+    return (isinstance(v, str) and len(v) <= 120 and CFG_MODEL_ID_RE.fullmatch(v) is not None
+            and ".." not in v and "--" not in v)
+
+
+def _cfg_int(v, lo, hi):
+    return isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
+
+
+def _cfg_clean_model_entry(m):
+    if not isinstance(m, dict) or not _cfg_model_id(m.get("id")):
+        return None
+    out = {"id": m["id"]}
+    if isinstance(m.get("label"), str) and m["label"].strip():
+        out["label"] = m["label"].strip()[:64]
+    if "ram" in m:
+        ram = m.get("ram")
+        out["ram"] = ram if (ram is None or (isinstance(ram, (int, float))
+                                             and not isinstance(ram, bool))) else None
+    if isinstance(m.get("note"), str) and m["note"]:
+        out["note"] = m["note"][:120]
+    if _cfg_int(m.get("ctx"), 1024, 10_000_000):
+        out["ctx"] = m["ctx"]
+    if m.get("role") in ("background", "primary"):
+        out["role"] = m["role"]
+    for k in ("thinking", "hf_offline"):
+        if isinstance(m.get(k), bool):
+            out[k] = m[k]
+    if m.get("backend") in ("mlx_vlm", "mlx_lm"):
+        out["backend"] = m["backend"]
+    ta = m.get("template_args")
+    if isinstance(ta, dict):
+        clean_ta = {k: v for k, v in list(ta.items())[:8]
+                    if isinstance(k, str) and CFG_TA_KEY_RE.match(k)
+                    and (isinstance(v, (bool, int, float))
+                         or (isinstance(v, str) and len(v) <= 40))}
+        if clean_ta or not ta:          # all-invalid -> dropped, not "{}": the
+            out["template_args"] = clean_ta     # merge would wipe live args
+
+    if _cfg_model_id(m.get("draft_model")):
+        out["draft_model"] = m["draft_model"]
+    sub = m.get("draft_subfolder")
+    if isinstance(sub, str) and len(sub) <= 64 and CFG_SUBFOLDER_RE.fullmatch(sub) \
+            and ".." not in sub.split("/"):
+        out["draft_subfolder"] = sub
+    if isinstance(m.get("draft_kind"), str) and re.match(r"^[a-z0-9_]{1,16}$", m["draft_kind"]):
+        out["draft_kind"] = m["draft_kind"]
+    if _cfg_int(m.get("draft_block_size"), 1, 16):
+        out["draft_block_size"] = m["draft_block_size"]
+    for k in ("ignore_patterns", "allow_patterns"):
+        v = m.get(k)
+        if isinstance(v, list):
+            pats = [p for p in v[:16] if isinstance(p, str) and CFG_GLOB_RE.match(p)
+                    and ".." not in p]
+            if pats:
+                out[k] = pats
+    # Round 3 roster fields (server.py "Round-3 roster fields"). Same
+    # drop-don't-rewrite rule. model_subfolder gets draft_subfolder's
+    # validation; `uncensored`/`verified` must be real booleans (an import can
+    # SET uncensored but never clear a curated seed's — models_payload keeps
+    # the seed's true); `sampling` keeps only the names/ranges the model
+    # server accepts — server.py's _roster_sampling, resolved by name at call
+    # time (this module execs into its globals), with the same rule inline as
+    # the fallback for a copy of this function running without it.
+    msub = m.get("model_subfolder")
+    # fullmatch, not match: `$` also matches before a trailing newline, and a
+    # stored "4bit\n" is a value no other reader of models.json would agree on.
+    if isinstance(msub, str) and len(msub) <= 64 and CFG_SUBFOLDER_RE.fullmatch(msub) \
+            and msub.count("/") <= 3 and not ({".", ".."} & set(msub.split("/"))):
+        out["model_subfolder"] = msub
+    for k in ("uncensored", "verified"):
+        if isinstance(m.get(k), bool):
+            out[k] = m[k]
+    if "sampling" in m:
+        raw, smp = m.get("sampling"), {}
+        fn = globals().get("_roster_sampling")
+        if callable(fn):
+            smp = fn(raw)
+        elif isinstance(raw, dict):
+            for k, (typ, lo, hi) in {
+                    "temperature": (float, 0.0, 2.0), "top_p": (float, 0.0, 1.0),
+                    "top_k": (int, 0, 1000), "min_p": (float, 0.0, 1.0),
+                    "repetition_penalty": (float, 1.0, 2.0),
+                    "repetition_context_size": (int, 1, 4096),
+                    "presence_penalty": (float, -2.0, 2.0),
+                    "frequency_penalty": (float, -2.0, 2.0)}.items():
+                x = raw.get(k)
+                if isinstance(x, bool) or not isinstance(x, (int, float)):
+                    continue
+                if typ is int and isinstance(x, float) and not x.is_integer():
+                    continue
+                try:
+                    x = int(x) if typ is int else float(x)
+                except OverflowError:       # an int past float range: dropped
+                    continue
+                if x == x and lo <= x <= hi:
+                    smp[k] = x
+        if smp or raw == {}:                    # {} = "no defaults", kept
+            out["sampling"] = smp
+    lic = m.get("license")
+    if lic is None and "license" in m:
+        out["license"] = None
+    elif isinstance(lic, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,39}", lic):
+        out["license"] = lic
+    return out
+
+
 def _cfg_clean_models(raw):
-    active = str((raw or {}).get("active") or "")[:120]
+    active = (raw or {}).get("active")
+    active = active if _cfg_model_id(active) else ""
     roster = []
     for m in ((raw or {}).get("roster") or [])[:24]:
-        if not isinstance(m, dict):
-            continue
-        mid = str(m.get("id", ""))[:120]
+        e = _cfg_clean_model_entry(m)
+        if e:
+            roster.append(e)
+    return {"active": active, "roster": roster}
+
+
+def _cfg_merge_roster(live, imported):
+    """B27: an import UPDATES the roster, it never shrinks or strips it. A
+    snapshot entry's (validated) fields win over the matching live entry's;
+    fields the snapshot does not carry are kept, so an older id/label/ram/note
+    snapshot no longer strips backend/template_args/drafter (and a hand-set
+    trust_remote_code survives). Live entries the snapshot does not list stay;
+    new ids are appended in snapshot order."""
+    out = [dict(m) for m in (live or []) if isinstance(m, dict) and m.get("id")]
+    pos = {m["id"]: i for i, m in enumerate(out)}
+    for m in imported or []:
+        mid = m.get("id") if isinstance(m, dict) else None
         if not mid:
             continue
-        ram = m.get("ram")
-        roster.append({"id": mid,
-                       "label": str(m.get("label", ""))[:64],
-                       "ram": ram if (ram is None or isinstance(ram, (int, float))) else None,
-                       "note": str(m.get("note", ""))[:120]})
-    return {"active": active, "roster": roster}
+        if mid in pos:
+            out[pos[mid]].update({k: v for k, v in m.items() if k != "trust_remote_code"})
+        else:
+            pos[mid] = len(out)
+            out.append({k: v for k, v in m.items() if k != "trust_remote_code"})
+    return out
 
 
 def _cfg_clean_permissions(raw):
@@ -238,11 +387,15 @@ def _cfg_clean_permissions(raw):
         return {"classes": classes, "patterns": patterns}
     valid_tiers = getattr(_cfg_pm, "TIERS", ("auto", "ask", "never")) if _cfg_pm else ("auto", "ask", "never")
     class_meta = getattr(_cfg_pm, "CLASS_META", None) if _cfg_pm else None
-    for cid, tier in (raw.get("classes") or {}).items():
-        if isinstance(cid, str) and tier in valid_tiers and (class_meta is None or cid in class_meta):
+    # a field of the wrong type (an import can say anything) is dropped
+    raw_classes = raw.get("classes")
+    raw_patterns = raw.get("patterns")
+    for cid, tier in (raw_classes if isinstance(raw_classes, dict) else {}).items():
+        if isinstance(cid, str) and isinstance(tier, str) and tier in valid_tiers \
+                and (class_meta is None or cid in class_meta):
             classes[cid] = tier
-    for pat, tier in (raw.get("patterns") or {}).items():
-        if isinstance(pat, str) and pat and tier in valid_tiers:
+    for pat, tier in (raw_patterns if isinstance(raw_patterns, dict) else {}).items():
+        if isinstance(pat, str) and pat and isinstance(tier, str) and tier in valid_tiers:
             patterns[pat] = tier
     return {"classes": classes, "patterns": patterns}
 
@@ -323,6 +476,18 @@ def _cfg_serialize(obj):
     return (json.dumps(obj, indent=1, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
 
 
+def _cfg_write_private(tmp, data):
+    """Write `data` to `tmp` created 0600 from birth (E116: exports and
+    backups hold the whole permission policy; a plain open() made them 0644
+    under the usual umask).  fchmod covers a stale tmp left wider by a crash."""
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        os.fchmod(fd, 0o600)
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def _cfg_dump(obj, path):
     """Atomic deterministic write; tmp cleaned up on failure.  Held under lock."""
     data = _cfg_serialize(obj)
@@ -330,10 +495,7 @@ def _cfg_dump(obj, path):
     tmp = path + ".tmp"
     with _state_lock:
         try:
-            with open(tmp, "wb") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
+            _cfg_write_private(tmp, data)
             os.replace(tmp, path)
             tmp = None
         finally:
@@ -460,7 +622,9 @@ def snapshot_diff(clean, apply_active=False, dropped=None):
         plan["models"] = {
             "roster_changed": ld["models"]["roster"] != cd["models"]["roster"],
             "added": [m for m in sr if m not in lr],
-            "removed": [m for m in lr if m not in sr],
+            # B27: an import merges into the roster — nothing is removed
+            "removed": [],
+            "kept_unlisted": [m for m in lr if m not in sr],
             "active": {"from": ld["models"]["active"], "to": tgt,
                        "downloaded": _model_downloaded(tgt) if tgt else False,
                        "will_apply": bool(apply_active and tgt and tgt != ld["models"]["active"])}}
@@ -473,6 +637,17 @@ def snapshot_diff(clean, apply_active=False, dropped=None):
                         if lp.get("classes") != sp.get("classes") else {}),
             "patterns": ({"from": lp.get("patterns", {}), "to": sp.get("patterns", {})}
                          if lp.get("patterns") != sp.get("patterns") else {})}
+        # E112: what a restore would really do — it MERGES into the live
+        # policy (the owner's other entries, Nevers included, are kept) and
+        # lands UNTRUSTED.  One row per class/pattern whose effective tier
+        # changes, loosened ones flagged; the UI renders these, not a
+        # one-line "policy differs".
+        if _cfg_pm is not None:
+            ip = _cfg_pm.import_plan(sp)
+            plan["permissions"].update({
+                "changed": ip["changed"], "rows": ip["rows"],
+                "ignored": ip["ignored"], "loosened": ip["loosened"],
+                "lands_untrusted": ip["changed"]})
 
     if "agent_config" in clean:
         la, sa = live["agent_config"], clean["agent_config"]
@@ -501,12 +676,24 @@ def _cfg_gc_backups():
             os.remove(p)
         except OSError:
             pass
+    for p in files:              # E116: backups written before the fix were 0644
+        try:
+            os.chmod(p, 0o600)
+        except OSError:
+            pass
 
 
 def _cfg_backup():
-    """Export the CURRENT live state to snapshot-backups/ before any apply."""
+    """Export the CURRENT live state to snapshot-backups/ before any apply.
+
+    Returns the backup's relative name, and RAISES when it could not be
+    written (2026-10-21 audit C25): it used to swallow every failure and
+    return None, and the apply then went ahead and answered ok:true right
+    after the UI had promised "a pre-restore backup will be kept"."""
+    tmp = None
     try:
-        os.makedirs(CFG_BACKUPS, exist_ok=True)
+        os.makedirs(CFG_BACKUPS, mode=0o700, exist_ok=True)
+        os.chmod(CFG_BACKUPS, 0o700)
         snap = snapshot_build()
         snap["exported_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
         ts = time.strftime("%Y%m%d-%H%M%S")
@@ -518,13 +705,17 @@ def _cfg_backup():
             name = "pre-restore-%s-%d.json" % (ts, n)
             path = os.path.join(CFG_BACKUPS, name)
         tmp = path + ".tmp"
-        with open(tmp, "wb") as f:
-            f.write(_cfg_serialize(snap))
+        _cfg_write_private(tmp, _cfg_serialize(snap))
         os.replace(tmp, path)
         _cfg_gc_backups()
         return "snapshot-backups/" + name
     except Exception:
-        return None
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        raise
 
 
 # --------------------------------------------------------------------------
@@ -539,8 +730,8 @@ def snapshot_export(note=""):
                  "error": "secret-like value detected (%s)" % h["pattern_name"],
                  "where": h["pattern_name"]}, 400)
     # deterministic exported_at: reuse the previous one when the substantive
-    # content is unchanged, so a no-op re-export is byte-identical (clean git diff)
-    prev = read_json(CFG_SNAPSHOT_PATH, None)
+    # content is unchanged, so a no-op re-export is byte-identical (clean diff)
+    prev = read_json(_cfg_snapshot_source()[0], None)
     now_iso = datetime.now().astimezone().isoformat(timespec="seconds")
     if isinstance(prev, dict) and _cfg_without_ts(prev) == snap:
         snap["exported_at"] = prev.get("exported_at") or now_iso
@@ -564,9 +755,21 @@ def snapshot_export(note=""):
 # --------------------------------------------------------------------------
 # apply (dry_run=false)
 # --------------------------------------------------------------------------
-def snapshot_apply(clean, sections, apply_active, dropped):
+def snapshot_apply(clean, sections, apply_active, dropped, force=False):
     applied, warnings = {}, []
-    backup = _cfg_backup()
+    try:
+        backup = _cfg_backup()
+    except Exception as e:
+        # C25: no backup, no restore — unless the caller explicitly says so.
+        # The reported reason is HOME-relative (no absolute paths in JSON).
+        why = ("%s: %s" % (type(e).__name__, e)).replace(HOME, "~")
+        print("[aux_config] pre-restore backup failed%s: %s"
+              % (" (force: restoring anyway)" if force else "", why), file=sys.stderr)
+        if not force:
+            return ({"ok": False, "backup_failed": True,
+                     "error": "could not write the pre-restore backup: " + why}, 500)
+        backup = None
+        warnings.append("restored WITHOUT a pre-restore backup (" + why + ")")
     dash = clean.get("dashboard", {})
 
     if "layout" in sections and "layout" in dash:
@@ -585,7 +788,8 @@ def snapshot_apply(clean, sections, apply_active, dropped):
 
     if "models" in sections and "models" in dash:
         with _state_lock:
-            write_json(MODELS_FILE, {"models": dash["models"]["roster"]})
+            write_json(MODELS_FILE, {"models": _cfg_merge_roster(
+                _model_registry(), dash["models"]["roster"])})
         applied["models"] = True
         if apply_active:
             tgt = dash["models"].get("active")
@@ -603,9 +807,18 @@ def snapshot_apply(clean, sections, apply_active, dropped):
 
     if "permissions" in sections and "permissions" in clean and _cfg_pm is not None:
         try:
-            _cfg_pm._save({"classes": clean["permissions"].get("classes", {}),
-                           "patterns": clean["permissions"].get("patterns", {})})
-            applied["permissions"] = True
+            # E112: merged, and written UNSIGNED — the imported policy lands
+            # untrusted, so every Auto stays suspended until the owner uses
+            # Review & re-trust (never _save(), which signs).
+            ip = _cfg_pm.import_policy({
+                "classes": clean["permissions"].get("classes", {}),
+                "patterns": clean["permissions"].get("patterns", {})})
+            applied["permissions"] = True if ip.get("changed") else "unchanged"
+            if ip.get("changed"):
+                warnings.append("permissions imported UNTRUSTED: Auto is suspended "
+                                "until you Review & re-trust in Settings › Trust")
+            for why in ip.get("ignored") or []:
+                warnings.append("permissions: ignored " + why)
         except Exception as e:
             applied["permissions"] = False
             warnings.append("permissions restore failed: %s" % e)
@@ -641,18 +854,40 @@ def snapshot_apply(clean, sections, apply_active, dropped):
 # --------------------------------------------------------------------------
 # file read + status/drift
 # --------------------------------------------------------------------------
+def _cfg_snapshot_source():
+    """(path, reported path, legacy?) of the snapshot file to READ: the
+    export under DATA, or — only while that does not exist — one written to
+    the install tree before C64 moved it."""
+    if not os.path.exists(CFG_SNAPSHOT_PATH) and os.path.exists(CFG_SNAPSHOT_LEGACY):
+        return CFG_SNAPSHOT_LEGACY, CFG_SNAPSHOT_LEGACY_RELPATH, True
+    return CFG_SNAPSHOT_PATH, CFG_SNAPSHOT_RELPATH, False
+
+
 def _cfg_read_snapshot_file():
     """Return (data, err) where err in {None,'missing','too large','invalid'}."""
+    path = _cfg_snapshot_source()[0]
     try:
-        sz = os.path.getsize(CFG_SNAPSHOT_PATH)
+        sz = os.path.getsize(path)
     except OSError:
         return (None, "missing")
     if sz > CFG_MAX_BYTES:
         return (None, "too large")
-    data = read_json(CFG_SNAPSHOT_PATH, None)
+    data = read_json(path, None)
     if not isinstance(data, dict):
         return (None, "invalid")
     return (data, None)
+
+
+def _cfg_perm_drift(live, clean):
+    """A restore MERGES the policy (E112), so "in sync" means importing it
+    would change nothing — the live policy may hold more entries."""
+    if _cfg_pm is not None:
+        try:
+            return "drifted" if _cfg_pm.import_plan(clean.get("permissions"))["changed"] \
+                else "in_sync"
+        except Exception:
+            pass
+    return "in_sync" if live.get("permissions") == clean.get("permissions") else "drifted"
 
 
 def _cfg_drift(live, clean):
@@ -661,7 +896,7 @@ def _cfg_drift(live, clean):
         "layout": "in_sync" if ld.get("layout") == cd.get("layout") else "drifted",
         "settings": "in_sync" if ld.get("settings") == cd.get("settings") else "drifted",
         "models": "in_sync" if ld.get("models") == cd.get("models") else "drifted",
-        "permissions": "in_sync" if live.get("permissions") == clean.get("permissions") else "drifted",
+        "permissions": _cfg_perm_drift(live, clean),
         "agent_config": "in_sync" if live.get("agent_config") == clean.get("agent_config") else "drifted",
     }
 
@@ -669,12 +904,15 @@ def _cfg_drift(live, clean):
 def _cfg_status():
     warnings = []
     live = snapshot_build()
-    exists = os.path.exists(CFG_SNAPSHOT_PATH)
-    file_info = {"exists": exists, "path": CFG_SNAPSHOT_RELPATH}
+    src, rel, legacy = _cfg_snapshot_source()
+    exists = os.path.exists(src)
+    file_info = {"exists": exists, "path": rel}
+    if legacy:
+        file_info["legacy"] = True
     snap, ferr = _cfg_read_snapshot_file()
     if exists:
         try:
-            file_info["bytes"] = os.path.getsize(CFG_SNAPSHOT_PATH)
+            file_info["bytes"] = os.path.getsize(src)
         except OSError:
             file_info["bytes"] = 0
     if not exists or snap is None:
@@ -724,7 +962,12 @@ def snapshot_post(path, body):
     bad = [s for s in sections if s not in CFG_SECTIONS]
     if bad:
         return ({"ok": False, "error": "unknown section %s" % bad[0]}, 400)
-    apply_active = bool(body.get("apply_active_model", False))
+    apply_active = body.get("apply_active_model", False)
+    force = body.get("force", False)
+    for k, v in (("apply_active_model", apply_active), ("force", force)):
+        # a JSON boolean only: bool("false") is True (2026-10-21 audit C59)
+        if not isinstance(v, bool):
+            return ({"ok": False, "error": "%s must be true or false" % k}, 400)
 
     inline = body.get("snapshot")
     if inline is not None:
@@ -747,7 +990,9 @@ def snapshot_post(path, body):
                 "plan": snapshot_diff(clean, apply_active, dropped),
                 "warnings": warnings}
 
-    res = snapshot_apply(clean, sections, apply_active, dropped)
+    res = snapshot_apply(clean, sections, apply_active, dropped, force=force)
+    if isinstance(res, tuple):
+        return res
     if warnings:
         res["warnings"] = warnings + res.get("warnings", [])
     return res

@@ -144,7 +144,10 @@
       ".wt-add .wt-actions{display:flex;gap:8px;align-items:center;margin-top:4px}",
       ".wt-btn{font-family:inherit;font-size:12px;font-weight:560;padding:6px 13px;border-radius:9px;cursor:pointer;",
       "border:1px solid var(--hairline);background:var(--glass);color:var(--ink)}",
-      ".wt-btn.primary{background:color-mix(in srgb,var(--iris) 24%,transparent);border-color:color-mix(in srgb,var(--iris) 45%,transparent)}",
+      // a TINTED fill, so the label is the page ink: index.html's button.primary
+      // sets --iris-ink (white in light, near-black in dark), which is for a
+      // SOLID accent fill and read 1.4:1 / 2.1:1 here (visual audit V41)
+      ".wt-btn.primary{background:color-mix(in srgb,var(--iris) 24%,transparent);border-color:color-mix(in srgb,var(--iris) 45%,transparent);color:var(--ink)}",
       ".wt-btn:disabled{opacity:.5;cursor:default}",
       ".wt-preview{margin-top:9px;font-size:12px;border-radius:9px;padding:9px 11px;",
       "background:var(--glass);border:1px solid var(--hairline);white-space:pre-wrap;color:var(--muted)}",
@@ -154,7 +157,9 @@
       ".wt-fire .wt-ft{flex:0 0 auto;color:var(--faint);width:64px;font-variant-numeric:tabular-nums;padding-top:1px}",
       ".wt-fire .wt-fb{flex:1;min-width:0}",
       ".wt-fire .wt-fl{color:var(--ink);font-weight:540}",
-      ".wt-fire .wt-fx{color:var(--muted);margin-top:1px;overflow:hidden;text-overflow:ellipsis}",
+      ".wt-fire .wt-fx{color:var(--muted);margin-top:1px;overflow:hidden;text-overflow:ellipsis;overflow-wrap:anywhere}",
+      ".wt-fire .wt-fx a.wt-lnk{color:var(--ink);text-decoration:underline;text-decoration-color:var(--hairline);text-underline-offset:2px}",
+      ".wt-fire .wt-fx a.wt-lnk:hover{text-decoration-color:currentColor}",
       ".wt-fire .wt-react{display:flex;gap:5px;flex:0 0 auto}",
       ".wt-react .wt-rb{font-size:10.5px;padding:3px 8px;border-radius:7px;border:1px solid var(--hairline);",
       "background:var(--glass-2);color:var(--muted);cursor:pointer}",
@@ -168,6 +173,10 @@
       "background-size:200% 100%;animation:wtsh 1.3s linear infinite}",
       "@keyframes wtsh{0%{background-position:200% 0}100%{background-position:-200% 0}}",
       ".wt-glyph{display:block}",
+      // C94: the switches are focusable now; the shared focus rule in
+      // index.html does not list .wt-tog, so the ring is added here (outline
+      // only — the switch's geometry/colour/motion stay in index.html)
+      ".wt-tog:focus-visible{outline:2px solid var(--iris);outline-offset:2px}",
       "@media (prefers-reduced-motion:reduce){.wt-skel{animation:none}}",   // toggle: see index.html
     ].join("\n");
     (d.head || d.body || d.documentElement).appendChild(s);
@@ -225,9 +234,16 @@
     var tiny = rules.length + (rules.length === 1 ? " rule · " : " rules · ") + enabledCount + " on";
 
     var html = "";
+    if (data.config_error)
+      html += '<div class="wt-eb" role="alert" data-wt-cfgerr="1">watchtower.json is ' + E(data.config_error) +
+        " — every push is held and both switches read as off. " +
+        // an UNREADABLE file is never written over (the save answers 503)
+        (/^unreadable/.test(String(data.config_error))
+          ? "Nothing can be saved until the file can be read again."
+          : "Saving any switch keeps the broken file aside and writes a fresh one.") + "</div>";
     html += masterHtml(data.master || {});
     html += controlsHtml(brief, qh, data.daily_cap, data.midday || {}, data.breaking || {},
-      data.evening || {});
+      data.evening || {}, data.web_research || {});
     html += '<div class="wt-eb" id="wt-ctl-eb"></div>';
     html += '<div class="wt-band">Watches<span class="wt-brule"></span></div>';
     html += rulesHtml(rules, stats);
@@ -237,7 +253,7 @@
     html += recentHtml(data.recent || []);
     html += '<div class="wt-hint">Watchtower only notifies — it never runs a tool, never acts, ' +
       "and delivers to your Telegram home channel only. The two switches up top silence all " +
-      "daily briefings or all news updates in one flip; quiet hours, per-rule cooldown, and a " +
+      "daily briefings, or all news and watch alerts, in one flip; quiet hours, per-rule cooldown, and a " +
       "daily cap keep the rest polite.</div>";
 
     var s = mount(grid, html, tiny);
@@ -253,14 +269,14 @@
     var nOn = master.news !== false;
     return '<div class="wt-controls wt-master">' +
       '<div class="wt-ctl"><label>Daily briefings</label><div class="wt-row2">' +
-      toggle("wt-master-briefs", bOn) +
+      toggle("wt-master-briefs", bOn, "Daily briefings") +
       '<span class="tiny" style="color:var(--faint)">8am · midday · evening</span></div></div>' +
       '<div class="wt-ctl"><label>News updates</label><div class="wt-row2">' +
-      toggle("wt-master-news", nOn) +
-      '<span class="tiny" style="color:var(--faint)">breaking · news keywords</span></div></div></div>';
+      toggle("wt-master-news", nOn, "News updates") +
+      '<span class="tiny" style="color:var(--faint)">breaking · every watch · hourly feed fetch</span></div></div></div>';
   }
 
-  function controlsHtml(brief, qh, cap, midday, breaking, evening) {
+  function controlsHtml(brief, qh, cap, midday, breaking, evening, research) {
     var briefOn = brief.enabled !== false;
     var h = num(brief.hour, 8), m = num(brief.minute, 0);
     var hh = (h < 10 ? "0" : "") + h, mm = (m < 10 ? "0" : "") + m;
@@ -274,24 +290,31 @@
     var ehh = (eh < 10 ? "0" : "") + eh, emm = (emin < 10 ? "0" : "") + emin;
     return '<div class="wt-controls">' +
       '<div class="wt-ctl"><label>8am World Brief</label><div class="wt-row2">' +
-      toggle("wt-brief-on", briefOn) +
+      toggle("wt-brief-on", briefOn, "8am World Brief") +
       '<input class="wt-inp wt-time" id="wt-brief-time" value="' + E(hh + ":" + mm) +
       '" placeholder="08:00"></div></div>' +
       '<div class="wt-ctl"><label>Midday pulse</label><div class="wt-row2">' +
-      toggle("wt-mid-on", midOn) +
+      toggle("wt-mid-on", midOn, "Midday pulse") +
       '<input class="wt-inp wt-time" id="wt-mid-time" value="' + E(mhh + ":" + mmm) +
       '" placeholder="15:00" title="11:00-17:59. Sends only when something noteworthy changed"></div></div>' +
       '<div class="wt-ctl"><label>Evening wrap</label><div class="wt-row2">' +
-      toggle("wt-eve-on", eveOn) +
+      toggle("wt-eve-on", eveOn, "Evening wrap") +
       '<input class="wt-inp wt-time" id="wt-eve-time" value="' + E(ehh + ":" + emm) +
       '" placeholder="18:00" title="16:00-23:59. Short end-of-day wrap; sends only when noteworthy"></div></div>' +
       '<div class="wt-ctl"><label>Breaking alerts</label><div class="wt-row2">' +
-      toggle("wt-brk-on", brkOn) +
+      toggle("wt-brk-on", brkOn, "Breaking alerts") +
       '<span class="tiny" style="color:var(--faint)">cap ' +
       E(String(num(breaking.daily_cap, 5))) + "/day</span></div>" +
       '<div class="wt-row2" style="margin-top:6px">' +
-      toggle("wt-brk-quiet", brkQuiet) +
+      toggle("wt-brk-quiet", brkQuiet, "Breaking alerts can override quiet hours") +
       '<span class="tiny" style="color:var(--faint)" title="On: urgent alerts page you even during quiet hours">can override quiet hours</span></div></div>' +
+      // C50: opt-in, off by default — an unattended agent that sends search
+      // queries to several third-party engines every hour while News is on
+      '<div class="wt-ctl"><label>Agent web research</label><div class="wt-row2">' +
+      toggle("wt-research-on", research.enabled === true, "Agent web research") +
+      '<span class="tiny" style="color:var(--faint)" title="Hourly, while News updates are on: ' +
+      'the agent runs web searches (web search only, no other tools) to add AI news to the brief">' +
+      "hourly · web search only</span></div></div>" +
       '<div class="wt-ctl"><label>Quiet hours</label><div class="wt-row2">' +
       '<input class="wt-inp wt-time" id="wt-qh-start" value="' + E(qh.start || "22:00") + '">' +
       '<span class="tiny" style="color:var(--faint)">to</span>' +
@@ -303,9 +326,11 @@
       "</div></div></div>";
   }
 
-  function toggle(id, on) {
+  // C94: a named, focusable switch (Space/Enter flip it — see wireSwitch)
+  function toggle(id, on, name) {
     return '<span class="wt-tog' + (on ? " on" : "") + '" id="' + id +
-      '" role="switch" aria-checked="' + (on ? "true" : "false") + '"><span class="wt-knob"></span></span>';
+      '" role="switch" tabindex="0" aria-label="' + E(name || "") +
+      '" aria-checked="' + (on ? "true" : "false") + '"><span class="wt-knob"></span></span>';
   }
 
   function rulesHtml(rules, stats) {
@@ -331,7 +356,7 @@
       '<div class="wt-sub">' + subs.map(function (x) { return "<span>" + x + "</span>"; }).join("·&nbsp;") + "</div></div>" +
       '<div class="wt-meter"><div class="wt-mtrack"><div class="wt-mfill" style="width:' +
       meterPct + '%"></div></div><div class="wt-mtxt">' + E(meterTxt) + "</div></div>" +
-      toggle("wt-tog-" + E(r.id), r.enabled) +
+      toggle("wt-tog-" + E(r.id), r.enabled, "Watch: " + (r.label || meta.label)) +
       '<button class="wt-icobtn" data-mute="' + E(r.id) + '" title="Mute (disable + mark noise)">' +
       muteSvg() + "</button>" +
       '<button class="wt-icobtn wt-danger" data-del="' + E(r.id) + '" title="Delete">' +
@@ -421,6 +446,47 @@
     return {};
   }
 
+  // ---- Markdown links in a fired brief (V09) --------------------------------
+  // A brief carries feed titles: THIRD-PARTY text. `[text](url)` becomes a
+  // link showing only the text, and only when the URL is an absolute http(s)
+  // URL that index.html's httpUrl() accepts. The href is never the URL: it is
+  // "#", the normalised URL rides in data-url and opens via window.open after
+  // a second httpUrl() check (wireRecentLinks, the wireLinks() pattern) — a
+  // raw <a href> would be a navigation the app shell hands to macOS, which
+  // opens ANY scheme. A label holds no brackets, a URL no parentheses or
+  // whitespace; anything else, and everything around a link, is escaped text.
+  // escape here does not depend on index.html's esc() having loaded
+  function EX(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+  function U(u) { return (typeof httpUrl === "function") ? httpUrl(u) : ""; }
+  var MD_LINK = /\[([^\[\]\n]{1,300})\]\(([^()\s]{1,2048})\)/g;
+  function linkify(txt) {
+    txt = String(txt == null ? "" : txt);
+    var out = "", last = 0, m;
+    MD_LINK.lastIndex = 0;
+    while ((m = MD_LINK.exec(txt))) {
+      var u = /^https?:\/\//i.test(m[2]) ? U(m[2]) : "";
+      if (!u || !/^https?:\/\//i.test(u) || !m[1].trim()) continue;
+      out += EX(txt.slice(last, m.index)) +
+        '<a href="#" class="wt-lnk" data-url="' + EX(u) + '">' + EX(m[1]) + "</a>";
+      last = m.index + m[0].length;
+    }
+    return out + EX(txt.slice(last));
+  }
+  function wireRecentLinks(card) {
+    var as = card && card.querySelectorAll ? card.querySelectorAll(".wt-fx a.wt-lnk[data-url]") : [];
+    for (var i = 0; i < as.length; i++) {
+      as[i].onclick = function (e) {
+        if (e) { e.preventDefault(); e.stopPropagation(); }
+        var u = U(this.getAttribute("data-url"));
+        if (u && /^https?:\/\//i.test(u)) window.open(u, "_blank", "noopener");
+      };
+    }
+  }
+
   function recentHtml(recent) {
     if (!recent || !recent.length)
       return '<div class="wt-empty">No fires yet — when a watch trips, it lands here (and on your phone).</div>';
@@ -432,7 +498,7 @@
           E(r.suppressed) + "</div>";
       } else {
         var txt = (r.text || "").split("\n").slice(1).join(" ") || r.label;
-        body = '<div class="wt-fl">' + E(r.label) + '</div><div class="wt-fx">' + E(txt) + "</div>";
+        body = '<div class="wt-fl">' + E(r.label) + '</div><div class="wt-fx">' + linkify(txt) + "</div>";
       }
       var react = r.suppressed ? "" :
         '<div class="wt-react"><button class="wt-rb' + (r.reaction === "useful" ? " on-useful" : "") +
@@ -459,28 +525,20 @@
   // ---- interactivity -------------------------------------------------------
   function wire(card, rules, brief) {
     var d = doc(); if (!d) return;
+    wireRecentLinks(card);
 
     // master toggles — one flip silences a whole family of pushes
-    var mBriefs = card.querySelector("#wt-master-briefs");
-    if (mBriefs) mBriefs.addEventListener("click", function () {
-      var on = !mBriefs.classList.contains("on");
-      setTog(mBriefs, on);
-      op({ op: "set_master", briefings: on }).catch(function () {});
-    });
-    var mNews = card.querySelector("#wt-master-news");
-    if (mNews) mNews.addEventListener("click", function () {
-      var on = !mNews.classList.contains("on");
-      setTog(mNews, on);
-      op({ op: "set_master", news: on }).catch(function () {});
-    });
+    wireSwitch(card, card.querySelector("#wt-master-briefs"),
+      function (on) { return { op: "set_master", briefings: on }; },
+      function (r) { return r.master && r.master.briefings; });
+    wireSwitch(card, card.querySelector("#wt-master-news"),
+      function (on) { return { op: "set_master", news: on }; },
+      function (r) { return r.master && r.master.news; });
 
     // brief toggle + time
-    var briefTog = card.querySelector("#wt-brief-on");
-    if (briefTog) briefTog.addEventListener("click", function () {
-      var on = !briefTog.classList.contains("on");
-      setTog(briefTog, on);
-      op({ op: "set_brief", enabled: on }).catch(function () {});
-    });
+    wireSwitch(card, card.querySelector("#wt-brief-on"),
+      function (on) { return { op: "set_brief", enabled: on }; },
+      function (r) { return r.brief && r.brief.enabled; });
     var briefTime = card.querySelector("#wt-brief-time");
     if (briefTime) briefTime.addEventListener("change", function () {
       var m = /^(\d{1,2}):(\d{2})$/.exec(briefTime.value.trim());
@@ -495,12 +553,9 @@
     });
 
     // midday pulse toggle + time
-    var midTog = card.querySelector("#wt-mid-on");
-    if (midTog) midTog.addEventListener("click", function () {
-      var on = !midTog.classList.contains("on");
-      setTog(midTog, on);
-      op({ op: "set_midday", enabled: on }).catch(function () {});
-    });
+    wireSwitch(card, card.querySelector("#wt-mid-on"),
+      function (on) { return { op: "set_midday", enabled: on }; },
+      function (r) { return r.midday && r.midday.enabled; });
     var midTime = card.querySelector("#wt-mid-time");
     if (midTime) midTime.addEventListener("change", function () {
       var m = /^(\d{1,2}):(\d{2})$/.exec(midTime.value.trim());
@@ -515,12 +570,9 @@
     });
 
     // evening wrap toggle + time
-    var eveTog = card.querySelector("#wt-eve-on");
-    if (eveTog) eveTog.addEventListener("click", function () {
-      var on = !eveTog.classList.contains("on");
-      setTog(eveTog, on);
-      op({ op: "set_evening", enabled: on }).catch(function () {});
-    });
+    wireSwitch(card, card.querySelector("#wt-eve-on"),
+      function (on) { return { op: "set_evening", enabled: on }; },
+      function (r) { return r.evening && r.evening.enabled; });
     var eveTime = card.querySelector("#wt-eve-time");
     if (eveTime) eveTime.addEventListener("change", function () {
       var m = /^(\d{1,2}):(\d{2})$/.exec(eveTime.value.trim());
@@ -530,30 +582,33 @@
         .then(function (r) {
           if (!r || r.ok === false) { ctlErr(card, (r && r.error) || "bad time"); return; }
           timeSaved(card, eveTime, r.evening, "Evening runs 16:00-23:59 —", th, tm);
+          if (r.warning) ctlErr(card, r.warning);      // R2-17: saved, but it can never send
         })
         .catch(function () {});
     });
 
     // breaking alerts toggle + quiet-hours override
-    var brkTog = card.querySelector("#wt-brk-on");
-    if (brkTog) brkTog.addEventListener("click", function () {
-      var on = !brkTog.classList.contains("on");
-      setTog(brkTog, on);
-      op({ op: "set_breaking", enabled: on }).catch(function () {});
-    });
-    var brkQuietTog = card.querySelector("#wt-brk-quiet");
-    if (brkQuietTog) brkQuietTog.addEventListener("click", function () {
-      var on = !brkQuietTog.classList.contains("on");
-      setTog(brkQuietTog, on);
-      op({ op: "set_breaking", override_quiet: on }).catch(function () {});
-    });
+    wireSwitch(card, card.querySelector("#wt-brk-on"),
+      function (on) { return { op: "set_breaking", enabled: on }; },
+      function (r) { return r.breaking && r.breaking.enabled; });
+    wireSwitch(card, card.querySelector("#wt-brk-quiet"),
+      function (on) { return { op: "set_breaking", override_quiet: on }; },
+      function (r) { return r.breaking && r.breaking.override_quiet; });
+
+    // agent web research (C50) — off unless turned on here
+    wireSwitch(card, card.querySelector("#wt-research-on"),
+      function (on) { return { op: "set_web_research", enabled: on }; },
+      function (r) { return r.web_research && r.web_research.enabled; });
 
     // quiet hours
     function saveQuiet() {
       var st = card.querySelector("#wt-qh-start"), en = card.querySelector("#wt-qh-end");
       if (!st || !en) return;
       op({ op: "set_quiet_hours", start: st.value.trim(), end: en.value.trim() })
-        .then(function (r) { if (!r || r.ok === false) ctlErr(card, (r && r.error) || "bad time"); })
+        .then(function (r) {
+          if (!r || r.ok === false) ctlErr(card, (r && r.error) || "bad time");
+          else if (r.warning) ctlErr(card, r.warning);   // R2-17
+        })
         .catch(function () {});
     }
     each(card.querySelectorAll("#wt-qh-start,#wt-qh-end"), function (el) {
@@ -583,12 +638,8 @@
     // per-rule toggles / mute / delete
     each(card.querySelectorAll(".wt-row"), function (row) {
       var id = row.getAttribute("data-id");
-      var tog = row.querySelector(".wt-tog");
-      if (tog) tog.addEventListener("click", function () {
-        var on = !tog.classList.contains("on");
-        setTog(tog, on);
-        op({ op: "toggle_rule", id: id, enabled: on }).catch(function () {});
-      });
+      wireSwitch(card, row.querySelector(".wt-tog"),
+        function (on) { return { op: "toggle_rule", id: id, enabled: on }; });
     });
     each(card.querySelectorAll("[data-mute]"), function (b) {
       b.addEventListener("click", function () {
@@ -645,6 +696,46 @@
       addBtn.disabled = false;
       if (!r || r.ok === false) { addErr(card, (r && r.error) || "couldn’t add"); return; }
       watchtowerPanel().catch(function () {});
+    });
+  }
+
+  // B24: a switch flips at once, then follows the server. A failed write
+  // (network error, 4xx/5xx, ok:false — e.g. an unreadable watchtower.json)
+  // puts it back and says so, instead of showing a state that was never
+  // saved; a saved write takes the value the server stored (pick). One write
+  // per switch at a time. C94: Space/Enter flip a focused switch.
+  function wireSwitch(card, el, body, pick) {
+    if (!el) return;
+    el.addEventListener("click", function () {
+      if (el.getAttribute("aria-busy") === "true") return;
+      var on = !el.classList.contains("on");
+      setTog(el, on);
+      el.setAttribute("aria-busy", "true");
+      op(body(on)).catch(function () { return null; }).then(function (r) {
+        el.removeAttribute("aria-busy");
+        if (!r || r.ok === false || r.__status >= 400) {
+          setTog(el, !on);
+          ctlErr(card, "Couldn’t save that switch" + ((r && r.error) ? " (" + r.error + ")" : "") +
+            " — it is back where it was.");
+          return;
+        }
+        var stored = pick ? pick(r) : undefined;
+        if (typeof stored === "boolean") setTog(el, stored);
+        // a save over a broken watchtower.json wrote a fresh one: drop the banner
+        if (card.querySelector("[data-wt-cfgerr]")) watchtowerPanel().catch(function () {});
+      });
+    });
+    el.addEventListener("keydown", function (ev) {
+      var k = ev && ev.key;
+      if (k !== " " && k !== "Enter" && k !== "Spacebar") return;
+      if (ev.preventDefault) ev.preventDefault();
+      // E28: one flip per press.  A held key auto-repeats, and every repeat
+      // that arrived after a write landed flipped the switch again — the end
+      // state was the parity of the presses.  Repeats are ignored, and so is
+      // any key while this switch's write is still out.
+      if (ev.repeat) return;
+      if (el.getAttribute("aria-busy") === "true") return;
+      el.click();
     });
   }
 

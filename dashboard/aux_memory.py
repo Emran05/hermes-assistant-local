@@ -45,7 +45,11 @@ ENTRY_DELIM  = "\n§\n"                 # == memory_tool.ENTRY_DELIMITER ("\n§\
 CORE_FILES   = {"USER.md": ("user_char_limit", 1375),
                 "MEMORY.md": ("memory_char_limit", 2200)}
 MEM_NAME_RE  = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,62}\.md$")
-MEM_TRASH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,62}\.md\.\d{10}\.md$")
+# A people/ card's trash name keeps its "people/" prefix (memory-trash/people/
+# <slug>.md.<epoch>.md) — the restore regex used to refuse it outright (B15).
+MEM_TRASH_RE = re.compile(r"^(?:people/)?[A-Za-z0-9][A-Za-z0-9._ -]{0,62}\.md\.\d{10}\.md$")
+# The epoch every trash/snapshot name carries: "<name>.<epoch>[.<n>].md".
+_MEM_STAMP_RE = re.compile(r"\.(\d{10})(?:\.\d+)?\.md$")
 MAX_FREEFORM = 131072          # 128 KB per freeform file
 MAX_EDITABLE = 524288          # refuse to open >512 KB in the editor at all
 MAX_FILES    = 500
@@ -218,35 +222,52 @@ def _mem_atomic_write(path, raw):
                 pass
 
 
-def _mem_gc(dirpath, max_n, max_b=None):
-    try:
-        stats = []
-        for e in os.scandir(dirpath):
+def _mem_gc(dirpath, max_n, max_b=None, keep=None):
+    """Hold `dirpath` (and its people/ mirror, as ONE pool) to max_n files /
+    max_b bytes, oldest first.
+
+    "Oldest" is the epoch in the NAME — when the copy was trashed or the
+    snapshot taken — not st_mtime: shutil.move keeps a trashed file's original
+    mtime, so a year-old note deleted just now sorted first and was hard-deleted
+    by the very request that trashed it (audit 2026-10-08 B15). people/ used to
+    be skipped entirely (a directory, not a file). `keep` (the copy this request
+    just made) is never a victim."""
+    stats = []
+    for d in (dirpath, os.path.join(dirpath, "people")):
+        try:
+            ents = list(os.scandir(d))
+        except OSError:
+            continue
+        for e in ents:
             if e.name.startswith(".") or not e.is_file(follow_symlinks=False):
                 continue
             try:
                 st = e.stat(follow_symlinks=False)
-                stats.append((st.st_mtime, st.st_size, e.path))
             except OSError:
-                pass
-    except OSError:
-        return
+                continue
+            m = _MEM_STAMP_RE.search(e.name)
+            stats.append((int(m.group(1)) if m else st.st_mtime,
+                          st.st_size, e.path))
+    keep = os.path.abspath(keep) if keep else None
     stats.sort()                                    # oldest first
-    while len(stats) > max_n:
-        _, _, p = stats.pop(0)
+    victims = [s for s in stats if os.path.abspath(s[2]) != keep]
+
+    def _drop():
+        victim = victims.pop(0)
+        stats.remove(victim)
+        _age, sz, p = victim
         try:
             os.remove(p)
         except OSError:
             pass
+        return sz
+
+    while victims and len(stats) > max_n:
+        _drop()
     if max_b is not None:
         total = sum(s for _, s, _ in stats)
-        while stats and total > max_b:
-            _, sz, p = stats.pop(0)
-            try:
-                os.remove(p)
-            except OSError:
-                pass
-            total -= sz
+        while victims and total > max_b:
+            total -= _drop()
 
 
 def _mem_snapshot(name, raw):
@@ -260,7 +281,7 @@ def _mem_snapshot(name, raw):
         n += 1
         snap = os.path.join(MEM_SNAP, "%s.%d.%d.md" % (name, ts, n))
     _mem_atomic_write_dir(MEM_SNAP, snap, raw)
-    _mem_gc(MEM_SNAP, SNAP_MAX_N)
+    _mem_gc(MEM_SNAP, SNAP_MAX_N, keep=snap)
     return snap
 
 
@@ -312,9 +333,14 @@ def _mem_meta():
 
 
 def _mem_meta_edit(mutate):
-    """Read-modify-write the provenance index atomically under _state_lock."""
+    """Read-modify-write the provenance index atomically under _state_lock.
+
+    Read through read_json_for_update (C27, E114): a wrong-typed or
+    unparsable index is moved aside as .corrupt-* before the default is
+    written, and an index that exists but cannot be read raises, so nothing
+    replaces it (read_json used to fold both into the default)."""
     with _state_lock:
-        m = read_json(MEM_META, {"v": 1, "files": {}, "trash": {}})
+        m = read_json_for_update(MEM_META, {"v": 1, "files": {}, "trash": {}})
         if not isinstance(m, dict):
             m = {}
         m.setdefault("v", 1)
@@ -496,7 +522,8 @@ def _mem_build_payload(name, b):
 def _mem_create_handler(ctx):
     try:
         b = ctx.body or {}
-        name = (b.get("name") or "").strip()
+        name = b.get("name")
+        name = name.strip() if isinstance(name, str) else ""     # E123: bad_name, not 500
         if not _mem_valid_name(name):
             return ({"ok": False, "error": "bad_name"}, 400)
         try:
@@ -549,7 +576,8 @@ def _mem_create_handler(ctx):
 def _mem_save_handler(ctx):
     try:
         b = ctx.body or {}
-        name = (b.get("name") or "").strip()
+        name = b.get("name")
+        name = name.strip() if isinstance(name, str) else ""     # E123: bad_name, not 500
         base_etag = b.get("base_etag", "")
         core = name in CORE_FILES
         if not _mem_valid_name(name):
@@ -615,7 +643,8 @@ def _mem_save_handler(ctx):
 def _mem_delete_handler(ctx):
     try:
         b = ctx.body or {}
-        name = (b.get("name") or "").strip()
+        name = b.get("name")
+        name = name.strip() if isinstance(name, str) else ""     # E123: bad_name, not 500
         if not _mem_valid_name(name):
             return ({"ok": False, "error": "bad_name"}, 400)
         if name in CORE_FILES:
@@ -651,7 +680,8 @@ def _mem_delete_handler(ctx):
                      "hint": "Hermes is writing to this file — try again in a moment."}, 423)
         _mem_record("delete", name, "user", etag, None, dest, st.st_size)
         _mem_bust()
-        _mem_gc(MEM_TRASH, TRASH_MAX_N, TRASH_MAX_B)     # only hard-delete in the feature
+        _mem_gc(MEM_TRASH, TRASH_MAX_N, TRASH_MAX_B,     # only hard-delete in the feature
+                keep=dest)
         return {"ok": True, "trash_name": tname}
     except Exception as e:
         return ({"ok": False, "error": "internal: " + str(e)}, 500)
@@ -660,7 +690,8 @@ def _mem_delete_handler(ctx):
 def _mem_restore_handler(ctx):
     try:
         b = ctx.body or {}
-        tname = (b.get("trash_name") or "").strip()
+        tname = b.get("trash_name")
+        tname = tname.strip() if isinstance(tname, str) else ""  # E123: bad_name, not 500
         if not MEM_TRASH_RE.match(tname):
             return ({"ok": False, "error": "bad_name"}, 400)
         src = os.path.join(MEM_TRASH, tname)
@@ -678,10 +709,11 @@ def _mem_restore_handler(ctx):
         if not orig or not _mem_valid_name(orig):
             return ({"ok": False, "error": "bad_name"}, 400)
         existing = set()
+        sub = "people/" if orig.startswith("people/") else ""
         try:
-            for e in os.scandir(MEM_DIR):
+            for e in os.scandir(os.path.join(MEM_DIR, sub) if sub else MEM_DIR):
                 if e.name.endswith(".md"):
-                    existing.add(e.name.lower())
+                    existing.add((sub + e.name).lower())
         except OSError:
             pass
         target = orig

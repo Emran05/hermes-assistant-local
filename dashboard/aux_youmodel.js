@@ -8,8 +8,8 @@
 // through the existing gated memory API (/api/youmodel/add, /api/memory/save,
 // /api/memory/create, /api/memory/delete) — this file owns zero storage.
 //
-// Reuses index.html globals (esc, animate, revealStagger, REDUCE, sendMsg,
-// setView, setChatMode), all typeof-guarded so a headless render harness never
+// Reuses index.html globals (esc, HA, animate, revealStagger, sendMsg,
+// setView, openChat), all typeof-guarded so a headless render harness never
 // throws.  Zero emoji, bespoke two-tone SVG only, 12-hour time, Motion One.
 
 (function () {
@@ -32,9 +32,18 @@
   // ---- tiny helpers --------------------------------------------------------
   function doc() { return (typeof document !== "undefined") ? document : null; }
   function E(s) { return (typeof esc === "function") ? esc(s) : String(s == null ? "" : s); }
+  // Motion goes through the runtime (docs/plans/motion-system-2026-10.md §6.5):
+  // index.html's HA() is window.HermesAnim, or ANIM_NULL without aux_anim.js.
+  // A() keeps animate()'s call shape (HA().legacy); the runtime lands the last
+  // keyframe at once while EITHER reduce switch is on, the window is hidden or
+  // the call is quiet. The load-time REDUCE flag it tested only saw the OS one.
+  function ha() {
+    try { if (typeof HA === "function") return HA(); } catch (e) {}
+    return (typeof window !== "undefined" && window.HermesAnim) || null;
+  }
   function A(node, kf, opt) {
-    if (typeof REDUCE !== "undefined" && REDUCE) return;
-    try { if (typeof animate === "function") animate(node, kf, opt); } catch (e) {}
+    var H = ha();
+    try { if (H) return H.legacy(node, kf, opt); if (typeof animate === "function") animate(node, kf, opt); } catch (e) {}
   }
   function each(list, cb) {
     if (!list) return;
@@ -102,7 +111,10 @@
       ".ym-sechead .cnt{font-size:10.5px;color:var(--faint)}",
       ".ym-meter{flex:0 1 110px;min-width:70px;height:4px;border-radius:3px;background:var(--hairline);",
       "overflow:hidden;position:relative;margin-left:auto}",
-      ".ym-meter i{position:absolute;left:0;top:0;height:100%;border-radius:3px;background:var(--iris);transition:width .3s ease}",
+      // the fill scales from the left (compositor only, never a width); the
+      // track's radius + overflow:hidden shape both ends, so the fill has none
+      ".ym-meter i{position:absolute;inset:0;transform-origin:left center;transform:scaleX(var(--p,0));" +
+        "background:var(--iris);transition:transform .3s ease}",
       ".ym-meter.warn i{background:var(--warn)}.ym-meter.bad i{background:var(--bad)}",
       ".ym-meter-n{font-size:10px;color:var(--faint);font-variant-numeric:tabular-nums;white-space:nowrap}",
       ".ym-hint{font-size:11.5px;color:var(--faint);margin:3px 0 7px;line-height:1.45}",
@@ -163,7 +175,7 @@
   }
 
   // ---- data + entry point --------------------------------------------------
-  var YM = { data: null };
+  var YM = { data: null, lastErr: null };
 
   async function youModelPanel() {
     var d = doc(); if (!d) return;
@@ -194,7 +206,7 @@
   function meter(used, budget) {
     var pct = budget > 0 ? Math.min(100, Math.round(used / budget * 100)) : 0;
     var cls = pct >= 100 ? "bad" : (pct > 85 ? "warn" : "");
-    return '<span class="ym-meter ' + cls + '"><i style="width:' + pct + '%"></i></span>' +
+    return '<span class="ym-meter ' + cls + '"><i style="--p:' + (pct / 100) + '"></i></span>' +
       '<span class="ym-meter-n">' + used + " / " + budget + "</span>";
   }
 
@@ -247,7 +259,7 @@
       '<div class="ym-rows" id="ym-prows">';
     people.forEach(function (p, i) {
       h += '<div class="ym-prow" data-p="' + i + '">' +
-        '<div class="pmain"><div class="pn">' + E(p.slug) + "</div>" +
+        '<div class="pmain"><div class="pn">' + E(personTitle(p)) + "</div>" +
         '<div class="pv">' + E(p.preview || "") + "</div>" +
         (p.mtime ? '<div class="pw">updated ' + E(ym12(p.mtime)) + "</div>" : "") + "</div>" +
         '<button class="ym-ib" data-pedit="' + i + '" title="Edit card">' + ic("pencil") + "</button>" +
@@ -263,6 +275,10 @@
     var s = mount(grid, h, tiny);
     if (!s) return;
     wire(s, data);
+    // every write ends in refresh(), which rebuilds this card — so an error
+    // reported a moment ago is shown again on the new card instead of being
+    // wiped by it (2026-10-08 audit, P3 Frontend)
+    if (YM.lastErr && Date.now() < YM.lastErr.until) showErr(YM.lastErr.msg, YM.lastErr.until);
     try {
       if (typeof revealStagger === "function")
         revealStagger(s.querySelectorAll(".ym-row,.ym-prow"), 28);
@@ -273,14 +289,20 @@
 
   // ---- error line ----------------------------------------------------------
   function err(msg) {
+    YM.lastErr = msg ? { msg: msg, until: Date.now() + 5000 } : null;
+    showErr(msg, YM.lastErr && YM.lastErr.until);
+  }
+  function showErr(msg, until) {
     var d = doc(); if (!d) return;
     var e = d.getElementById("ym-err");
     if (!e) return;
     e.textContent = msg || "";
-    if (msg) setTimeout(function () { if (e) e.textContent = ""; }, 5000);
+    if (msg) setTimeout(function () { if (e) e.textContent = ""; },
+                        Math.max(0, (until || Date.now() + 5000) - Date.now()));
   }
 
   async function postJSON(url, body) {
+    YM.lastErr = null;     // a new write supersedes the last error (it is not re-shown)
     var r = await fetch(url, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
@@ -295,11 +317,8 @@
   // ---- onboarding seed (WS 1.2 entry) ---------------------------------------
   function runOnboarding() {
     try {
-      if (typeof setView === "function") setView("hub");
-      var d = doc();
-      var deck = d && d.querySelector ? d.querySelector(".deck") : null;
-      if (deck && deck.dataset && deck.dataset.chat === "hidden" &&
-          typeof setChatMode === "function") setChatMode("normal");
+      // the interview runs in the chat, which lives on the Agent page
+      if (typeof openChat === "function") openChat();
       if (typeof sendMsg === "function") sendMsg(ONBOARD_SEED);
       else err("Chat isn’t available in this view.");
     } catch (e) { err("Couldn’t open the chat: " + String(e && e.message || e)); }
@@ -338,9 +357,41 @@
     refresh();
   }
 
+  // C127: the card's FILE name has to be ASCII (aux_memory's name rule), the
+  // person's name does not. Accents fold to their base letter ("José García" ->
+  // jose-garcia, not jos-garc-a), and a name with letters ASCII cannot spell —
+  // Li Ming as 李明, Мария — gets a stable hash suffix instead of an empty slug
+  // ("Give the person a name first") or a collision with every other name that
+  // shares its Latin part. The name itself stays the card's first line.
+  var SLUG_FOLD = { "ß": "ss", "æ": "ae", "œ": "oe", "ø": "o", "ł": "l", "đ": "d",
+                    "ð": "d", "þ": "th", "ı": "i" };
+  function nameHash(s) {                 // FNV-1a, 32 bit, 8 hex digits
+    var h = 0x811c9dc5;
+    for (var i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return ("0000000" + h.toString(16)).slice(-8);
+  }
   function slugify(s) {
-    return String(s || "").toLowerCase().trim()
-      .replace(/['’]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48);
+    var raw = String(s || "").trim();
+    var low = raw.toLowerCase();
+    try { low = low.normalize("NFKD").replace(/[\u0300-\u036f]/g, ""); } catch (e) {}
+    low = low.replace(/[ßæœøłđðþı]/g, function (c) { return SLUG_FOLD[c] || c; })
+      .replace(/['’]/g, "");
+    var ascii = low.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    // anything left that is a letter or digit outside ASCII was dropped above
+    var lossy = /[^\x00-\x7f]/.test(low.replace(/[\s\u2010-\u2015\u00b7.,;:!?()\[\]"“”«»]/g, ""));
+    if (!lossy) return ascii.slice(0, 48).replace(/-+$/, "");
+    var tag = nameHash(raw.normalize ? raw.normalize("NFC").toLowerCase() : raw.toLowerCase());
+    return (ascii ? ascii.slice(0, 39).replace(/-+$/, "") + "-" : "person-") + tag;
+  }
+  // a card whose slug carries the hash shows the name from its first line
+  function personTitle(p) {
+    var sl = String(p && p.slug || "");
+    var nm = String(p && p.preview || "").split(" — ")[0].trim();
+    if (/-[0-9a-f]{8}$/.test(sl) && /[^\x00-\x7f]/.test(nm)) return nm;
+    return sl;
   }
 
   async function addPerson(nameV, noteV) {
@@ -350,7 +401,7 @@
     var res = await postJSON("/api/memory/create",
       { name: "people/" + slug + ".md", content: content });
     if (!res.ok) {
-      if (res.error === "exists") err("A card for “" + slug + "” already exists.");
+      if (res.error === "exists") err("A card for “" + nameV.trim() + "” already exists.");
       else err("Couldn’t create the card — " + (res.error || "HTTP " + res._status));
     }
     refresh();
@@ -365,7 +416,7 @@
 
   async function deletePerson(p) {
     if (typeof confirm === "function" &&
-        !confirm("Move the card for “" + p.slug + "” to the dashboard trash?")) return;
+        !confirm("Move the card for “" + personTitle(p) + "” to the dashboard trash?")) return;
     var res = await postJSON("/api/memory/delete", { name: p.name });
     if (!res.ok) err("Couldn’t delete — " + (res.error || "HTTP " + res._status));
     refresh();
@@ -394,20 +445,36 @@
       var eb = row.querySelector("[data-edit]");
       if (eb) eb.addEventListener("click", function () {
         var cur = realList()[i] || "";
-        row.innerHTML = '<input type="text" maxlength="2000" value="' + E(cur) + '">' +
+        // C128: an <input type=text> drops every newline from its value (the
+        // HTML value-sanitisation rule), so editing a multi-line entry glued
+        // its lines together on save. A multi-line entry edits in a textarea
+        // whose value is set as a property; Enter adds a line, Cmd/Ctrl+Enter
+        // saves. Single-line entries keep the one-line field.
+        var multi = cur.indexOf("\n") >= 0;
+        row.innerHTML = (multi
+          ? '<textarea class="ym-pta" maxlength="2000" style="flex:1;min-width:0"></textarea>'
+          : '<input type="text" maxlength="2000" value="' + E(cur) + '">') +
           '<button class="ym-ib ok" data-sv="1" title="Save">' + ic("check") + "</button>" +
           '<button class="ym-ib" data-cx="1" title="Cancel">' + ic("x") + "</button>";
-        var inp = row.querySelector("input");
+        var inp = row.querySelector(multi ? "textarea" : "input");
+        if (multi) inp.value = cur;
         try { inp.focus(); inp.select(); } catch (e) {}
         function save() {
           var v = (inp.value || "").trim();
+          // a lone "§" line (typeable now that the editor is a textarea) is the
+          // file's entry delimiter: it would split this entry in two on save —
+          // refused like /api/youmodel/add refuses it
+          if (("\n" + v + "\n").indexOf(DELIM) >= 0) {
+            err("An entry can\u2019t contain a line with only \u00a7 on it.");
+            return;
+          }
           var next = realList();
           if (!v) next.splice(i, 1); else next[i] = v;
           row.classList.add("saving");
           saveEntries(f, next);
         }
         inp.addEventListener("keydown", function (e) {
-          if (e.key === "Enter") { e.preventDefault(); save(); }
+          if (e.key === "Enter" && (!multi || e.metaKey || e.ctrlKey)) { e.preventDefault(); save(); }
           if (e.key === "Escape") { e.preventDefault(); refresh(); }
         });
         row.querySelector("[data-sv]").addEventListener("click", save);
@@ -445,7 +512,7 @@
         if (!p) return;
         var row = b.parentNode;
         if (p.truncated) { err("This card is large — edit it from the memory panel above."); return; }
-        row.innerHTML = '<div class="pmain"><div class="pn">' + E(p.slug) + "</div>" +
+        row.innerHTML = '<div class="pmain"><div class="pn">' + E(personTitle(p)) + "</div>" +
           '<textarea class="ym-pta"></textarea></div>' +
           '<button class="ym-ib ok" data-sv="1" title="Save">' + ic("check") + "</button>" +
           '<button class="ym-ib" data-cx="1" title="Cancel">' + ic("x") + "</button>";
@@ -469,7 +536,10 @@
       var wrap = pb.parentNode;
       var nm = wrap.querySelector(".nm"), nt = wrap.querySelector(".nt");
       pb.disabled = true;   // addPerson refreshes; the button is rebuilt on render
-      addPerson(nm ? nm.value : "", nt ? nt.value : "");
+      // ...except when the name is refused before any request (no refresh):
+      // it used to stay disabled until the view was reopened (10-08 P3)
+      Promise.resolve(addPerson(nm ? nm.value : "", nt ? nt.value : ""))
+        .then(function () { pb.disabled = false; }, function () { pb.disabled = false; });
     });
   }
 

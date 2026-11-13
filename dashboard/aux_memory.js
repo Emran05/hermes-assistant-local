@@ -1,5 +1,5 @@
 // aux_memory.js — Editable Memory panel (P1.1). Served at /aux_memory.js,
-// loaded after expand.js so it sees every inline helper (esc, animate, REDUCE,
+// loaded after expand.js so it sees every inline helper (esc, HA, animate,
 // relTime, revealStagger). Takes over the Mind view "What it remembers" card.
 // Zero emoji; bespoke two-tone SVG only; 12-hour times; Motion One entrances.
 (function(){
@@ -11,9 +11,27 @@
 
   function el(id){ return document.getElementById(id); }
   function E(s){ return (typeof esc==='function') ? esc(s) : String(s==null?'':s); }
-  function A(node, kf, opt){                 // safe animate (skipped by REDUCE)
-    if(typeof REDUCE!=='undefined' && REDUCE) return;
-    try{ if(typeof animate==='function') animate(node, kf, opt); }catch(e){}
+  // Motion goes through the runtime (docs/plans/motion-system-2026-10.md §6.5):
+  // index.html's HA() is window.HermesAnim, or ANIM_NULL without aux_anim.js.
+  // A() keeps animate()'s call shape (HA().legacy); the runtime lands the last
+  // keyframe at once while EITHER reduce switch is on, the window is hidden or
+  // the call is quiet. The load-time REDUCE flag it tested only saw the OS one.
+  function ha(){
+    try{ if(typeof HA==='function') return HA(); }catch(e){}
+    return (typeof window!=='undefined' && window.HermesAnim) || null;
+  }
+  function A(node, kf, opt){
+    var H = ha();
+    try{ if(H) return H.legacy(node, kf, opt); if(typeof animate==='function') animate(node, kf, opt); }catch(e){}
+  }
+  // a background refresh repaints without motion (§6.6): every HermesAnim call
+  // made synchronously inside fn, revealStagger's included, is instant
+  // (a render that throws still throws: the runtime rethrows out of quiet(),
+  // so a broken repaint is not hidden behind a "Hermes just updated this")
+  function quietly(fn){
+    var H = ha();
+    if(H && typeof H.quiet==='function') return H.quiet(fn);
+    return fn();
   }
 
   // ---- bespoke two-tone SVG glyphs (accent fill @ .16 + currentColor stroke) ----
@@ -85,8 +103,10 @@
       '.mem-prov .cdot.you{background:var(--iris)}.mem-prov .cdot.agent{background:var(--faint)}',
       '.mem-meter{flex:1 1 120px;min-width:90px;max-width:260px;height:5px;border-radius:3px;',
       'background:var(--hairline);overflow:hidden;position:relative}',
-      '.mem-meter i{position:absolute;left:0;top:0;height:100%;border-radius:3px;',
-      'background:var(--iris);transition:width .3s ease}',
+      // the fill scales from the left (compositor only, never a width): the
+      // track's radius + overflow:hidden shape both ends, so the fill has none
+      '.mem-meter i{position:absolute;inset:0;transform-origin:left center;transform:scaleX(var(--p,0));',
+      'background:var(--iris);transition:transform .3s ease}',
       '.mem-meter.warn i{background:var(--warn)}.mem-meter.bad i{background:var(--bad)}',
       '.mem-meter-n{font-size:10.5px;color:var(--faint);white-space:nowrap}',
       '.mem-rows{display:flex;flex-direction:column;gap:6px}',
@@ -164,9 +184,22 @@
     startPoll();
   }
 
+  // E92 (C88): a hidden window is not polled; a tick skipped while hidden is
+  // made up once on visibilitychange.
+  var pollMissed = false, pollVisWired = false;
   function startPoll(){
     if(MEMP.timer){ clearInterval(MEMP.timer); MEMP.timer=null; }
-    MEMP.timer = setInterval(pollTick, 15000);
+    MEMP.timer = setInterval(function(){
+      if(document.hidden){ pollMissed = true; return; }
+      return pollTick();
+    }, 15000);
+    if(!pollVisWired){
+      pollVisWired = true;
+      document.addEventListener('visibilitychange', function(){
+        if(document.hidden || !pollMissed || !MEMP.timer) return;
+        pollMissed = false; pollTick();
+      });
+    }
   }
 
   async function memFetchList(preferCore){
@@ -284,7 +317,7 @@
   function memMeter(used, limit){
     var pct = limit>0 ? Math.min(100, Math.round(used/limit*100)) : 0;
     var cls = used>=limit ? 'bad' : (pct>85 ? 'warn' : '');
-    return '<span class="mem-meter '+cls+'"><i style="width:'+pct+'%"></i></span>'+
+    return '<span class="mem-meter '+cls+'"><i style="--p:'+(pct/100)+'"></i></span>'+
            '<span class="mem-meter-n">'+used+' / '+limit+'</span>';
   }
 
@@ -329,7 +362,7 @@
     }
     if(addb) addb.addEventListener('click', doAdd);
     if(add){
-      add.addEventListener('keydown', function(e){ if(e.key==='Enter'){ e.preventDefault(); doAdd(); } });
+      add.addEventListener('keydown', function(e){ if(e.key==='Enter'){ e.preventDefault(); if(!e.repeat) doAdd(); } });
       add.addEventListener('input', function(){ MEMP.dirty = !!add.value; });
     }
   }
@@ -349,7 +382,7 @@
       memEditFact(i, v);
     }
     inp.addEventListener('keydown', function(e){
-      if(e.key==='Enter'){ e.preventDefault(); save(); }
+      if(e.key==='Enter'){ e.preventDefault(); if(!e.repeat) save(); }   // a held Enter saves once
       if(e.key==='Escape'){ e.preventDefault(); MEMP.editing=-1; MEMP.dirty=false; memRenderEntries(MEMP.file); }
     });
     row.querySelector('[data-save]').addEventListener('click', save);
@@ -572,14 +605,26 @@
     if(!window.confirm('Move '+name+' to the dashboard trash? You can restore it.')) return;
     var d = el('mem-detail');
     var chip = document.querySelector('#mem-strip [data-open="'+name+'"]');
-    if(chip) A(chip,{opacity:[1,0],transform:['scale(1)','scale(.85)']},{duration:0.2});
+    // the chip shrinks away while the request runs. exit()'s done hides it
+    // (visibility: the strip keeps its layout) and the runtime then hands its
+    // opacity/transform back to CSS; a refused delete cancels a still-running
+    // exit and shows the chip again — it used to stay at opacity 0 for good.
+    var H = ha(), gone = null;
+    if(chip && H && typeof H.exit==='function'){
+      try{ gone = H.exit(chip, 'shrinkOut', function(){ chip.style.visibility='hidden'; }); }catch(e){}
+    }
+    function chipBack(){
+      try{ if(gone) gone.cancel(); }catch(e){}
+      if(chip) chip.style.visibility='';
+    }
     var r, resp;
     try{
       r = await fetch('/api/memory/delete',{method:'POST',headers:{'Content-Type':'application/json'},
         body: JSON.stringify({name:name})});
       resp = await r.json();
-    }catch(e){ bannerShow('bad','Delete failed — '+E(String(e))); return; }
+    }catch(e){ chipBack(); bannerShow('bad','Delete failed — '+E(String(e))); return; }
     if(!resp.ok){
+      chipBack();
       if(r.status===423) bannerShow('warn','Hermes is writing to this file — try again in a moment.');
       else if(resp.error==='core_file') bannerShow('bad', E(resp.hint||'Core memory can’t be deleted.'));
       else bannerShow('bad','Couldn’t delete '+E(name)+' — '+E(resp.error||('HTTP '+r.status)));
@@ -666,9 +711,10 @@
         else { var ta=el('mem-ta'); if(ta) memSave(MEMP.sel, function(b){ b.content=ta.value; }, null); }
       });
     } else {
-      // silent refresh
+      // silent refresh: a background repaint, so the rows and the detail pane
+      // land in place (quiet); only the notice below enters
       MEMP.file = body; MEMP.etag = body.etag;
-      if(body.kind==='entries') memRenderEntries(body); else memRenderFreeform(body);
+      quietly(function(){ if(body.kind==='entries') memRenderEntries(body); else memRenderFreeform(body); });
       bannerShow('info','Hermes just updated this.');
       setTimeout(bannerClear, 4000);
       renderStrip();

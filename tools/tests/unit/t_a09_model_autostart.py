@@ -73,6 +73,10 @@ def run_gate(scratch, env_extra=None, token_age=None, touch_marker=False):
                         "'" + str(marker) + "'")
     gate = gate.replace('"$HOME/.hermes/dashboard/model-start-ok"',
                         "'" + str(token) + "'")
+    # E102: the gate also reads the pause marker — point it at the scratch
+    # home so the owner's live ~/.hermes state never decides this suite
+    gate = gate.replace('"$HOME/.hermes/dashboard/agent-paused"',
+                        "'" + str(scratch / "agent-paused") + "'")
     if touch_marker:
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.touch()

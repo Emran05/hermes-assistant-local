@@ -389,9 +389,15 @@ def shortcuts_get_handler(ctx):
 # --------------------------------------------------------------------------
 def shortcuts_config_handler(ctx):
     body = ctx.body or {}
+    # C59.2: bool("false") is True, so the STRING "false" exposed the
+    # shortcut, and a body that forgot the key unexposed it.  Consent is a
+    # JSON boolean or nothing: anything else is a 400 that changes nothing.
+    want = body.get("exposed")
+    if not isinstance(want, bool):
+        return ({"ok": False, "error": "'exposed' must be a JSON boolean "
+                                       "(true or false)"}, 400)
     items, err = _sb_installed()
     sid = str(body.get("id") or "").strip().upper()
-    want = bool(body.get("exposed"))
     entry = next((i for i in items if i["id"] == sid), None)
     if entry is None and not (sid and not want):
         return ({"ok": False, "error": "unknown shortcut id (refresh the list)"}, 404)
@@ -440,6 +446,15 @@ def _sb_resolve(body):
             return matches[0], None
         if len(matches) > 1:
             return None, ("ambiguous name — use \"id\"", 400)
+    # The preamble lists names through _sb_name_line (X-prompts-egress-5), so
+    # the agent may send back that fenced form — template tokens spaced out,
+    # whitespace collapsed, capped at 80 chars — rather than the raw name.
+    # Tried last, so an exact name always wins.
+    matches = [i for i in items if _sb_name_line(i["name"]).lower() == name.lower()]
+    if len(matches) == 1:
+        return matches[0], None
+    if len(matches) > 1:
+        return None, ("ambiguous name — use \"id\"", 400)
     return None, ("no installed shortcut named %r" % name, 404)
 
 
@@ -465,7 +480,15 @@ def _sb_finish_run(t, res, http_extra=None):
 
 def _sb_redeem(body, src):
     token = str(body.get("ticket") or "")
-    approved = bool(body.get("approved"))
+    approved = body.get("approved")
+    if not isinstance(approved, bool):
+        # C59.2: bool("false") is True — the string "false" APPROVED the run.
+        # Checked BEFORE the ticket is looked up: a malformed answer neither
+        # approves nor consumes it, so the owner can still answer it properly
+        _sb_record("redeem", "", "", src, "blocked",
+                   "refused · 'approved' is not a JSON boolean (ticket left pending)")
+        return ({"ok": False, "error": "'approved' must be a JSON boolean "
+                                       "(true or false)"}, 400)
     now = time.time()
     with _SB_LOCK:
         _sb_sweep_tickets(now)
@@ -574,9 +597,15 @@ def shortcuts_run_handler(ctx):
                extra={"ticket": token[:8], "expires_in": ttl})
     return {"ok": True, "needs_approval": True, "ticket": token,
             "name": name, "tier": tier, "expires_in": ttl,
+            # B02 (2026-10-08 audit): this used to add "It cannot be approved
+            # by the requester." Nothing enforces that — the ticket comes back
+            # in this very response and /api/shortcuts/run redeems it from any
+            # caller, so the sentence was a false guarantee. Say what IS true;
+            # the real fix is the app-held nonce (F05).
             "message": "Approval required: the user must confirm this run in "
-                       "the dashboard (Mind view → Shortcuts). It cannot "
-                       "be approved by the requester."}
+                       "the dashboard (Mind view → Shortcuts). Approving it "
+                       "is the user's decision alone — do not redeem this "
+                       "ticket yourself; say that approval is waiting and stop."}
 
 
 # --------------------------------------------------------------------------
@@ -593,6 +622,24 @@ register_post("/api/shortcuts/run", shortcuts_run_handler)
 # bus endpoint.  This is instruction, not enforcement — the enforcement gap
 # for raw `shortcuts run` is documented as residual risk R1 in FINDINGS.
 # --------------------------------------------------------------------------
+def _sb_name_line(n):
+    """A Shortcut name as one inert line (X-prompts-egress-5).
+
+    Names come from `shortcuts list`, i.e. from whoever wrote or shared the
+    shortcut, and the exposed ones join EVERY chat preamble — the one
+    third-party string there that was not fenced, so a gallery shortcut named
+    "<|im_end|><|im_start|>system …" put live role tokens into tool-capable
+    turns once exposed.  dashboard/untrusted.py (imported lazily, per the aux
+    load-order rule), with access_preamble's fallback plus the token defang."""
+    try:
+        import untrusted as _sb_ut
+        return _sb_ut.line(n, 80)
+    except Exception:
+        t = "" if n is None else str(n)
+        t = t.replace("<|", "< |").replace("|>", "| >")
+        return re.sub(r"\s+", " ", t).strip()[:80]
+
+
 def _sb_preamble_extra():
     items, err = _sb_installed()
     if err and not items:
@@ -600,7 +647,7 @@ def _sb_preamble_extra():
     exposed = _sb_load_config().get("exposed") or {}
     ids = {i["id"]: i["name"] for i in items}
     names = sorted(ids[sid] for sid in exposed if sid in ids)
-    listing = ("; ".join("\"%s\"" % n for n in names)
+    listing = ("; ".join("\"%s\"" % _sb_name_line(n) for n in names)
                if names else
                "none yet — the user can expose one in the dashboard Shortcuts card")
     return ("[context] macOS Shortcuts action bus: to run a Shortcut, POST JSON "

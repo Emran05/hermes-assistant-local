@@ -23,23 +23,49 @@
   // ---- inline ---------------------------------------------------------------
   // Operates on ALREADY-ESCAPED text. Code spans and links are lifted out first
   // so emphasis rules never touch their contents (snake_case URLs, `**` in code).
-  var URL_RE = "https?:\\/\\/[^\\s<)]*[^\\s<).,;:!?]";
+  // A lifted fragment is a TOK-delimited index into `stash`; the source's own
+  // NULs are dropped on entry, so every token in the text is one keep() made,
+  // and a fragment only ever holds tokens made BEFORE it (a link's text can be
+  // a code span) — which is why restore() can recurse and always terminates.
+  // URLs never contain a token, so no fragment is ever restored into an href.
+  var URL_RE = "https?:\\/\\/[^\\s<\\u0000]*[^\\s<.,;:!?\\u0000]";
   var BARE_URL = new RegExp("(^|[\\s(])(" + URL_RE + ")", "g");
+  // [text](url): the url may hold balanced (…) groups (Wikipedia's
+  // Foo_(bar)); a lone "(" is still allowed, so an unbalanced url ends at its
+  // first ")" exactly as before.
+  var MD_LINK = /!?\[([^\]\n]*)\]\((https?:(?:[^()\s\u0000]|\([^()\s\u0000]*\)|\()+)\)/g;
   var TOK = "\u0000", PIPE = "\u0001";
+  // GFM autolink end: trailing punctuation is prose, and a trailing ")" stays
+  // in the url only while the url's parentheses still balance — so
+  // "(see https://x.y/a)" keeps its ")" outside and ".../Foo_(bar)" keeps it in.
+  function splitUrl(u) {
+    var opens = (u.match(/\(/g) || []).length, closes = (u.match(/\)/g) || []).length, tail = "", c;
+    for (;;) {
+      c = u.charAt(u.length - 1);
+      if (c && ".,;:!?".indexOf(c) >= 0) { tail = c + tail; u = u.slice(0, -1); }
+      else if (c === ")" && closes > opens) { tail = c + tail; u = u.slice(0, -1); closes--; }
+      else return [u, tail];
+    }
+  }
   function inline(s) {
     var stash = [];
+    s = String(s == null ? "" : s).replace(/\u0000/g, "");
     function keep(html) { stash.push(html); return TOK + (stash.length - 1) + TOK; }
+    function restore(t) { return t.replace(/\u0000(\d+)\u0000/g, function (_, i) { return restore(stash[+i] || ""); }); }
     function link(u, t) { return keep('<a href="' + u + '" target="_blank" rel="noopener">' + (t || u) + "</a>"); }
     s = s.replace(/`([^`\n]+)`/g, function (_, c) { return keep("<code>" + c + "</code>"); });
-    s = s.replace(/!?\[([^\]\n]*)\]\((https?:[^)\s]+)\)/g, function (_, t, u) { return link(u, t); });
-    s = s.replace(BARE_URL, function (_, pre, u) { return pre + link(u); });
+    s = s.replace(MD_LINK, function (_, t, u) { return link(u, t); });
+    s = s.replace(BARE_URL, function (m, pre, u) {
+      var p = splitUrl(u);
+      return /^https?:\/\/./.test(p[0]) ? pre + link(p[0]) + p[1] : m;
+    });
     s = s.replace(/\*\*\*(\S(?:[^*\n]*?\S)?)\*\*\*/g, "<strong><em>$1</em></strong>");
     s = s.replace(/\*\*(\S(?:[^*\n]*?\S)?)\*\*/g, "<strong>$1</strong>");
     s = s.replace(/(^|[^\w*])\*(\S(?:[^*\n]*?\S)?)\*(?![\w*])/g, "$1<em>$2</em>");
     s = s.replace(/(^|[^\w])__(\S(?:[^_\n]*?\S)?)__(?!\w)/g, "$1<strong>$2</strong>");
     s = s.replace(/(^|[^\w])_(\S(?:[^_\n]*?\S)?)_(?!\w)/g, "$1<em>$2</em>");
     s = s.replace(/~~(\S(?:[^~\n]*?\S)?)~~/g, "<del>$1</del>");
-    return s.replace(/\u0000(\d+)\u0000/g, function (_, i) { return stash[+i]; });
+    return restore(s);
   }
 
   // ---- blocks ---------------------------------------------------------------
@@ -64,8 +90,14 @@
   }
   function cell(tag, a, html) { return "<" + tag + (a ? ' style="text-align:' + a + '"' : "") + ">" + html + "</" + tag + ">"; }
 
-  // `lines` are already escaped. Returns HTML.
-  function renderLines(lines) {
+  // Blockquotes render recursively, one level per ">"; past this depth the
+  // rest of the line is plain text (8000 nested ">" used to overflow the stack
+  // and throw out of render()).
+  var MAX_QUOTE = 50;
+
+  // `lines` are already escaped. Returns HTML. `depth` = enclosing blockquotes.
+  function renderLines(lines, depth) {
+    depth = depth || 0;
     var out = [], para = [], lst = [], i = 0, n = lines.length, blank = false, m;
     function top() { return lst[lst.length - 1]; }
     function flushPara() { if (para.length) { out.push("<p>" + para.join("<br>") + "</p>"); para = []; } }
@@ -100,11 +132,11 @@
         i++; blank = false; continue;
       }
       if (raw.trim() === "") { flushPara(); blank = true; i++; continue; }
-      if (RE.quote.test(raw)) {
+      if (depth < MAX_QUOTE && RE.quote.test(raw)) {
         flushPara(); closeLists();
         var q = [];
         while (i < n && (m = lines[i].match(RE.quote))) { q.push(m[1]); i++; }
-        out.push("<blockquote>" + renderLines(q) + "</blockquote>"); blank = false; continue;
+        out.push("<blockquote>" + renderLines(q, depth + 1) + "</blockquote>"); blank = false; continue;
       }
       if (RE.hr.test(raw)) { flushPara(); closeLists(); out.push("<hr>"); i++; blank = false; continue; }
       if ((m = raw.match(RE.heading))) {
@@ -146,8 +178,15 @@
   // <think>…</think> (Qwen-style reasoning) → collapsed <details>; a block that
   // is still open (streaming) stays expanded until its closing tag arrives.
   var THINK = /<think>\s*([\s\S]*?)\s*(?:<\/think>|$)/g;
+  // Never throws: callers render a whole history in one loop (loadHistory), so
+  // one message the renderer cannot handle must degrade to its escaped text
+  // (index.html renderMd's own no-renderer fallback) instead of ending the loop.
   function render(src) {
     src = String(src == null ? "" : src).replace(/\r\n?/g, "\n");
+    try { return renderSrc(src); }
+    catch (e) { return "<p>" + esc(src).replace(/\n/g, "<br>") + "</p>"; }
+  }
+  function renderSrc(src) {
     if (src.indexOf("<think>") < 0) return block(src);
     var html = "", last = 0, m;
     THINK.lastIndex = 0;

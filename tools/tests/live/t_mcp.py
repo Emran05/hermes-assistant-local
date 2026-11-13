@@ -160,18 +160,43 @@ check("tools/list: files_search absent (no granted-folder search route exists)",
 check("tools/list: every tool has an object inputSchema",
       all((t.get("inputSchema") or {}).get("type") == "object" for t in tools))
 check("tools/list: no nextCursor (single page)", "nextCursor" not in (r.get("result") or {}))
+# F21: annotations on every tool, outputSchema on exactly three
+check("tools/list: every tool is annotated closed-world (openWorldHint false)",
+      all((t.get("annotations") or {}).get("openWorldHint") is False for t in tools))
+check("tools/list: every tool is read-only while every write is off",
+      all((t.get("annotations") or {}).get("readOnlyHint") is True for t in tools))
+STRUCTURED = ["calendar_next", "hermes_search", "needs_you"]
+check("tools/list: outputSchema on exactly %s" % ", ".join(STRUCTURED),
+      sorted(t.get("name") for t in tools if "outputSchema" in t) == STRUCTURED,
+      sorted(t.get("name") for t in tools if "outputSchema" in t))
+
+
+def has_structured(label, resp):
+    res = resp.get("result") or {}
+    if res.get("isError"):
+        check(label + ": an error carries no structuredContent",
+              "structuredContent" not in res, sorted(res))
+    else:
+        check(label + ": structuredContent is an object",
+              isinstance(res.get("structuredContent"), dict), sorted(res))
 
 print("-" * 74)
-t = assert_result("hermes_search", c.tool("hermes_search", {"q": "hermes", "limit": 3}))
+_r = c.tool("hermes_search", {"q": "hermes", "limit": 3})
+t = assert_result("hermes_search", _r)
+has_structured("hermes_search", _r)
 print("     | " + "\n     | ".join(t.splitlines()[:4]))
 
-t = assert_result("calendar_next", c.tool("calendar_next", {"hours": 72}))
+_r = c.tool("calendar_next", {"hours": 72})
+t = assert_result("calendar_next", _r)
+has_structured("calendar_next", _r)
 print("     | " + "\n     | ".join(t.splitlines()[:4]))
 
 t = assert_result("calendar_search", c.tool("calendar_search", {"q": "day"}))
 t = assert_result("notes_search", c.tool("notes_search", {"q": "test"}))
 
-t = assert_result("needs_you", c.tool("needs_you"))
+_r = c.tool("needs_you")
+t = assert_result("needs_you", _r)
+has_structured("needs_you", _r)
 check("needs_you: says it is read-only", "read-only" in t, t[:120])
 print("     | " + "\n     | ".join(t.splitlines()[:3]))
 
@@ -365,6 +390,10 @@ check("redaction: serve_sid value gone", "s1783230277dddddddd" not in out)
 check("redaction: serve_key value gone", "abc123def456" not in out)
 check("redaction: bearer token gone", "hx_0123456789abcdef" not in out)
 check("redaction: both ~/.hermes paths -> [redacted path]", out.count("[redacted path]") == 2, out)
+# B21: a JSON-quoted key and a *_API_KEY= name
+_b21 = M._plain('{"api_key": "sk-proj-' 'abc123def456"} and OPENAI_API_KEY=sk-proj-' 'xyz789')
+check("redaction: JSON-quoted key and OPENAI_API_KEY= values gone",
+      "abc123def456" not in _b21 and "xyz789" not in _b21, _b21)
 check("sanitising: <script> neutralised", "<script" not in out and "&lt;script" in out)
 
 # 1.1.5: raw, UNLABELED shapes go through the same _plain() the tools use.

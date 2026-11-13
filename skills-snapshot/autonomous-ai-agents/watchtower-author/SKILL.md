@@ -13,7 +13,7 @@ metadata:
 
 # Watchtower Author
 
-Watchtower is the hub's trigger engine at `http://127.0.0.1:7788/api/watchtower`. Rules you arm are evaluated every ~60 seconds against cached widget data (quotes cache ~5 min). When a rule fires, it sends ONE Telegram message to the locked home channel and/or a row in the hub feed. That is ALL it can ever do.
+Watchtower is the hub's trigger engine at `http://127.0.0.1:7788/api/watchtower`. Rules you arm are evaluated every ~60 seconds against cached widget data (quotes cache ~5 min). When a rule fires, it sends ONE Telegram message to the locked home channel and/or a row in the hub feed. That is ALL it can ever do. **And only while the owner's News switch is on:** with `master.news` off (read `master` from `GET /api/watchtower`), no rule of any type is evaluated — tickers, crypto and `system_metric` included — so nothing fires and nothing is even logged as suppressed. Check it before you promise a ping, and if it is off tell the user the rule will stay silent until they turn News on in the Watchtower card (never flip it yourself).
 
 **Notify-only, by construction.** A rule cannot run a command, call a tool, or reach any other person. The API refuses any rule containing the keys `action`, `command`, `chat_id`, or `target`. Never author a rule expecting it to *do* something, and refuse asks that need an action ("sell my shares if…", "restart the server when…") — offer the approval-gated alternative instead: "Watchtower can only notify. I can ping you the moment it happens and you approve the action, or I can set up a cron job that asks for approval."
 
@@ -26,7 +26,8 @@ curl -s -X POST http://127.0.0.1:7788/api/watchtower \
 ```
 
 **Probe trick:** an invalid op comes back as `{"ok": false, "error": "unknown op: xyz"}` — a cheap way to confirm the endpoint and dispatcher are alive. The full op list (verified from source) is:
-`add_rule, update_rule, toggle_rule, delete_rule, set_quiet_hours, set_daily_cap, set_brief, set_midday, set_breaking, mark_reaction, mute_rule, test_rule`.
+`add_rule, update_rule, toggle_rule, delete_rule, set_quiet_hours, set_daily_cap, set_brief, set_midday, set_evening, set_breaking, set_master, set_web_research, mark_reaction, mute_rule, test_rule`.
+`set_master` (the Briefings and News switches), `set_evening` and `set_web_research` are the owner's own switches: read their state from the GET, never change them. (Those switches take only a JSON `true`/`false` — a string such as `"false"` is refused with a 400, or, for `set_web_research`, leaves it off.)
 The GET response also tells you the truth about capability: `live_types` (can actually fire) vs `stub_types` (parked, never fire).
 
 ## 1. Rule types & schema (literal, from the engine source)
@@ -81,7 +82,7 @@ Same params as ticker_move. If the user says "the market" / "S&P" / "Nasdaq" / "
   "channels": ["telegram", "hub"]
 }}
 ```
-`coin` is the lowercase CoinGecko id: `bitcoin`, `ethereum`, `solana` (the default tracked set). A coin outside the tracked set never fires ("no quote") — if the user wants another coin, first add it: `curl -s -X POST http://127.0.0.1:7788/api/settings -H 'Content-Type: application/json' -d '{"coins":["bitcoin","ethereum","solana","dogecoin"]}'` (send the FULL list; it replaces).
+`coin` is the lowercase CoinGecko id: `bitcoin`, `ethereum`, `solana` (the default tracked set). A coin outside the tracked set never fires ("no quote") — if the user wants another coin, ask them to add it to the Crypto widget's coin list in the dashboard first (that list is their own config; `/api/settings` is not yours to write), then arm the rule.
 
 ### system_metric — this Mac's own vitals
 
@@ -115,11 +116,12 @@ Same params as ticker_move. If the user says "the market" / "S&P" / "Nasdaq" / "
 
 ### Global gates (apply to every rule)
 
+- `master.news` — the owner's News switch. Off = no rule is evaluated at all (see the top of this skill); nothing fires and no suppressed row is logged.
 - `quiet_hours` — default 22:00–07:00. No non-breaking alert fires inside the window; when speaking to the user always phrase it 12-hour ("10 PM to 7 AM"). Change: `{"op":"set_quiet_hours","start":"22:00","end":"07:00"}` (API wants 24-hour HH:MM).
 - `daily_cap` — max fires per day across all rules (default 20). `{"op":"set_daily_cap","n":20}`.
-- Dedupe — a rule won't re-fire on the same signature (e.g. same ~1% price bucket, same headline).
+- Dedupe — a rule won't re-fire on the same signature: the same ~1% price bucket in the same trading session (the same move on a later day is new), the same metric reading bucket on the same day, the same headline.
 - Rules cap: 40 total.
-- Suppressed fires still land in the log with a reason: `cooldown`, `dedupe`, `quiet_hours`, `daily_cap`, `disabled`, `deliver_failed`.
+- A fire that is held lands in the log with its reason ONCE per streak (not once a minute): `quiet_hours`, `daily_cap`, `deliver_failed`. A still-true rule inside its cooldown (`cooldown`), repeating the same signature (`dedupe`) or waiting between Telegram retries (`backoff`) logs nothing new — the fire that started it is already in the log. A disabled rule and a News-off pass are not evaluated at all, so they log nothing.
 
 Other ops you'll use: `{"op":"update_rule","id":"wt-...","patch":{"cooldown_min":240}}` (patchable: label, enabled, cooldown_min, channels, params) · `{"op":"toggle_rule","id":"...","enabled":false}` · `{"op":"delete_rule","id":"..."}` · `{"op":"mute_rule","id":"..."}` (disables AND marks the last fire as noise) · `{"op":"mark_reaction","rule_id":"...","reaction":"useful"}`.
 
@@ -179,7 +181,7 @@ Not everything deserves a phone buzz. Route by urgency:
 
 - **Instant ping**: `channels: ["telegram","hub"]` — money moving, system about to fall over, time-critical news.
 - **Morning-brief material**: `channels: ["hub"]` — the fire lands in the Watchtower feed (`/api/watchtower/feed`) and recent fires surface as "Overnight flags" in the 8 AM World Brief's "Your day" section; no Telegram message at all. Use for slow-burn watches ("keep an eye on", "let me know eventually", research follow-ups).
-- Preview what the brief would say right now: `curl -s http://127.0.0.1:7788/api/brief/preview` (GET, read-only). Never POST `/api/brief/send` without `"dry_run": true` unless the user explicitly asks for a brief right now.
+- Preview what the brief would say right now: `curl -s http://127.0.0.1:7788/api/brief/preview` (GET, read-only). `POST /api/brief/send` is a dry run by default (`dry_run` defaults to true) — it only sends when the body says `"dry_run": false`, and you send that only when the user explicitly asks for a brief right now.
 
 ## 6. Hygiene — monthly audit
 
@@ -192,7 +194,7 @@ The audit only reads and messages — deletions go through the user.
 ## Gotchas
 
 - **Notify-only is structural.** `action`/`command`/`chat_id`/`target` keys are rejected by the API. Don't try to smuggle intent into a label; refuse action-triggering asks and offer the approval-gated alternative.
-- **`test_rule` never sends** (dry-run in source) — run it freely. What DOES send: `add_rule` once the live loop finds the condition true, and `/api/brief/send` without `dry_run`. Treat those with care.
+- **`test_rule` never sends** (dry-run in source) — run it freely. What DOES send: `add_rule` once the live loop finds the condition true (with News on), and `/api/brief/send` with `"dry_run": false`. Treat those with care.
 - **Extra rule keys are silently dropped** — don't invent fields like `quiet_hours` or `origin` on a rule; they won't persist. Global quiet hours + the ledger cover both.
 - **`index_move` only sees SPY/QQQ/DIA/IWM**; any other symbol belongs in `ticker_move`. `crypto_move` only sees tracked coins — test_rule's `"no quote"` is your tell.
 - **Quiet hours to the user in 12-hour words, to the API in 24-hour HH:MM.**

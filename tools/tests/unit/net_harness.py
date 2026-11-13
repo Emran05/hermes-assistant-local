@@ -12,7 +12,8 @@ Covers:
   2  _model_download_gb measures a COMPLETE fake snapshot
   3  _model_download_gb falls back to the onboarding catalog when not local,
      and adds a separate-repo drafter's size
-  4  a PARTIAL snapshot is not measured (would understate the pull)
+  4  a PARTIAL snapshot is not measured (would understate the pull); the
+     catalog size minus the blobs already on disk is quoted (round-2 R2-8)
   5  _disk_short at the exact boundary (>=5 GB free after == allowed)
   6  download_model() refuses server-side with {"ok": false,
      "error": "not enough free disk"} and allows at the boundary
@@ -129,8 +130,9 @@ ns["_widget_cache"].clear()
 check("complete repo + separate drafter measured on disk (5.0 + 0.5)",
       ns["_model_download_gb"](ROSTER[0]), 5.5)
 ns["_widget_cache"].clear()
-check("PARTIAL snapshot is not measured -> catalog 6.0",
-      ns["_model_download_gb"](ROSTER[1]), 6.0)
+check("PARTIAL snapshot is not measured: catalog 6.0 minus the 3.0 GB of blobs "
+      "already on disk (round-2 R2-8: a resume pulls only the rest) -> 3.0",
+      ns["_model_download_gb"](ROSTER[1]), 3.0)
 ns["_widget_cache"].clear()
 check("absent from disk -> catalog repo+drafter 16.1+0.9",
       ns["_model_download_gb"](ROSTER[2]), 17.0)

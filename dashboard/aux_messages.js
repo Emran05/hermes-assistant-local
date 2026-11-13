@@ -50,7 +50,7 @@
     var im = /imessage/i.test(s);
     var col = im ? "var(--iris)" : "var(--ok)";
     var lab = im ? "iMessage" : (/sms/i.test(s) ? "SMS" : s.slice(0, 10));
-    return '<span style="flex:0 0 auto;font-size:8.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;padding:1.5px 5px;border-radius:5px;color:' + col + ';background:color-mix(in srgb,' + col + ' 14%, transparent)">' + E(lab) + "</span>";
+    return '<span style="flex:0 0 auto;font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;padding:1px 5px;border-radius:5px;color:' + col + ';background:color-mix(in srgb,' + col + ' 14%, transparent)">' + E(lab) + "</span>";
   }
 
   function avatar(c, sz) {
@@ -68,26 +68,26 @@
     }
     if (!c.last) return '<span style="color:var(--muted)">(attachment/rich message)</span>';
     var pre = "";
-    if (c.from_me) pre = '<span style="color:var(--faint)">You: </span>';
+    if (c.from_me) pre = '<span style="color:var(--muted)">You: </span>';
     else if (c.group) pre = '<span style="color:' + hue(c.sender) + '">' + E(String(c.sender || "").split(/\s+/)[0]) + ": </span>";
     return pre + E(c.last);
   }
 
   function unreadBadge(c) {
     if (!(c.unread > 0)) return "";
-    return '<span class="num" style="flex:0 0 auto;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--iris);color:#fff;font-size:10.5px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;line-height:1">' + E(c.unread > 99 ? "99+" : String(c.unread)) + "</span>";
+    return '<span class="num" style="flex:0 0 auto;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--iris);color:var(--iris-ink,#fff);font-size:12px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;line-height:1">' + E(c.unread > 99 ? "99+" : String(c.unread)) + "</span>";
   }
 
   // ---- state cards -----------------------------------------------------------
   function syncingCard(big) {
     return '<div style="display:flex;align-items:center;gap:9px;color:var(--muted);padding:' + (big ? "14px 2px" : "4px 0") + '">' + SPIN +
       '<div style="min-width:0"><div style="font-size:' + (big ? "13.5" : "12.5") + 'px;font-weight:620;color:var(--ink)">Waiting for the Hermes app to sync Messages&hellip;</div>' +
-      '<div class="w-sub" style="font-size:11px;margin-top:2px">The Hermes Assistant app reads Messages locally and syncs about once a minute. Nothing leaves this Mac.</div></div></div>';
+      '<div class="w-sub" style="font-size:12px;margin-top:2px">The Hermes Assistant app reads Messages locally and syncs about once a minute. Nothing leaves this Mac.</div></div></div>';
   }
 
   function grantNudge() {
     return '<div style="display:flex;align-items:center;gap:8px;color:var(--warn);font-weight:660;font-size:12.5px;margin:2px 0 5px">' + WARN + "Full Disk Access needed</div>" +
-      '<div class="w-sub" style="font-size:11.5px;line-height:1.5">Grant <b style="color:var(--ink)">Hermes Assistant.app</b> Full Disk Access, then relaunch the app. Open this widget for the exact steps.</div>';
+      '<div class="w-sub" style="font-size:12px;line-height:1.5">Grant <b style="color:var(--ink)">Hermes Assistant.app</b> Full Disk Access, then relaunch the app. Open this widget for the exact steps.</div>';
   }
 
   function grantCard() {
@@ -101,14 +101,14 @@
         '<li>Click <b style="color:var(--ink)">+</b> and add <b style="color:var(--ink)">/Applications/Hermes Assistant.app</b> <span class="w-sub">(the app, not python3 &mdash; that is the whole workaround)</span></li>' +
         '<li>Toggle it <b style="color:var(--ink)">On</b></li>' +
         '<li><b style="color:var(--ink)">Quit and reopen</b> Hermes Assistant &mdash; the grant applies on next launch</li></ol>' +
-      '<div class="w-sub" style="font-size:11px;margin:2px 0 10px">Within about a minute of relaunching, this widget fills with your recent conversations.</div>' +
-      '<a href="' + FDA_URL + '" style="display:inline-flex;align-items:center;gap:7px;padding:8px 14px;border-radius:10px;background:var(--iris);color:#fff;font-size:12.5px;font-weight:650;text-decoration:none">Open Full Disk Access settings</a>' +
+      '<div class="w-sub" style="font-size:12px;margin:2px 0 10px">Within about a minute of relaunching, this widget fills with your recent conversations.</div>' +
+      '<a href="' + FDA_URL + '" style="display:inline-flex;align-items:center;gap:7px;padding:8px 14px;border-radius:10px;background:var(--iris);color:var(--iris-ink,#fff);font-size:12.5px;font-weight:650;text-decoration:none">Open Full Disk Access settings</a>' +
       "</div>";
   }
 
   function staleBadge(d) {
     if (!d.stale || d.age_s == null) return "";
-    return '<div class="w-sub" style="display:inline-flex;align-items:center;gap:5px;font-size:10.5px;color:var(--faint);margin:6px 0 0">' + SPIN.replace('width="15" height="15"', 'width="10" height="10"') + "synced " + E(agoM(d.age_s)) + "m ago &mdash; waiting for the app&rsquo;s next sync</div>";
+    return '<div class="w-sub" style="display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);margin:6px 0 0">' + SPIN.replace('width="15" height="15"', 'width="10" height="10"') + "synced " + E(agoM(d.age_s)) + "m ago &mdash; waiting for the app&rsquo;s next sync</div>";
   }
 
   // ---- compact card body ------------------------------------------------------
@@ -135,10 +135,10 @@
           '<div style="min-width:0;flex:1">' +
             '<div style="display:flex;align-items:baseline;gap:7px">' +
               '<span style="font-weight:' + (c.unread > 0 ? "700" : "620") + ';font-size:12.5px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + E(c.name) + "</span>" +
-              '<span class="w-sub num" style="margin-left:auto;flex:0 0 auto;font-size:10.5px;color:' + (c.unread > 0 ? "var(--iris)" : "var(--faint)") + '">' + RT(c.ts) + "</span>" +
+              '<span class="w-sub num" style="margin-left:auto;flex:0 0 auto;font-size:12px;color:' + (c.unread > 0 ? "var(--iris)" : "var(--muted)") + '">' + RT(c.ts) + "</span>" +
             "</div>" +
             '<div style="display:flex;align-items:center;gap:7px;margin-top:1px">' +
-              '<span style="min-width:0;flex:1;font-size:11.5px;line-height:1.35;color:' + (c.unread > 0 ? "var(--ink)" : "var(--muted)") + ';overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + preview(c) + "</span>" +
+              '<span style="min-width:0;flex:1;font-size:12px;line-height:1.35;color:' + (c.unread > 0 ? "var(--ink)" : "var(--muted)") + ';overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + preview(c) + "</span>" +
               unreadBadge(c) +
             "</div>" +
           "</div></div>";
@@ -169,7 +169,7 @@
         el.innerHTML = h + '<div class="hint" style="margin-top:12px">No recent conversations.</div>';
         return;
       }
-      h += '<div style="font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:700;margin:14px 0 6px">Conversations</div>';
+      h += '<div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600;margin:14px 0 6px">Conversations</div>';
       h += C.map(function (c) {
         var unread = c.unread > 0;
         return '<div data-msgrow style="display:flex;align-items:center;gap:11px;padding:9px 2px;border-bottom:1px solid var(--hairline)">' +
@@ -177,9 +177,9 @@
           '<div style="min-width:0;flex:1">' +
             '<div style="display:flex;align-items:baseline;gap:8px">' +
               '<span style="font-weight:' + (unread ? "700" : "600") + ';font-size:13.5px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + E(c.name) + "</span>" +
-              (c.group ? '<span class="w-sub" style="font-size:10px;flex:0 0 auto">' + E(String(c.participants || "")) + "</span>" : "") +
+              (c.group ? '<span class="w-sub" style="font-size:12px;flex:0 0 auto">' + E(String(c.participants || "")) + "</span>" : "") +
               svcChip(c.service) +
-              '<span class="w-sub num" style="margin-left:auto;flex:0 0 auto;font-size:11px;color:' + (unread ? "var(--iris)" : "var(--faint)") + '">' + RT(c.ts) + "</span>" +
+              '<span class="w-sub num" style="margin-left:auto;flex:0 0 auto;font-size:12px;color:' + (unread ? "var(--iris)" : "var(--muted)") + '">' + RT(c.ts) + "</span>" +
             "</div>" +
             '<div style="display:flex;align-items:center;gap:8px;margin-top:2px">' +
               '<span style="min-width:0;flex:1;font-size:12px;line-height:1.35;color:' + (unread ? "var(--ink)" : "var(--muted)") + ';overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + preview(c) + "</span>" +
@@ -187,7 +187,7 @@
             "</div>" +
           "</div></div>";
       }).join("");
-      h += '<div class="w-sub" style="margin-top:10px;font-size:10.5px;color:var(--faint);display:flex;align-items:center;gap:5px">' + LOCK +
+      h += '<div class="w-sub" style="margin-top:10px;font-size:12px;color:var(--muted);display:flex;align-items:center;gap:5px">' + LOCK +
         "Local-only &middot; read by the Hermes app, previews stored on this Mac, never sent anywhere</div>";
       el.innerHTML = h;
 

@@ -105,6 +105,7 @@ import shutil as _cx_shutil
 import threading as _cx_threading
 import time as _cx_time
 import datetime as _cx_datetime
+import sys as _cx_sys
 
 # ---------------------------------------------------------------------------
 # constants
@@ -340,6 +341,16 @@ def _cx_num(raw, kind):
         return None
 
 
+# Blank lines and comments are NEVER a block boundary (the aux_promptbudget
+# `_pb_skippable` rule). A `# note` in column 0 inside `compression:` used to
+# end the block: the reader lost every key below it, and the writer appended a
+# SECOND `threshold:` above the comment while the old one still sat below it —
+# a duplicate key PyYAML resolves to the old value, so the edit did nothing.
+def _cx_skippable(line):
+    s = line.strip()
+    return (not s) or s.startswith("#")
+
+
 def _cx_read_cfg():
     """Stdlib scanner (no yaml dep — same approach as _config_model_default and
     aux_config's _cfg_read_yaml_keys).
@@ -357,6 +368,8 @@ def _cx_read_cfg():
     try:
         with open(_CX_CFG, encoding="utf-8") as f:
             for line in f:
+                if _cx_skippable(line):
+                    continue            # a column-0 `# note` is not a new section
                 if _cx_re.match(r"^\S", line):
                     m = _cx_re.match(r"^([A-Za-z0-9_.-]+):\s*(.*)$", line)
                     section = m.group(1) if m else None
@@ -465,7 +478,11 @@ def _cx_apply_text(src, values):
     lines = src.splitlines(True)
     start = None
     for i, line in enumerate(lines):
-        if _cx_re.match(r"^compression:\s*$", line):
+        # a trailing comment on the header is accepted (E17: `compression:  #
+        # note` read as "no block", a second block was appended and YAML
+        # last-wins dropped a hand-set `enabled: false`); any other decoration
+        # is refused by the guard in `_cx_edit_text`
+        if _cx_re.match(r"^compression:[ \t]*(#.*)?$", line.rstrip("\r\n")):
             start = i
             break
     if start is None:
@@ -476,7 +493,7 @@ def _cx_apply_text(src, values):
 
     end = len(lines)
     for i in range(start + 1, len(lines)):
-        if lines[i].strip() and _cx_re.match(r"^\S", lines[i]):
+        if not _cx_skippable(lines[i]) and _cx_re.match(r"^\S", lines[i]):
             end = i
             break
 
@@ -486,6 +503,8 @@ def _cx_apply_text(src, values):
     # was rewritten as if it were compression.threshold.
     indent = None
     for i in range(start + 1, end):
+        if _cx_skippable(lines[i]):
+            continue                    # an indented comment is not a child key
         m = _cx_re.match(r"^(\s+)\S", lines[i])
         if m:
             indent = m.group(1)
@@ -514,8 +533,92 @@ def _cx_apply_text(src, values):
         # canonical order, with the indent the block already uses
         add = ["%s%s: %s\n" % (indent or "  ", k, _cx_fmt(k, todo[k]))
                for k in _CX_KEYS if k in todo]
-        out = out[:end] + add + out[end:]
+        # right after the block's last real line, so a comment or blank run
+        # that introduces the NEXT section stays with that section
+        at = start + 1
+        for i in range(start + 1, end):
+            if not _cx_skippable(out[i]):
+                at = i + 1
+        if at > 0 and not out[at - 1].endswith("\n"):
+            out[at - 1] += "\n"
+        out = out[:at] + add + out[at:]
     return "".join(out)
+
+
+# ---------------------------------------------------------------------------
+# the E16/E17 guard — hermes-plugins/plugin_enable.py's precheck/verify, loaded
+# by path (the way aux_toolbudget.py loads it), so the three config.yaml
+# editors refuse the same forms and verify with the same reader. Missing or
+# broken helper: every WRITE is refused (fail closed); reads are unaffected.
+# ---------------------------------------------------------------------------
+_CX_YH = {}
+
+
+def _cx_yaml_helper():
+    if "mod" in _CX_YH:
+        return _CX_YH["mod"]
+    import importlib.util as _il
+    try:
+        here = globals().get("HERE") or _cx_os.path.dirname(
+            _cx_os.path.abspath(_cx_sys._getframe(0).f_code.co_filename))
+        path = _cx_os.path.join(_cx_os.path.dirname(here), "hermes-plugins",
+                                "plugin_enable.py")
+        spec = _il.spec_from_file_location("hermes_plugin_enable_cx", path)
+        mod = _il.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _CX_YH["mod"] = mod
+    except Exception as e:
+        raise RuntimeError("hermes-plugins/plugin_enable.py could not be loaded "
+                           "(%s), so config.yaml was not edited — this install "
+                           "looks incomplete; re-run ./update.sh"
+                           % type(e).__name__)
+    return _CX_YH["mod"]
+
+
+def _cx_config_error():
+    """The guard's refusal for the current file, as text, or "" — for the
+    card, so a section it cannot edit is said BEFORE a click."""
+    try:
+        with open(_CX_CFG, encoding="utf-8", newline="") as fh:
+            text = fh.read()
+        _cx_yaml_helper().precheck(text, "compression")
+        return ""
+    except OSError:
+        return ""
+    except Exception as e:
+        return str(e)
+
+
+def _cx_edit_text(src, values):
+    """`_cx_apply_text` behind the E16/E17 guard: refuse a form that cannot be
+    edited safely (a quoted, duplicated or flow-style `compression`, a tab, an
+    anchor, a second document, a list or map where a number belongs...), then
+    re-read the result with plugin_enable.py's copy of doctor's reader and
+    refuse it unless each compression.<key> reads back as the number written
+    and nothing else in the file moved. Returns the new text (`src` for a
+    no-op); raises the helper's ConfigEditError (a RuntimeError) having
+    written nothing."""
+    if src[:1] == "﻿":
+        # a byte-order mark hid the header from the line editor (review R4)
+        return "﻿" + _cx_edit_text(src[1:], values)
+    yh = _cx_yaml_helper()
+    header = yh.precheck(src, "compression")
+    sec = yh.section_value(src, "compression")
+    for k in values:
+        if isinstance(sec.get(k), (list, dict)):
+            raise yh.ConfigEditError("compression.%s is not a number" % k,
+                                     yh.child_line(src, "compression", k))
+    new = _cx_apply_text(src, values)
+    if new == src:
+        return src
+    new = yh.match_newlines(src, new)
+    want = dict(values)
+    if header is None:                  # a whole new block, defaults included
+        want = dict(_CX_DEFAULTS)
+        want.update(values)
+    yh.verify_edit(src, new, "compression",
+                   {k: yh.scalar_value(_cx_fmt(k, v)) for k, v in want.items()})
+    return new
 
 
 @_cx_contextlib.contextmanager
@@ -554,16 +657,74 @@ def _cx_config_lock(timeout=_CX_LOCK_TIMEOUT):
             pass
 
 
+_CX_BACKUP_KEEP = 10      # newest config.yaml.bak-context-* copies kept (R2-28)
+_CX_BACKUP_RE = _cx_re.compile(r"\.bak-context-(\d{8}-\d{6})(?:-(\d+))?$")
+
+
 def _cx_backup():
-    """Timestamped copy next to the config, 0600. Returns its path."""
+    """Timestamped copy next to the config, 0600. Returns its path.
+
+    R2-28: every change used to write config.yaml.bak-context-<ts> and
+    nothing ever pruned them, and two changes in the same second overwrote
+    each other's copy. The name is now reserved with O_EXCL (a second one in
+    the same second is <ts>-2, -3, ...) and only the newest _CX_BACKUP_KEEP
+    of this kind are kept. Called inside the config locks, like the write.
+    """
     stamp = _cx_datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    dst = "%s.bak-context-%s" % (_CX_CFG, stamp)
-    _cx_shutil.copy2(_CX_CFG, dst)
+    base = "%s.bak-context-%s" % (_CX_CFG, stamp)
+    dst, n = base, 1
+    while True:
+        try:
+            _cx_os.close(_cx_os.open(
+                dst, _cx_os.O_CREAT | _cx_os.O_EXCL | _cx_os.O_WRONLY, 0o600))
+            break
+        except FileExistsError:
+            n += 1
+            dst = "%s-%d" % (base, n)
+    try:
+        _cx_shutil.copy2(_CX_CFG, dst)
+    except Exception:
+        try:
+            _cx_os.remove(dst)           # never leave an empty "backup"
+        except OSError:
+            pass
+        raise
     try:
         _cx_os.chmod(dst, 0o600)
     except OSError:
         pass
+    _cx_prune_backups(protect=dst)
     return dst
+
+
+def _cx_prune_backups(keep=None, protect=None):
+    """Delete all but the newest `keep` config.yaml.bak-context-* copies.
+    Only names this module writes are touched, never `protect` (the copy just
+    made, even if a clock step put it out of order); never raises."""
+    keep = _CX_BACKUP_KEEP if keep is None else keep
+    d = _cx_os.path.dirname(_CX_CFG) or "."
+    head = _cx_os.path.basename(_CX_CFG)
+    try:
+        names = _cx_os.listdir(d)
+    except OSError:
+        return
+    found = []
+    for fn in names:
+        if not fn.startswith(head):
+            continue
+        if protect and fn == _cx_os.path.basename(protect):
+            continue
+        m = _CX_BACKUP_RE.match(fn[len(head):])
+        if m:
+            found.append(((m.group(1), int(m.group(2) or 1)), fn))
+    found.sort()
+    if protect:
+        keep -= 1                           # the protected copy counts too
+    for _k, fn in found[:max(0, len(found) - keep)]:
+        try:
+            _cx_os.remove(_cx_os.path.join(d, fn))
+        except OSError:
+            pass
 
 
 def _cx_write(values):
@@ -606,9 +767,10 @@ def _cx_write_flocked(values):
 
 def _cx_write_locked(values):
     """The critical section itself — never call this without _cx_write's locks."""
-    with open(_CX_CFG, encoding="utf-8") as fh:
+    # newline="": a CRLF file stays byte-identical outside the edit
+    with open(_CX_CFG, encoding="utf-8", newline="") as fh:
         src = fh.read()
-    new = _cx_apply_text(src, values)
+    new = _cx_edit_text(src, values)        # refuses: nothing written
     if new == src:
         return False, None
     bak = _cx_backup()
@@ -621,7 +783,7 @@ def _cx_write_locked(values):
     fd = _cx_os.open(tmp, _cx_os.O_CREAT | _cx_os.O_EXCL | _cx_os.O_WRONLY,
                      0o600)
     try:
-        with _cx_os.fdopen(fd, "w", encoding="utf-8") as fh:
+        with _cx_os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
             fh.write(new)
             fh.flush()
             _cx_os.fsync(fh.fileno())
@@ -927,6 +1089,8 @@ def _cx_compression_payload(cfg=None):
         "applies_to": "new conversations",
         "applies_note": "A conversation keeps the compressor it was built with; "
                         "the next new one picks these up. No restart needed.",
+        # E16/E17: non-empty when a change from this card would be refused
+        "config_error": _cx_config_error(),
     }
 
 
@@ -973,6 +1137,10 @@ def _cx_compression_post(ctx):
     except OSError as e:
         return {"ok": False,
                 "error": "could not write %s — %s" % (_CX_CFG, e)}, 500
+    except RuntimeError as e:
+        # E16/E17: config.yaml is in a form the editor will not touch, or the
+        # edit did not verify — nothing was written, and the card says why
+        return {"ok": False, "config_error": True, "error": str(e)}, 409
     after = _cx_compression_payload()
 
     return {"ok": True, "changed": changed, "backup": backup,

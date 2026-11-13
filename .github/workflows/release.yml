@@ -6,12 +6,25 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  # The whole CI workflow (syntax + hygiene, the unit tier on every Python in
+  # the matrix, the Swift typecheck) is a required gate: nothing below runs
+  # unless it passes on exactly this tag (B30 — a tag used to build and
+  # publish whatever it pointed at, tested or not).
+  ci:
+    name: CI gate
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   release:
     name: Build, sign and publish
+    needs: ci
     runs-on: macos-14
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -93,14 +106,16 @@ jobs:
 
       - name: Package
         id: pkg
+        env:
+          ver: ${{ steps.ver.outputs.version }}
+          tag: ${{ steps.ver.outputs.tag }}
         run: |
           set -euo pipefail
-          ver="${{ steps.ver.outputs.version }}"
           mkdir -p dist
           ditto -c -k --keepParent "app/build/Hermes Assistant.app" \
             "dist/HermesAssistant-$ver-macos-arm64.zip"
           git archive --format=tar.gz --prefix="HermesAssistant-$ver/" \
-            -o "dist/HermesAssistant-$ver-source.tar.gz" "${{ steps.ver.outputs.tag }}"
+            -o "dist/HermesAssistant-$ver-source.tar.gz" "$tag"
           echo "zip=dist/HermesAssistant-$ver-macos-arm64.zip" >> "$GITHUB_OUTPUT"
           echo "src=dist/HermesAssistant-$ver-source.tar.gz"   >> "$GITHUB_OUTPUT"
 
@@ -110,9 +125,9 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PW: ${{ secrets.APPLE_APP_PASSWORD }}
           TEAM: ${{ secrets.APPLE_TEAM_ID }}
+          ver: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          ver="${{ steps.ver.outputs.version }}"
           xcrun notarytool submit "dist/HermesAssistant-$ver-macos-arm64.zip" \
             --apple-id "$APPLE_ID" --password "$APPLE_PW" --team-id "$TEAM" --wait
           xcrun stapler staple "app/build/Hermes Assistant.app"
@@ -122,9 +137,10 @@ jobs:
           spctl -a -vvv -t install "app/build/Hermes Assistant.app" || true
 
       - name: Checksums
+        env:
+          ver: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          ver="${{ steps.ver.outputs.version }}"
           cd dist
           shasum -a 256 "HermesAssistant-$ver-macos-arm64.zip" \
                         "HermesAssistant-$ver-source.tar.gz" > SHA256SUMS
@@ -132,9 +148,11 @@ jobs:
 
       - name: Release notes from CHANGELOG.md
         id: notes
+        env:
+          VER: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          VER="${{ steps.ver.outputs.version }}" python3 - > dist/NOTES.md <<'PY'
+          python3 - > dist/NOTES.md <<'PY'
           import os, re
           ver = os.environ["VER"]
           try:

@@ -219,7 +219,7 @@
       // actions + result
       SEL + " .pbbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:4px 0 0}" +
       SEL + " button.pbb{padding:9px 16px;border-radius:10px;font-size:12.5px;" +
-        "font-weight:600;cursor:pointer;border:0;background:var(--iris);color:#fff;" +
+        "font-weight:600;cursor:pointer;border:0;background:var(--iris);color:var(--iris-ink,#fff);" +
         "min-height:40px;transition-property:opacity;transition-duration:150ms;" +
         "transition-timing-function:ease-out}" +
       SEL + " button.pbb:disabled{opacity:.45;cursor:default}" +

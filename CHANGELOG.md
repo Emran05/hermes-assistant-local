@@ -4,7 +4,630 @@ All notable changes to Hermes Assistant are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.4.0] - 2026-11-13
+
+The first release since 1.3.2: the fixes from four codebase audits, then three sets of
+features.
+
+**New in this release**
+- **Stop a running reply**, in the chat composer and in Quick Ask.
+- **Chat lives only on the Agent tab.** The Hub and Settings are full width, and anything
+  that starts a chat from elsewhere opens the Agent tab.
+- **Model advisor**: what fits this Mac for what you use it for, and why. It never
+  switches, downloads or restarts anything.
+- **Browse Hugging Face**: find an MLX model, have it checked against this Mac, add it to
+  the model menu.
+- **Six more opt-in models**, five of them uncensored builds. None is the default, none is
+  recommended, and switching to an uncensored one needs your acknowledgement.
+- **Sandboxed GitHub changes** (only if you connect GitHub): the agent prepares a change in
+  a local sandbox and you review the whole diff before anything is pushed. The agent never
+  holds the token.
+- **One motion runtime** on vendored animation libraries pinned by sha256; nothing is
+  loaded from a CDN.
+
+**Audit fixes**
+- 2026-10-21 codebase audit (C-series), the still-open 2026-10-08 findings (B-series) and
+  research items F01, F03, F07 and F21: 155 fixed, 21 partly fixed, 1 skipped. Status table
+  at the end of `docs/audits/2026-10-21-codebase-audit.md`.
+- 2026-11-09 codebase audit (E-series): 129 fixed, 4 partly fixed, 4 not done, 1 skipped,
+  each reviewed by a second agent before it was merged. Status table at the end of
+  `docs/audits/2026-11-09-codebase-audit.md`.
+- 2026-11-12 visual audit (V-series) and three rounds of blind UI judging
+  (`docs/audits/2026-11-12-visual-audit.md`).
+
+Every fix has a regression test that fails on the old code; the unit tier is
+18,060 checks (2,251 in 1.3.2).
+
+### Security
+- **Trust "Auto" approves only a command it has fully read.** Hermes reports only the first
+  risky pattern in a command, so `pkill -9 node; cp key ~/.ssh/authorized_keys` was
+  approved whole once process control was on Auto. The dashboard now checks the command
+  itself against every pattern and applies the strictest class it touches; a chained,
+  multi-line, over-512-character, partly redacted or obscured command always asks
+  (`permissions.py`; E03).
+- **Re-trust signs only the policy you reviewed**, and restoring a saved configuration merges
+  its Trust policy and leaves it untrusted until you review it (E115, E112).
+- **The approval gate sees every spelling of a path.** macOS alias paths (`/.vol`,
+  `/.nofollow`, `/.resolve`, `/.file`) are refused, the `/System/Volumes/Data` spelling and
+  the kernel's own name are judged, a carriage return in a patch header asks, a relative
+  patch header after `cd` is judged where it really lands, and Telegram no longer judges
+  relative paths against `~/.hermes` (E10, E11, E12, E13). Files shell startup files load
+  (`~/.cargo/env`, `~/.curlrc`, `~/.netrc`, oh-my-zsh…) are protected too (E68).
+- **Approval cards show what will run.** The gate's card shows the start and the end of
+  long text, says when a replace hits every occurrence and marks hidden characters
+  ⟦U+XXXX⟧; only an explicit yes approves (E14, E67). The main window's card shows a
+  multi-line command line for line and flags a long one next to the buttons (E15).
+- **The GitHub review sheet approves only what it showed you.** Diff lines wrap, long blank
+  runs and stacked marks are drawn as ⟦…⟧ markers, a binary file (including a text file
+  made "binary" by one NUL byte) or a very long line needs its own tick, and Approve stays
+  off until every diff line is on screen (E02, E61). An edited description over 8 KB is
+  refused instead of cut after approval, and the sheet says "draft" only when GitHub really
+  opened one (E64, E62).
+- **GitHub pushes re-check Pause, Trust and the daily limit at the moment of the push**, so
+  approvals queued behind another push can no longer exceed 10 a day or ignore a Pause
+  (E05). A `.env` line with a trailing comment keeps its secret blocked (E06); a key that
+  can manage your account's SSH or GPG keys is refused, and the card says when the key's
+  reach beyond your list is only sampled (E50, E08); a repository made public since the last
+  check needs the public confirmation (E55); a mirror config changed during a git call is
+  treated as tampering (E56).
+- **Local model calls never go through a system web proxy**, which used to receive prompts
+  and the model key when one was set (E20). The model server refuses any image, audio or
+  video that is not sent inline, so no local program can use it to read files or fetch web
+  addresses (E100).
+- **More credential shapes are caught**: Google OAuth tokens, Hugging Face, Stripe, npm and
+  GitLab keys and passwords inside web addresses are redacted from exports and MCP results
+  and kept out of memory facts, and "my password is …" is no longer stored as a fact (E82,
+  E24). The Claude bridge refuses a question or context that holds a credential and logs
+  only a redacted summary (E80).
+- The hidden Needs-you drafts conversation can no longer be read or chatted in by changing
+  its letter case, MCP included (E69). Clipboard text reaches the model inside the
+  untrusted-data fence, and no input can leave a `<<<` or `>>>` in fenced text (E120,
+  E75). Google sign-in accepts only Google's own addresses from a client file (E87). The
+  memory-layer switches accept only JSON booleans, the last C59 case (E121).
+- **Dashboard HTTP**: a client trickling headers byte by byte is cut off after 20 s (E122);
+  a port-less extra host name no longer trusts its port-80 server (E125). Config exports and
+  pre-restore backups are created 0600 (E116). A model added under an uncensored model's
+  name in other letter case keeps the badge and the acknowledgement (E104).
+- The MCP server answers a hostile or oversized line (capped at 1 MiB) instead of exiting,
+  and its text and structured output share one 8 KB bound and the same items (E81, E83).
+- **Unattended agent runs no longer hold the whole toolset.** `hermes -z` auto-approves
+  every non-hardline command, so the chat no longer falls back to it when serve is down (it
+  says nothing was run), and every one-shot passes an explicit reduced `--toolsets`: the
+  legacy briefing runs tools-free, the watchtower's web-research pass gets web search only
+  and is off by default (C36, C118, C50, F07).
+- **Desktop control and sensitive writes need your approval.** The new approval-gate plugin
+  routes `computer_use` clicks/typing/keys and `write_file`/`patch` to shell rc files,
+  LaunchAgents, `~/.hermes`, `~/.claude` and the install dir through Hermes' own approval
+  prompt (the dashboard card or Telegram), and blocks them where nobody can answer
+  (`-z`, cron, subagents) (C111, C116).
+- **The model servers serve only the model they were started with**: no request-named
+  model, no CORS, no browser (`Origin`) or rebound-Host requests, no management routes, an
+  optional API key, `--trust-remote-code` only when a roster entry opts in, offline start
+  once the weights are on disk, and downloads never fetch code or pickle files (C130, B03,
+  C49, F01).
+- **`hermes serve` no longer publishes its web UI**, which handed the session token to any
+  loopback page (C117).
+- **For-You's Claude pass has its own switch, off by default** — it sent the You-Model
+  profile and headlines to Claude about hourly whenever escalation was on (C35);
+  credential-looking entries are withheld (C44). The `claude -p` child runs with no tools,
+  no MCP servers, no settings and no saved session (B25). The escalation switches accept
+  only a JSON `true`/`false`; the string "false" used to turn escalation on (C59).
+- **Approval cards answer only the command they show**: a stale or repeated click is
+  refused, pending approvals queue in serve's order, and the agent's sudo/secret/clarify
+  prompts are answered without any secret passing through the chat (B01, C33, C115).
+- **Third-party text is fenced as data** (`dashboard/untrusted.py`): calendar titles,
+  tasks, feed headlines, message previews and search results reach prompts as inert lines
+  or labelled fences (B19, C01, C39, C45, C46). Needs-you drafts are hidden from search and
+  MCP and never go to Claude (C37, C38).
+- **Dashboard HTTP**: non-loopback peers are refused (containers and other accounts still
+  get in until a per-launch secret exists — C131 partly), no other site can frame the hub
+  (B17), idle sockets close after 20 s (C13), and POST bodies are parsed once with
+  400/413/408 answers (B12). Widget links open only http(s); Recent Activity rows reveal
+  instead of open (B18, web half).
+- Google asks for read-only Calendar instead of read/write (C51). The MCP server enables
+  only a literal `true` in mcp-allow.json, hides message counts with messages off, accepts
+  only a loopback `HERMES_MCP_DASHBOARD` with no proxy or redirect, and its scrubber
+  catches JSON-quoted keys, `*_KEY=` names, Basic auth and prose passwords (B06, C55, C71,
+  B21). Stores are written 0600 and fsynced (C110, C107).
+- **Uncensored models need your acknowledgement.** Switching to one (the orcarouter build
+  and the four new abliterated ones) is refused until you confirm it in the model menu or
+  store the acknowledgement in Settings › Agent & Models; first-run setup refuses an
+  uncensored assistant or background-lane pick the same way. Only a JSON `true` counts, and
+  an unreadable settings file counts as no (`_switch_ack_refusal` in `server.py`,
+  `_onb_ack_gate` in `aux_onboarding.py`; model advisor D4).
+- **GitHub, if you connect it, never gives the agent the key.** Hermes stores only a
+  fine-grained token, and only after a scope check shows it cannot change settings, read
+  secrets, add webhooks, run Actions or reach repositories you did not pick; the key never
+  appears in a response, a log, argv or a git config (`dashboard/aux_github.py`,
+  `gh_api.py`). A change reaches GitHub only after you approve it in the dashboard, only as
+  a `hermes/` branch and a draft pull request, at most 10 a day, each followed by a
+  Telegram message; a 6-hourly read-only check reports anything else that moved a
+  `hermes/` branch (`aux_ghchanges.py`, `gh_git.py`). Approving is guarded by a same-origin
+  check that any program running as you can forge until the app-held nonce lands (B02,
+  F05).
+- **The approval gate guards Hermes's GitHub key**: file and MCP read tools cannot open its
+  folder, a write inside a sandbox clone's `.git` needs your approval, and terminal commands
+  that would approve, retract, connect or unpause GitHub, read the key, ask `gh`, git or the
+  Keychain for a credential, or push to github.com are refused. These are tripwires, not a
+  sandbox (`hermes-plugins/approval-gate`).
+- **The dashboard's animation code is pinned by sha256 in this checkout.** The old
+  `dashboard/motion.min.js` (Motion 11, provenance never verified; the 2026-10-21 audit's
+  "What is still not covered" item 8) is gone; Motion 14.6.0, GSAP 3.15.0 and anime.js
+  4.5.0 are vendored under `dashboard/vendor/` and served from an exact allowlist. GSAP is
+  not MIT-licensed.
+
+### Added
+- **Stop a running reply.** While a turn runs, Send becomes a Stop button in the chat composer
+  and in Quick Ask (`POST /api/chat/stop`). Before the prompt reaches the agent the turn ends
+  with "nothing was run"; after it, Hermes is interrupted, any waiting approval is denied,
+  the text already written is kept and the reply ends "Stopped by you." Once Stop is accepted
+  only a denial can be sent for that turn; if an approval you gave an instant earlier was
+  already on its way, the reply says so. Not yet verified against a live model that the
+  interrupt also ends the GPU work (it should: the stream is closed and the model server
+  cancels a generation whose client is gone).
+- Curated model `digiflow/DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-MLX-4bit` @6471ad9: the MLX
+  4-bit build of `xtools-at/DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic` (19.3 GB of bf16
+  transformers weights, which do not run here). Vision tower kept, 6.0 GB download, ~7 GB
+  resident, uncensored (behind the switch acknowledgement), unverified until drilled. Strict
+  load passed on mlx_vlm 0.6.14 (1260/1260 tensors, Qwen3VLProcessor, qwen3_coder tool
+  parser); its weights match the mlx_lm conversion of the same source within quantizer
+  rounding in every sampled layer and differ from the non-abliterated base only in the
+  abliterated layers. Advisor facts added; recorded in `t_r3_roster_hfmeta.json`.
+- Browse Hugging Face (`aux_hfhub.py` + `aux_hfhub.js`): a card in Settings › Agent & Models
+  and a "Browse Hugging Face…" row in the model menu. Search MLX chat models, or paste a
+  huggingface.co link; each repo is judged for this Mac (MLX weights only, no auto_map, not
+  gated, a loader for its model type in the installed mlx-vlm or mlx-lm, fits the RAM,
+  one build per repo) and shows a ready roster row. Adding re-inspects on the server,
+  needs `confirm:true`, refuses a changed commit (409 stale) and a case-variant id, and
+  records the size in `hf-imports.json` (0600) so the menu and the disk gate quote it.
+  A non-MLX repo lists its MLX builds. Routes `GET /api/models/hf/search|inspect`,
+  `POST /api/models/hf/import`; cross-site requests are refused. The NETWORK_FACTS
+  "models" row now says searches and model names go to huggingface.co.
+- `mlx-vlm-launch.py` stops on the tokenizer's end-of-turn token too
+  (`_patch_tokenizer_eos`): models whose config names a different eos than their chat
+  template uses (the DeepSeek-V4-Pro 9B builds) no longer end every reply with a literal
+  `<|im_end|>`. No change for models that already stopped there.
+- `tools/bench/hf_strict_dry.py`: the header-only strict-load dry run used to verify a
+  curated roster entry (no weights downloaded).
+- `./update.sh --post-update` and the `# hermes-update-post-protocol: 1` marker line: the
+  outgoing updater hands the steps after the code swap to the incoming script (E29).
+- `HERMES_TESTS_SUITE_TIMEOUT` (default 600 s) for `tools/tests/run.sh` (E137).
+- server.py helpers other modules resolve by name: `local_urlopen()` (loopback calls, never a
+  proxy), `models_update()` (the one models.json writer), `chat_jobs_active()`,
+  `session_hidden()` and `session_key()` (E20, E113, E18, E69).
+- `hermes-plugins/approval-gate`, linked and enabled by install.sh and update.sh (C111,
+  C116).
+- Doctor check `hermes_drift` ("Hermes config drift", F03): reads `~/.hermes/config.yaml`
+  and warns when the agent's own settings would send text off the Mac or skip your
+  approval (cloud TTS, `computer_use` without the gate, unpinned approvals, MCP servers,
+  hosted providers, the placeholder key). It never edits the file.
+- MCP: tool annotations, `outputSchema` + `structuredContent` for `hermes_search`,
+  `calendar_next` and `needs_you`, protocol 2025-11-25 (F21).
+- `dashboard/untrusted.py`, the one way third-party text enters a prompt.
+- `GET /api/network/last` and a "What leaves this Mac" table — 16 rows by the end of round
+  3, 17 since round 4 (C52, C72);
+  `GET/POST /api/claude/foryou`; `POST /api/needsyou/seen`; `POST /api/files/reveal`;
+  watchtower op `set_web_research`.
+- Tests: the unit tier is offline-guarded for Python and Node with a self-check, counts
+  skips and gates them in CI, and uses the real server helpers; new suites cover the
+  approval gate, the same-origin guard, updater integrity, memory ceilings, Needs-you
+  thresholds, trust gates and MCP privacy (C74–C85); `live/verify_round2.sh` fails closed
+  (C61); CI parses index.html's inline script, typechecks the Swift app and tests Python
+  3.12–3.14.
+- **Model advisor.** Settings › Agent & Models opens with a card that shows what fits this
+  Mac for what you use it for, why, and what you run now. It detects the chip, GPU cores,
+  the Metal working-set budget, power and thermal state (no sudo, no network) and labels
+  every figure an estimate with its formula and range, replaced by this Mac's own log
+  measurements where they exist. It never switches, downloads or restarts anything
+  (`aux_advisor_hw.py`, `aux_advisor.py`, `aux_advisor.js`; `GET /api/advisor/state`,
+  `GET /api/advisor/rank`, `POST /api/advisor/answers`). Calibration on AC:
+  `tools/bench/advisor_calibrate.py` and `tools/tests/ac/advisor-calibration.md`.
+- **GitHub sandbox** (only if you connect it): the connector (`/api/github/status`,
+  `ambient`, `create_url`, `connect`, `repos`, `settings`, `pause`, `disconnect`, `revoke`,
+  `check`, `drift/ack`) with a kill switch, Revoke now and a read-only report of other
+  GitHub access on this Mac with the commands to close it; the change pipeline
+  (`/api/github/sandbox/prepare|refresh`, `/api/github/changes`,
+  `/api/github/changes/withdraw|decide|retract`), whose secret, workflow, size, CI and
+  hidden-character checks run before you see the change; the `github-sandbox` agent skill
+  (copied by hand); two "What leaves this Mac" rows.
+- **GitHub screens** (`dashboard/aux_github.js`): a Settings › Connections card that walks
+  you through creating a fine-grained token on GitHub (opened in your default browser),
+  checks it, and then shows the account and its expiry, each repository's protection and
+  CI, a Pause switch, Check now, Disconnect and Revoke now, the recommended branch rule to
+  copy, other GitHub access on this Mac, waiting changes, recent pushes and drift alerts.
+  A review sheet shows the whole diff (hidden characters made visible), every check and
+  the pull request text exactly as it will be sent; Approve stays disabled until no check
+  blocks, every warning is ticked and a public repository is confirmed, and Close or Esc
+  never decides. A toast says "Hermes has a GitHub change for you" when a new change
+  arrives (a quiet 60-second check while the window is visible and GitHub is connected),
+  `#github-review=<id>` opens a change directly, and first-run setup has an optional
+  GitHub step. The token is never kept by the page.
+- **Five opt-in models**: the stock Qwen3.6-35B-A3B MoE, abliterated Qwen3.8-27B builds
+  from PocketAiHub and Huihui (text-only), the Heretic Qwen3.6-35B-A3B MoE, and an
+  abliterated Qwen3.5-9B for the background lane (its repo states no licence). All are
+  unverified until drilled, never the default and never recommended. New roster fields
+  `model_subfolder`, `uncensored`, `verified`, `sampling` and `license`; the launchers load
+  repo-subfolder weights without pulling the repo's other variants and apply per-model
+  sampling defaults (`MLX_VLM_MODEL_SUBFOLDER`, `MLX_VLM_SAMPLING_DEFAULTS`), and doctor
+  judges a subfolder snapshot.
+- Vendored animation libraries: `dashboard/vendor/` with `MANIFEST.json` (sha256 and npm
+  integrity), licence files and the GSAP NOTICE, `tools/vendor-anim.sh` (`--check`
+  verifies), and `/vendor/<lib>/<file>` (immutable, ETag).
+- `window.hermesOnboardingSteps` / `hermesOnboarding.registerStep()` for optional setup
+  steps; `GET /api/onboarding/state?brief=1`.
+- Tests for the motion runtime and its surfaces, the vendored files, the advisor (an
+  estimate golden fixture and ranking goldens for 11 machines), the roster fields and the
+  GitHub connector, pipeline, gate, Needs-you source and screens (`t_gh_ui.js`, plus the
+  Playwright `tools/tests/browser/t_gh_review.py`); real-Chromium suites
+  `tools/tests/browser/t_anim_real.js`, `t_anim_hub_real.js`, `t_anim_surfaces_real.js` and
+  `t_onboarding_real.js` (no dashboard, no Playwright).
+
+### Changed
+- **The Hub has no chat column any more; chat lives in the Agent tab.** The chat side bar could
+  take over the main window: Quick Ask's "Continue in main" and the Expand button switched it
+  to full-screen and saved that, so the window kept opening with the chat over the widgets.
+  The Hub and Settings are now full width, the full-screen mode and the floating chat button
+  are gone, and anything that starts a chat from elsewhere ("Ask Hermes about this", a
+  pop-out's ask box, a search result, Quick Ask) opens the Agent tab with your text in the
+  composer. An approval that arrives while you are elsewhere shows a toast you can click; the
+  view never switches by itself.
+- **UI council, rounds 1–2 (2026-11-12).** Three blind judges compared the dashboard with
+  three reference products; what all of them raised was fixed, and nothing was removed
+  (a few lines moved into Details or behind a toggle):
+  - **Model menu:** one title line per model with its action beside it, 416 px wide; "switch"
+    and "download" look like buttons, states ("sleeping", "won't fit") are plain text; the
+    highlighted row is the model in use, and keyboard focus opens on it.
+  - **Needs you:** sources that are off or not connected fold behind an "N sources off"
+    toggle; the one that needs action stays in view.
+  - **Hub text** is 12 px or larger at 4.5:1 or better in both themes; Clock, System, Weather
+    and Battery tiles use their height (time zone, free disk and uptime, the day's range).
+  - **Agent view and Settings say "Asleep"** when the model is idle-suspended, instead of
+    "Watching" and "Agent is running"; the Record rail matches its neighbours.
+  - **Pop-outs:** the ask bar is opaque. **Overview:** sans headline, four even stat tiles.
+    **Model advisor:** detected facts are an aligned list. **Trust:** the locked "Auto" is
+    legible and says why.
+- **UI council, round 3 (2026-11-12).**
+  - **Settings pages open with the chat collapsed** and use the full width. The chat button
+    brings it back, and it stays open across Settings panels once opened. The Hub keeps its
+    own chat setting, and the panel is never collapsed while a turn is running, an approval
+    is waiting or the composer holds unsent text.
+  - **Settings › Overview has an "At a glance" card:** the assistant's state and model, what
+    needs you, connections that need action, the last health check and the version. Each row
+    opens the panel that owns it; it is read once when Overview is shown.
+  - **Trust's Auto / Ask / Never work from the keyboard** (a radio group per rule: arrows,
+    Home and End move focus and skip a locked Auto; Space or Enter picks). Rule titles share
+    one left edge.
+  - **Model menu:** one verification state per row; the Drill button and the licence moved
+    into the row's Details; spec lines wrap between facts and are never cut; the warning
+    sentence is in muted text so the Uncensored badge is the one amber mark.
+  - **Agent view** states the model's state once, in the banner; quick actions are one row
+    plus "+N" where there is room. **Advisor:** uses are an even two-column grid.
+    **For You** shows as many picks as its card holds. Chat and Messages text is 12 px+.
+- **"What leaves this Mac" has 17 rows**: a new one for the agent's own tools (its
+  terminal, browser and page fetch reach any address; there is no switch, only toolsets and
+  the approval prompts), the watch rules' 5-minute price checks, and the lede no longer says
+  the table is everything (E25, E84).
+- **GitHub's drift and push notices ignore both notification switches and quiet hours**:
+  they are security notices (owner decision D8; E77).
+- Update Apply refuses while the assistant is answering a message, unless you confirm
+  (E18).
+- The model server answers 400 to media that is not an inline `data:` URI, including
+  raw-base64 audio and web image addresses that `hermes -z` passes through (E100).
+- Dictation's verbatim style (Terminal, VS Code) keeps "um" and "uh" (E107).
+- A model picked in the setup sheet whose download is still running is made the assistant
+  automatically once the download completes, while the model server is down and you have
+  not switched since; "Make it the assistant" does it at once (E22).
+- `GET /api/needsyou` lists the Never rows only with `?never=1`; the widget and MCP get the
+  count (E04).
+- **Agent page** (owner request, 2026-10-27):
+  - In the narrow Record rail each Flight Recorder row is two lines: tool name, chip and
+    time on top; the full file or command underneath, with Undo beside it. The header
+    count no longer runs off the edge.
+  - The recorder groups actions by day ("Today" open, older days collapsed, remembered
+    per viewer) and folds 3+ identical actions in a row ("terminal ×7") into one line
+    that opens in place. The wide Console recorder keeps one-line rows but groups too.
+  - The sidebar's Tools and Local AI sections collapse (remembered; Tools starts
+    collapsed on the Agent page, where its actions are already chips above the
+    composer), and the conversation list takes the remaining height.
+  - The chat card is as wide as the status bar above it.
+- Chat with serve down refuses ("nothing was run") instead of running `hermes -z` (C36).
+- The model servers answer only for their launch model: a hand-edited `model.default` now
+  gets a 400 instead of a silent hot-swap — switch models through the menu (C130).
+- The watchtower's hourly agent web research is off (Mind › Watchtower turns it on); with
+  News off no feed is fetched and no watch fires; the dead CNN world feed is gone (C50,
+  C48, C54, C47).
+- For-You's Claude picks need their own switch (Settings › Connections › Data & Network)
+  as well as escalation (C35).
+- Google's scope is `calendar.readonly`; an older, wider grant shows "Connected · wider
+  than read-only" (C51).
+- Needs-you says "Messages is not being read" while Full Disk Access is missing (C18).
+- The Scratchpad refuses a stale or over-long save (limit 131,072 characters) instead of
+  truncating it (C19, B05).
+- Quick Links with a non-http(s) scheme are hidden from the hub card (they stay in the
+  editor) (B18).
+- The Claude Code Usage widget drops by about half — the corrected dedupe, not a
+  regression (C86).
+- Agent › Screen has a working "Give the agent a Mac task" box again (B26).
+- Config export writes `~/.hermes/dashboard/state-snapshot.json`, never the install tree
+  (C64).
+- `tools/release.sh` never stages: `git add` what ships, then run it; every check runs
+  before anything is committed or pushed, you confirm the commits `public` would receive,
+  and `release.yml` waits for CI (B30).
+- **Motion runs on one runtime** (`dashboard/aux_anim.js`). Reduce motion, in Preferences
+  or in macOS, and a hidden window land every animation at its end state at once, and
+  nothing moves on a background refresh. Hub Customize no longer rebuilds the grid:
+  removing, adding and moving widgets slides the others into place. The model-switch
+  overlay draws a check mark and holds its message for a fixed reading time. A Needs-you
+  row you finish, snooze or re-file slides away while the rest close the gap and the Now
+  count ticks down; a failed act moves nothing. Settings Overview's figures count up and
+  its activity line draws in once per change; the Claude Usage pop-out and the Vitals card
+  count up when you open them. The Agent page's ticker, sigil, EKG and tool cards follow
+  the in-app Reduce motion switch too, and the sigil ring's turn now shows (it was a silent
+  no-op on Motion 11).
+- Meters (System, the model menu's memory row, Local AI, Memory, You-Model, the usage
+  gauges) scale instead of resizing; Memory and You-Model fills now end square. Settings
+  Overview prints its growth numbers with thousands separators (1,234).
+- `/motion.min.js` is an alias of the vendored Motion 14.6.0 (`no-cache` + ETag), kept for
+  the Quick Ask popover; the main window loads `/vendor/motion/motion-14.6.0.min.js`. The
+  popover may run its cached Motion 11 copy for up to a day after the update.
+- **First-run setup asks what you use Hermes for** and takes its model recommendation from
+  the model advisor (the RAM tier stays the fallback); other modules can add optional
+  steps; only a step change animates (`aux_onboarding.*`, ONB_VERSION 1.4.0).
+- Model menu: uncensored models carry an Uncensored badge and the line "no refusals — the
+  approval gate is the only brake", undrilled ones say "unverified until drilled", and
+  Details explains speed, first reply after wake and memory on this Mac.
+- Trust has a 19th class, "GitHub pushes & pull requests" (Ask by default, never Auto).
+  Needs-you gains a GitHub source while GitHub is connected (Open goes to the change's
+  review or to the GitHub card), and its rows never go to the optional model pass.
+- The approval gate checks every MCP tool for reads of the GitHub folder, and a file
+  search rooted at `~/.hermes` or `~/.hermes/dashboard` is refused (search a narrower
+  folder).
+- The header no longer shows the logo tile or the "Good afternoon" greeting and
+  date line; the date chip still says the date, and the traffic-light clearance
+  moved onto the header's own padding (owner request).
+
+### Fixed
+- **Pause no longer reports a failure that was not one.** With a reply being written the
+  model server takes longer than 3 s to exit, so Pause answered "bootout failed", wrote no
+  marker and left the model down in neither state. It now waits up to 20 s, and nothing
+  (a chat, Wake now, the eval suite, a Telegram turn) can start the model while it decides.
+- **Visual audit of 2026-11-12, layout defects V01–V09** (`docs/audits/2026-11-12-visual-audit.md`;
+  measured in headless Chromium, not yet checked in the app's WebKit window):
+  - **The "what leaves this Mac" table in Settings › Connections is readable.** Its When and
+    What columns were 82 and 112 px wide, with single rows up to 919 px tall and the table
+    scrolling sideways. Each destination is now a two-line row with its switch always in
+    view; the tallest row is 252 px (V01).
+  - **Settings cards no longer clip their own text.** Code graph, Software update and
+    First-run setup had no inner padding and sat outside the panel's spacing; the Config
+    file row ran past its card (V02, V03). Software update now sits above Traces.
+  - **Vitals captions are readable** (they were cut with an ellipsis) and the eight tiles
+    fill two rows (V05).
+  - **Recent fires shows links, not raw Markdown.** `[title](https://…)` is drawn as the
+    title; only http(s) links open, and everything else stays escaped text (V09).
+  - **The ask box in a pop-out is always on screen**, and the model menu, the Widget Center
+    and long pop-outs show a short fade while more lies below (V04).
+  - **The model and Preferences menus no longer show the Hub through their rows** (V06).
+  - **The Agent view's Screen and Record rails fit**: headings, the task box's placeholder
+    and "Send to agent" are no longer cut (V07).
+  - **With the chat hidden, the Hub's last cards clear the chat button** when scrolled to
+    the end; mid-scroll the button still floats over a card (V08).
+  - **Button labels are readable in both themes.** "Add watch" was white on pale lavender in
+    light and near-black on dark grey in dark; in the dark theme fifteen buttons and badges
+    ("Download JSONL", "Run checks", "Apply"…) put white on the light accent colour. They
+    now take the theme's own label colour (V41, V42; `t_v41_on_accent_ink.py`).
+  - The V01–V09 fixes were re-tested in the system WebKit (the app window's engine) with the
+    same results; glass blur still has to be judged in the app itself.
+- **2026-11-09 audit, round 4:**
+  - **Undo never deletes a file it cannot prove the agent created.** Hermes' snapshots
+    skip `.env` files, logs, `build/`, anything gitignored and files over 10 MB, and Undo
+    used to read "not in the snapshot" as "created" and trash the owner's file. A row that
+    cannot be undone now says why before you click; undoing a removal restores from the
+    trash and never overwrites (E01). One narrow case remains: a file that was itself 0600,
+    missing from the snapshot and never touched by the agent before can still count as
+    created.
+  - Recorder: an open detail pane no longer rebuilds every 3 s and its diff is cached; a day
+    shown open stays open; the filter chips work from the keyboard (E33, E88, E93).
+  - Needs-you: a text from someone you reply to is never filed under Never because of a
+    word like "newsletter", and the pop-out lists the Never rows so you can re-file them
+    (E04). Two alerts from one pass keep their own rows; the optional model pass promotes
+    only live deadlines from people you know; "Later today" reads AM/PM; no "next brief" is
+    promised with Briefings off; a reload no longer counts every row as seen; the inbox
+    rebuilds only while someone is reading it (E73, E74, E76, E78, E79, E97).
+  - Chat: a reply lost to a dashboard restart leaves a notice instead of silence, without
+    any GET writing to the conversation (E18); a conversation with replies but no stored
+    agent session is re-seeded (E70); an Approve that arrived too late says the command did
+    not run (E71); Quick Ask flags an unsaved reply and keeps a refused message (E72);
+    search highlights land on the right characters after an emoji (E90); an unknown saved
+    view falls back to the Hub (E91); two motion leftovers (E131, E132).
+  - Model lifecycle: a drill's restore never undoes your Pause or a switch you made, a
+    restart mid-drill puts your model back, and a failed drill or restore is shown (E19,
+    E103, E119); Resume and a switch while asleep are no longer booted out a minute later
+    (E21); starts and stops are serialised, so a Pause at the wrong moment holds (E98,
+    E101); a pause survives re-login on always-on installs (E102); evals and drills
+    exclude each other (E117); the download disk check counts downloads in flight (E105);
+    a huge sampling number no longer breaks the model menu (E106); two model-list writes
+    no longer lose one another (E113).
+  - Setup sheet: a failed download says so and nothing is activated until a download
+    completes; a disk refusal no longer repoints the background lane; Continue waits for
+    your real settings; a switch keeps keyboard focus (E22, E111, E23, E110). The advisor
+    retries a hardware fact that timed out and counts the background lane only when it can
+    run (E94, E95).
+  - GitHub: a renamed repository is marked moved instead of pausing every write, and
+    removing a repository frees its slot (E07, E53); holds clear only when their cause is
+    gone (E51); a failed check is retried on a short back-off (E52); drift sends one
+    summary per repository (E54); an interrupted push is reconciled with GitHub (E57);
+    retracting a branch retracts every change on it (E58); PR text keeps its indentation
+    and live @mentions are wrapped (E59, E60). Mirrors no longer grow without bound and are
+    deleted on remove, disconnect and revoke (E09).
+  - `config.yaml` editors refuse a form they cannot edit safely and verify every edit, so
+    an indentless list or a commented section header no longer breaks or duplicates a
+    block (E16, E17).
+  - Updates: the steps after the code swap run from the new `update.sh`, so the first hop
+    from 1.3.2 links approval-gate and restarts the gateway (E29); the last-outbound time,
+    the main channel with local commits, a stale "vX is available" in doctor, the
+    checksum wording and a rebuilt app deleting the dictation helper are fixed, and an
+    update keeps a running model lane running when neither its plist nor its code changed
+    (E85, E130, E127, E128, E126, E129).
+  - Dictation cleanup never flips a negation back and never eats a real word ("ER",
+    "AH-64", "uh-huh") (E27, E107). `obsidian_daily.py` never replaces your own text when
+    a marker line is missing (E32). Desktop screenshots older than 24 h are pruned at start
+    and never served (E118).
+  - A held key flips the Claude escalation switch or a Watchtower master once (E28); the
+    Claude dialogues sheet works from the keyboard (E89); the header, Shortcuts and Memory
+    polls stop while the window is hidden (E92); a widget fetch that raises is backed off
+    (E96); wrong-typed values get a 400 instead of a 500 and aux-module failures name their
+    file (E123, E124); an unreadable memory index is moved aside, never emptied (E114).
+  - loop-breaker 1.1.0 blocks a third identical read only when the earlier ones got the
+    same successful answer (E66); the agent skills match today's code (E65); For-You drops
+    only the headline that trips Claude's filter, not the whole pass (E86).
+  - Tests and CI: CI's unit job can pass again (E30); every suite has a time limit and CI
+    jobs are capped (E137); new tests cover the approval worker's head-only answer, the
+    decide-time push budget, the change digest and the model pin without the venv (E31,
+    E134, E135, E136); more suites use the real settings helpers and git is guarded (E138,
+    partly).
+  - Docs: README, RUNBOOK, SECURITY, CLAUDE.md and the tests README follow the code again
+    (E139–E154).
+- **Round 3 seams** (a cross-cluster review: 22 findings, 16 confirmed by a second agent
+  trying to refute each, all fixed with a test that fails on the old code):
+  - Onboarding: Enter on an advisor disclosure ("How we estimate") no longer starts the
+    model download; keys and focus stay in the sheet after the GitHub step repaints; a
+    pending advisor save no longer applies after Back or Esc; withdrawing the uncensored
+    acknowledgement drops an uncensored pick at once; a re-run re-reads the advisor's
+    plan; the GitHub step follows a connect made in Settings, and Skip keeps its summary
+    line.
+  - GitHub: a push that may have landed keeps its commit on the failed change; the card
+    re-reads its list when a change is withdrawn or expires; a change request whose text
+    merely names an approve or retract route is no longer refused by the approval gate
+    (a real call still is); the review sheet marks every invisible character (the
+    server's check and the sheet's marker now share one list).
+  - Overlays: opening a GitHub review from a pop-out or Needs-you finishes the pop-out's
+    exit first; focus that strays out of the open review sheet comes back; Esc returns
+    focus to the control that opened it even after a repaint; the advisor card's buttons
+    keep focus after an action.
+  - The model menu's Uncensored badge reads the advisor's facts, like every gate.
+- **A model that crashed during a switch no longer stays down.** If the model server
+  died while switching (seen 2026-10-27 switching to the uncensored 27B: the old server
+  tried to load the new model in place and segfaulted), launchd kept the job loaded but
+  stopped, and recent macOS answers a bootstrap of such a job with "error 5". Every wake
+  then failed until the job was unloaded by hand. The start path now checks whether the
+  job is loaded and kickstarts it (`_mlx_start`); the in-place swap itself is already
+  refused by the model pin (C130).
+- **Chat:** one turn per conversation — a second message is handed back instead of
+  interrupting (B11, C113); replies no longer land in another conversation (B10);
+  interrupted or failed replies are labelled (C121); a lost agent session is re-seeded with
+  the transcript and moved to the active model (C23, C112); a refused submit is reported;
+  uploads with non-Latin-1 names work (B13); the model-swap overlay comes down on failure
+  (B29).
+- **Stores:** a corrupt settings.json or other store is moved aside as `.corrupt-<ts>`
+  instead of being overwritten with defaults (C27); a failed widget fetch keeps the last
+  good data (C12); the Scratchpad no longer truncates at 8,000 characters or loses a
+  concurrent edit (C19, B05); a removed widget stays removed and a restart no longer drops
+  widgets (B07); a deleted conversation leaves search at once (C58 partly) and a deleted
+  index.db rebuilds (C108); more than 30 conversations get "Show all" (C32); recorder and
+  memory trash age by when they were trashed (B14, B15); trend labels go with their days
+  (C15).
+- **Model lifecycle:** drills and evals keep the model up (C07); a switch or Free memory no
+  longer leaves it marked asleep, nor does a failed bootout (B20, C24); a switch is
+  all-or-nothing (C26); `HERMES_MODEL_ALWAYS_ON` keeps the model up (C65); onboarding
+  activates the model it recommends and counts a missing drafter (C63, C70); config import
+  keeps the full roster and merges (B27); the background briefing refresh waits for a
+  quiet, admitted model and survives an error (C67, C16); the launcher exits with the
+  server's real status.
+- **Watchtower:** the News switch really stops feed fetching and every watch alert, so both
+  switches off means no background push from the dashboard — GitHub's security notices
+  aside (see round 4) (C48, C54, C09); a corrupt
+  watchtower.json no longer turns the switches back on (C20); a still-true watch no longer
+  logs every minute and can alert again on a later day (B22, B23); an offline hour keeps
+  the curated picks (C30); feeds are https-only and curated links are the feed's own (C47,
+  C43); switches revert and say so when a save fails (B24).
+- **Needs-you:** Done/Snooze no longer hides a person's later messages (B04) and is no
+  longer undone by a rebuild (B08, C10); "had fun today" and stale deadlines stay out of
+  Now (B09, C60); a blind Messages source is named instead of "Nothing needs you" (C18);
+  now-precision counts only rows someone saw (C06, C57); the model pass cannot hide a row
+  on one weak answer (C42); hub prewarming stops when nobody is looking (C53).
+- **Agent plugins:** loop-breaker no longer blocks repeated scrolls, captures, process
+  waits or a read after a patch (C134, C135); a web page read back from the tool-budget
+  spill stays marked untrusted (C41).
+- **Recorder, memory, branches, Trust:** dashboard-chat writes can be undone once
+  install-services.sh is re-run (C114 partly); an Undo no longer stalls other work (C08,
+  C87, C106); archived facts return when their line does and the layer recovers from a
+  failed start (C105, C29); branches keep their pre-branch context (C120); the Trust panel
+  shows pattern-level overrides (C126); You-Model people cards and multi-line entries
+  (C127, C128); the Shortcuts reply no longer claims the requester cannot approve (B02
+  partly).
+- **Dictation:** the default cleanup no longer deletes or splices words it is unsure of
+  (B16, C124); in the helper, releasing the hotkey during engine start no longer leaves
+  the microphone on, the macOS 14/15 fallback asks for Speech Recognition, and text next
+  to emoji lands at the caret (C122, C123, C125 — needs a helper rebuild); Settings
+  discloses the speech-model download (C56).
+- **Frontend:** keyboard and VoiceOver for the model menu, Preferences, the view switcher,
+  pop-outs, switches, Tasks and chat (C92–C100, C103, C104); Reduce motion stills the aurora
+  and script animation (C03); glass cards stay under the pointer (C02, C04, C05); hidden
+  windows stop polling (C88, C90, C99); Claude Code usage counts each API message once and
+  scans incrementally (C86); market search no longer grows the cache without bound (C17);
+  clipboard transforms report a cut-off result (C22).
+- **Doctor, logs, docs:** escalation and Google wording follow the code (C31); the model,
+  serve and gateway logs rotate (C14); aux-route failures reach dashboard.log (C28);
+  README, RUNBOOK, CLAUDE.md, FINDINGS and the skills snapshot follow the code (C62, C66,
+  C68, C69, C73).
+- **Memory ceiling on an 8 GB Mac:** the admission ceiling was all of RAM, so it could
+  never refuse work; it is now 6 GB soft / 8 GB hard, unchanged from 10 GB up (model
+  advisor D9, `_mem_ceilings`).
+- **Motion:** Flight Recorder rows no longer re-fade on every 3-second refresh, the Vitals
+  card no longer pulses every 15 seconds, and the model-swap overlay keeps no timers while
+  the window is minimised; a memory file whose delete is refused keeps its chip (it used to
+  vanish); a press on a control inside a card no longer skews the card's next animation,
+  and the pointer light stays on cards while they move (`aux_recorder.js`, `aux_metrics.js`,
+  `index.html`, `aux_memory.js`, `aux_glass.js`).
+- **Models:** the model menu quotes the orcarouter build's download size before it is
+  downloaded (from its seed), and a `draft_subfolder` that would leave the snapshot (`../`)
+  is refused (`server.py`).
+- Tests: the suites that failed near midnight or around 5 PM (`t_c46_mcp_fence`,
+  `t_f21_mcp_structured`, `t_evals`, `t_evals_js`, `t_c60`, `t_b04`, the claude-usage dedupe
+  and the Needs-you harness) run on a pinned clock, `t_gh_changes` finds the repo root
+  without run.sh, and the onboarding background-lane race flake is gone.
+- **Cross-cluster follow-ups from the fourth round's seam pass.** The six-hourly GitHub
+  check reconciles an interrupted push before it looks for drift, so it no longer raises a
+  false alarm (E57). A mirror whose git settings change during a call now holds GitHub
+  writes until you reconnect (E56). Ten more routes answer 400, not 500, for a wrong-typed
+  field, before any side effect (E123). The approval card and Quick Ask show why the Trust
+  policy is asking (E03). The model menu's disk check counts downloads in flight (E105).
+  MCP `needs_you` says how old the inbox is when it is more than five minutes old (E97).
+  Doctor has a 23rd check that warns when a Hermes upgrade changes its dangerous-command
+  list, which the Trust policy copies (E03).
+- **No unit suite reads your data any more.** Five suites copied real conversations, the
+  live recorder database, the installed `config.yaml` or the real calendar; all use
+  synthetic fixtures now, and the tier refuses the installed `shortcuts`, `osascript` and
+  `icalBuddy` (E138).
+
+### Upgrade notes
+`./update.sh` (or Settings › System & Data › Update) does most of it: it links and enables
+the approval-gate plugin, re-runs `./install-services.sh` (the dashboard and serve
+restart; a model server is reloaded only if its plist or its code changed) and restarts
+the Telegram gateway if launchd has it loaded. Your `~/.hermes` data and downloaded models
+are left alone.
+
+Left to you:
+- **The app.** `app/` changed (the dictation helper and the build scripts) and the updater
+  does not rebuild it unasked: run `./update.sh --rebuild-app` when you are ready, then add
+  the app to Full Disk Access again, because a rebuild drops the grant. If you use
+  dictation, rebuild its helper with `app/build-dictation.sh`.
+- **Reload the window** (⌘R in the app) after the dashboard restarts.
+- **Git checkouts only** (the release tarball does not carry `skills-snapshot/`): copy
+  loop-breaker 1.1.0 from `skills-snapshot/_plugins/loop-breaker` to
+  `~/.hermes/plugins/loop-breaker`, and the changed skills, the new `github-sandbox` one
+  included, to `~/.hermes/skills/`.
+- Restart any Claude Code session that uses the MCP server, and read what doctor now
+  says about `~/.hermes/config.yaml`.
+- Drill a new model on AC power before you trust it.
+- If an update is interrupted after the code swap, the next run reads "already up to
+  date"; run `./update.sh --post-update` to finish it.
+
+Not in this release: three app-side fixes (the iMessage snapshot, the clipboard bridge
+and crash recovery; E26, E108, E109) wait for the next `main.swift` rebuild. The GitHub
+connector has not had its acceptance run against real GitHub yet, and motion has been
+measured in Chromium only, not in the app's WebKit view. The owner's own activation list
+is `docs/audits/2026-10-21-deploy-checklist.md`.
 
 ## [1.3.2] - 2026-09-11
 

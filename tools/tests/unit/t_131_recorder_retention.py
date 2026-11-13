@@ -8,13 +8,9 @@ whole point of the recorder: status='undone' rows and rows still holding a
 snapshot_ref survive whatever their age, and the window itself is clamped up to
 the undo-trash TTL (14 days) so the two can never disagree.
 
-Section 7 runs the sweep against a read-only SNAPSHOT of the owner's LIVE
-recorder.db, taken with sqlite's own backup API into a temp dir.  The live
-database is opened mode=ro, its row count is asserted unchanged, and no
-statement is ever executed against it — capture-and-restore taken to its
-strongest form: nothing about the owner's real store is ever written, only
-compared before and after.  On a machine with no such file yet (a fresh
-checkout, CI) this section is skipped rather than failed.
+Section 7 runs the sweep at volume: 6,000 seeded synthetic rows of every shape
+the recorder writes, in a db of the module's own schema.  (It used to read a
+snapshot of the owner's live recorder.db; a unit suite never reads owner data.)
 
 Exec's aux_recorder.py the way server.py does, against a throwaway HOME.
 No model, no network, no dashboard.
@@ -25,7 +21,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.environ.get("HERMES_REPO") or os.path.dirname(
     os.path.dirname(os.path.dirname(_HERE)))
 AUX = os.path.join(REPO, "dashboard", "aux_recorder.py")
-LIVE_DB = os.path.join(os.path.expanduser("~"), ".hermes", "dashboard", "recorder.db")
+sys.path.insert(0, os.path.join(REPO, "tools", "tests", "lib"))
+import server_real  # noqa: E402  the REAL settings_update & co (C84)
 DAY = 86400
 FAILS = []
 CHECKS = [0]
@@ -62,23 +59,6 @@ def write_json(path, obj):
         json.dump(obj, f)
 
 
-def make_settings_update(settings, lock):
-    """Stand-in for server.py's settings_update() — ONE locked
-    read-modify-write of settings.json, the only way an aux module is allowed
-    to write it since the 2026-09-10 audit (A01)."""
-    def settings_update(mutate_fn):
-        with lock:
-            s = read_json(settings, {}) or {}
-            if not isinstance(s, dict):
-                s = {}
-            out = mutate_fn(s)
-            if isinstance(out, dict):
-                s = out
-            write_json(settings, s)
-            return json.loads(json.dumps(s))
-    return settings_update
-
-
 def build(home):
     data = os.path.join(home, ".hermes", "dashboard")
     os.makedirs(data, exist_ok=True)
@@ -87,11 +67,10 @@ def build(home):
     g = {"__name__": "aux_recorder_t131", "HOME": home,
          "HERE": os.path.join(REPO, "dashboard"), "DATA": data,
          "STATE_DB": os.path.join(home, ".hermes", "state.db"),
-         "SETTINGS_FILE": settings,
-         "read_json": read_json, "write_json": write_json,
-         "get_settings": lambda: read_json(settings, {}) or {},
-         "_state_lock": lock, "_widget_cache": {},
-         "settings_update": make_settings_update(settings, lock),
+         "_widget_cache": {},
+         # server.py's own settings_update / settings_set / get_settings /
+         # read_json / write_json, sharing the module's _state_lock (C84)
+         **server_real.settings_api(settings, lock),
          "_cached": lambda k, ttl, fn: fn(),
          "register_get": lambda p, f: None, "register_post": lambda p, f: None,
          # the reconciler polls state.db every 5s; not what is under test
@@ -242,24 +221,41 @@ def run(tmp):
           g["recorder_retention_get"](Ctx())["forever"] is True)
     g["_rec_set_retain_days"](90)
 
-    print("\n7. AGAINST A SNAPSHOT OF THE OWNER'S LIVE recorder.db")
-    if not os.path.exists(LIVE_DB):
-        print("  --   no live recorder.db on this Mac; skipped")
-        return
-    live_before = count(LIVE_DB)
-    copy = os.path.join(tmp, "recorder-copy.db")
-    src = sqlite3.connect("file:%s?mode=ro" % LIVE_DB, uri=True)   # READ ONLY
+    print("\n7. AT VOLUME, on a synthetic recorder.db")
+    # This section used to snapshot the owner's LIVE recorder.db; a unit suite
+    # never reads the owner's data (S2 seam, 2026-11-09 audit).  It now proves
+    # the same thing on a db of the module's own schema filled with 6,000 rows
+    # of every shape the recorder writes, deterministic (seeded), so it runs
+    # the same here and on a CI runner.  (This suite prints no SKIP any more;
+    # its expected-skip entry is gone from ci.yml.)
+    import random as _r131
+    rnd = _r131.Random(131)
+    copy = os.path.join(tmp, "recorder-volume.db")
+    src = sqlite3.connect(db)
     dst = sqlite3.connect(copy)
     try:
-        src.backup(dst)                 # sqlite's own consistent snapshot
+        src.backup(dst)
+        dst.execute("DELETE FROM actions")
+        dst.commit()
     finally:
         dst.close()
         src.close()
-    check("snapshot has the same rows as the live db",
-          count(copy) == live_before, (count(copy), live_before))
+    shapes = []
+    for i in range(6000):
+        kind = rnd.choice(("read", "read", "write", "shell", "web", "computer"))
+        rev = rnd.choice(("n/a", "yes", "partial", "no")) if kind in ("write", "shell") else "n/a"
+        row = {"id": "vol-%05d" % i, "ts": time.time() - rnd.uniform(0, 400) * DAY,
+               "kind": kind, "reversible": rev, "tool": kind + "_tool",
+               "status": rnd.choice(("ok", "ok", "ok", "error", "undone"))}
+        if kind == "write" and rnd.random() < 0.2:
+            row["snapshot_ref"] = json.dumps({"workdir": "/tmp", "commit": "%040x" % i})
+        shapes.append(row)
+    insert(copy, shapes)
+    live_before = count(copy)
+    check("the volume db holds every synthetic row", live_before == 6000, live_before)
 
-    # Inject the two shapes the owner's db happens not to contain, so the
-    # exemption is proved on real data volume rather than on a toy table.
+    # Inject the two named shapes, so the exemption is proved by id at volume
+    # rather than on a toy table.
     insert(copy, [
         {"id": "t131-undone", "ts": time.time() - 400 * DAY, "status": "undone",
          "kind": "write", "reversible": "yes", "target": "/tmp/t131"},
@@ -294,8 +290,6 @@ def run(tmp):
     check("the injected plain row did not", "t131-plain" not in surv)
     check("nothing older than the cutoff is left without undo material",
           count(copy, "ts < ? AND " + KEEP_CLAUSE, (cut14,)) == 0)
-    check("THE OWNER'S LIVE recorder.db IS UNTOUCHED",
-          count(LIVE_DB) == live_before, (count(LIVE_DB), live_before))
 
 
 def main():

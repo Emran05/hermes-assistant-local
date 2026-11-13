@@ -48,21 +48,60 @@ _CV_SLUG_RE = re.compile(r"[^a-z0-9]+")
 # The transcript can quote whatever the agent printed: the serve token, a
 # Bearer header, a path under ~/.hermes (where the tokens live).  An export is
 # a file the user mails to themselves, so scrub before it leaves the process.
+# The scrubber below is MIRRORED VERBATIM in dashboard/hermes_mcp.py (the MCP
+# server re-implements it instead of importing it — importing would drag
+# server.py's globals into that process and break its rule 1).
+
+# ===== BEGIN MIRRORED SECRET BLOCK — KEEP BYTE-IDENTICAL (1.1.5, B21) =====
+# Everything from this line to the END marker is the WHOLE scrubber, and it
+# exists twice: dashboard/aux_convos.py (the export; aux_trace.py, doctor.py
+# and aux_memlayer.py resolve it from there by name) and dashboard/hermes_mcp.py
+# (every MCP result).  Copied, not imported — the MCP server must not pull
+# server.py's globals into its process.  Change one, change the other; the
+# unit tier compares the bytes between the two markers.
+#
+# LABELED secrets: a key that names a credential, `:` or `=`, then the value.
+# B21 (2026-10-08 audit) widened it four ways, each for a reproduced leak:
+#   * a JSON-quoted key, `"api_key": "sk-…"` — the closing quote sat between
+#     the key and the colon, so nothing matched;
+#   * a name that only ENDS in a credential word — OPENAI_API_KEY=,
+#     GITHUB_TOKEN=, client_secret:, authToken:, aws_secret_access_key = .
+#     The keyword is deliberately NOT anchored at a word start (an unanchored
+#     fixed keyword also keeps this linear; a lazy identifier prefix in front
+#     would be quadratic on a long dotted run), while the \b AFTER it is what
+#     keeps max_tokens=4096 and prompt_tokens: 19127 out;
+#   * `Authorization: Basic …` and `Token …`, not only Bearer;
+#   * a value with punctuation in it — `hunter2!x` used to leak its tail.
+# The value must sit on the same line ([ \t], not \s) and cannot start with
+# `[`, so an already-redacted value is never matched twice.  Group 1 (key and
+# separator) is kept, so JSON stays JSON: `"password": "[redacted]"` — and so
+# does JSON quoted inside a string (`{\"api_key\": \"sk-…\"}`, the shape an
+# echoed tool call has): a quote may carry one backslash, and the value stops
+# at a backslash so the closing `\"` survives.
 _CV_SECRET_RE = re.compile(
-    r"\b(serve_sid|serve_key|session_token|token|api[_-]?key|apikey|"
-    r"secret|password|passwd|authorization)\b\s*[:=]\s*"
-    r"[\"']?(?:Bearer\s+)?([A-Za-z0-9_\-./+=]{6,})[\"']?", re.I)
+    r"((?:serve_sid|serve_key|session_token|token|api[_-]?key|apikey|"
+    r"secret|password|passwd|passphrase|passcode|authorization)"
+    r"(?:[_.-]?(?:access|key|secret|token|value|base)){0,3}\b"
+    r"(?:\\?[\"'])?[ \t]*[:=][ \t]*(?:\\?[\"'])?)"
+    r"(?:(?:Bearer|Basic|Token)[ \t]+)?"
+    r"([^\s\"'`,;(){}\[\]<>\\]{6,})", re.I)
 _CV_BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9_\-.=]{8,}", re.I)
+# PROSE: "my password is hunter22", "the API key was sk-abc123".  Narrower on
+# purpose — the value must carry a digit, or a symbol with more of the word
+# after it, so "the token is expired", "the secret is out" and "the API key
+# was invalid!" survive.  A passphrase of plain words is missed; a redactor that
+# ate ordinary sentences would get switched off.
+_CV_PROSE_SECRET_RE = re.compile(
+    r"(\b(?:password|passwd|passphrase|passcode|api[ _-]?key|secret[ _-]?key|"
+    r"(?:access|auth|bot|api)[ _-]?token|token|secret)"
+    r"[ \t]+(?:is|was)[ \t]*:?[ \t]+[\"'`]?)"
+    r"(?=[^\s\"'`,;(){}\[\]<>]*"
+    r"(?:[0-9]|[!@#$%^*~][^\s\"'`,;(){}\[\]<>]))"
+    r"([^\s\"'`,;(){}\[\]<>]{6,})", re.I)
 _CV_HERMES_PATH_RE = re.compile(
     r"(?:~|/Users/[A-Za-z0-9._-]+|/home/[A-Za-z0-9._-]+)/\.hermes"
     r"(?:/[^\s`'\"),;]*)?")
 
-# The block below is MIRRORED VERBATIM in dashboard/hermes_mcp.py (the MCP
-# server re-implements this scrubber instead of importing it — importing would
-# drag server.py's globals into that process and break its rule 1).  Change it
-# here, change it there; the markers make the diff mechanical.
-
-# ===== BEGIN MIRRORED SECRET BLOCK — KEEP BYTE-IDENTICAL (1.1.5) ===========
 # Raw, UNLABELED secrets.  The key=value rule above only fires when a label
 # ("token:", "api_key=") precedes the value and the Bearer rule only when the
 # scheme does — but an agent that echoes a bare `sk-ant-...`, a PEM block or a
@@ -87,6 +126,21 @@ _CV_RAW_SECRET_RES = (
     re.compile(r"\bAKIA[0-9A-Z]{16}"),                           # AWS key id
     re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{20,}"),               # Slack
     re.compile(r"\bAIza[0-9A-Za-z_-]{30,}"),                     # Google API key
+    # E82 (2026-11-09 audit): the shapes this app itself handles that used to
+    # pass unlabeled — Google OAuth access/refresh tokens and client secret,
+    # Hugging Face, Stripe (secret + restricted, live + test), npm, GitLab.
+    re.compile(r"\bya29\.[A-Za-z0-9_-]{20,}"),                   # Google access
+    re.compile(r"\b1//0[A-Za-z0-9_-]{20,}"),                      # Google refresh
+    re.compile(r"\bGOCSPX-[A-Za-z0-9_-]{20,}"),                   # Google client
+    re.compile(r"\bhf_[A-Za-z0-9]{30,}"),                         # Hugging Face
+    re.compile(r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}"),        # Stripe
+    re.compile(r"\bnpm_[A-Za-z0-9]{30,}"),                        # npm
+    re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}"),                    # GitLab PAT
+    # a password in a web address, scheme://user:password@host — only the
+    # user:password part goes, so "postgres://[redacted]@db:5432" still says
+    # which database.  The lookbehind pins every match to just after "://",
+    # which keeps it linear; a "user@host" with no password is left alone.
+    re.compile(r"(?<=://)[^\s/:@\[\]]+:[^\s/@]+(?=@)"),
     # Telegram bot token, <8-10 digit bot id>:<35 chars>.  Deliberately NO \b
     # in front: the shape this Mac actually leaks is the send URL
     # ".../bot<id>:<secret>/sendMessage", where "bot" runs straight into the
@@ -104,32 +158,43 @@ def _cv_redact_raw(text):
     for _rx in _CV_RAW_SECRET_RES:
         text = _rx.sub("[redacted]", text)
     return text
-# ===== END MIRRORED SECRET BLOCK ==========================================
 
 
 def _cv_redact(text):
+    """Path, key=value, Bearer, prose, then the unlabeled raw shapes."""
     text = _CV_HERMES_PATH_RE.sub("[redacted path]", text)
     # key=value FIRST: its value pattern swallows a "Bearer <tok>" whole, so
     # "Authorization: Bearer hx_..." collapses to one "[redacted]" instead of
     # the standalone rule leaving a bare "Bearer" for this one to redact again
-    text = _CV_SECRET_RE.sub(lambda m: m.group(1) + ": [redacted]", text)
+    text = _CV_SECRET_RE.sub(lambda m: m.group(1) + "[redacted]", text)
     text = _CV_BEARER_RE.sub("Bearer [redacted]", text)
+    text = _CV_PROSE_SECRET_RE.sub(lambda m: m.group(1) + "[redacted]", text)
     return _cv_redact_raw(text)          # unlabeled shapes last (1.1.5)
+# ===== END MIRRORED SECRET BLOCK ==========================================
 
 
 # --- shared helpers ---------------------------------------------------------
+def _cv_hidden():
+    """The reserved conversation ids no route may list, read, export, rename
+    or pin: prewarm and the needs-you draft session (third-party text, 2026-10-21
+    audit C38). Resolved by name at CALL time, with the literal fallback."""
+    return globals().get("HIDDEN_SESSIONS") or (PREWARM_SESSION, "needsyou")
+
+
 def _cv_session_files():
-    """(sid, path) for every REAL conversation — prewarm/bad ids skipped."""
+    """(sid, path) for every REAL conversation — prewarm, the needs-you draft
+    session (third-party text, 2026-10-21 audit C38) and bad ids skipped."""
     try:
         names = os.listdir(CHATS)
     except OSError:
         return []
+    hidden = globals().get("HIDDEN_SESSIONS") or (PREWARM_SESSION, "needsyou")
     out = []
     for fn in names:
         if not fn.endswith(".json"):
             continue
         sid = fn[:-5]
-        if sid == PREWARM_SESSION or not SESSION_RE.match(sid):
+        if sid.casefold() in hidden or not SESSION_RE.match(sid):   # any case (E69)
             continue
         out.append((sid, os.path.join(CHATS, fn)))
     return out
@@ -240,17 +305,22 @@ def _cv_search(ctx):
 # --- POST /api/sessions/meta {session, pinned?, title?} ---------------------
 def _cv_meta(ctx):
     b = ctx.body if isinstance(ctx.body, dict) else {}
-    sid = (b.get("session") or "").strip()
-    if not sid or not SESSION_RE.match(sid) or sid == PREWARM_SESSION:
+    sid = b.get("session")
+    sid = sid.strip() if isinstance(sid, str) else ""     # E123: a non-string is a bad session
+    if not sid or not SESSION_RE.match(sid) or sid.casefold() in _cv_hidden():   # C38, E69
         return {"ok": False, "error": "bad session"}, 400
     if not os.path.exists(chat_path(sid)):
         # the "(new conversation)" pseudo-row has no file yet: nothing to pin
         return {"ok": False, "error": "unknown session"}, 404
     if "pinned" not in b and "title" not in b:
         return {"ok": False, "error": "nothing to set"}, 400
+    # C59: bool("false") is True — the STRING "false" used to pin it
+    if "pinned" in b and not isinstance(b.get("pinned"), bool):
+        return {"ok": False, "error": "'pinned' must be a JSON boolean "
+                                      "(true or false)"}, 400
     def _apply(chat):
         if "pinned" in b:
-            chat["pinned"] = bool(b.get("pinned"))
+            chat["pinned"] = b.get("pinned")
         if "title" in b:
             # an empty title clears the rename — list_sessions() then falls
             # back to the first-message excerpt again
@@ -277,10 +347,29 @@ def _cv_slug(t):
     return s[:40].strip("-") or "conversation"
 
 
+def _cv_export_title(sid, chat, msgs):
+    """The export's title, scrubbed BEFORE it is cut (B21).
+
+    The title line and the download's filename both left the process raw, so
+    a conversation that opened with "my OPENAI_API_KEY=sk-…" carried the key
+    in its heading and in the file name on disk.  The auto-title takes only
+    the first 48 characters of the first turn, and a secret cut in half no
+    longer matches a pattern — so scrub the whole turn first, then shorten.
+    """
+    t = chat.get("title")
+    if not (isinstance(t, str) and t.strip()):
+        t = ""
+        for m in msgs:
+            tt = _cv_turn_text(m)
+            if tt.strip():
+                t = " ".join(_cv_redact(tt).split())[:48]
+                break
+    return _cv_clean_title(_cv_redact(t or sid)) or sid
+
+
 def _cv_markdown(sid, chat, when):
     msgs = chat.get("messages") or []
-    title = chat.get("title") or _cv_auto_title(msgs) or sid
-    out = ["# " + _cv_clean_title(title), "",
+    out = ["# " + _cv_export_title(sid, chat, msgs), "",
            when.strftime("%B %-d, %Y") if hasattr(when, "strftime") else "", ""]
     for m in msgs:
         t = _cv_turn_text(m)          # tool / approval metadata never exports
@@ -303,7 +392,7 @@ def _cv_markdown(sid, chat, when):
 
 def _cv_export(ctx):
     sid = (ctx.q1("session") or "").strip()
-    if not sid or not SESSION_RE.match(sid) or sid == PREWARM_SESSION:
+    if not sid or not SESSION_RE.match(sid) or sid.casefold() in _cv_hidden():   # C38, E69
         return {"ok": False, "error": "bad session"}, 400
     path = chat_path(sid)
     if not os.path.exists(path):
@@ -314,7 +403,7 @@ def _cv_export(ctx):
     when = _cv_datetime.datetime.fromtimestamp(last or time.time())
     body = _cv_markdown(sid, chat, when)
     fname = "hermes-%s-%s.md" % (
-        _cv_slug(chat.get("title") or _cv_auto_title(msgs) or sid),
+        _cv_slug(_cv_export_title(sid, chat, msgs)),
         when.strftime("%Y-%m-%d"))
     return RawResponse(body, "text/markdown; charset=utf-8",
                        {"Content-Disposition": 'attachment; filename="%s"' % fname})

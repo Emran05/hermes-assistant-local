@@ -26,6 +26,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.environ.get("HERMES_REPO") or os.path.dirname(
     os.path.dirname(os.path.dirname(HERE)))
 MODULE = os.path.join(REPO, "dashboard", "aux_dictation.py")
+sys.path.insert(0, os.path.join(REPO, "tools", "tests", "lib"))
+import server_real  # noqa: E402  the REAL settings_update & co (C84)
 
 VERBOSE = "-v" in sys.argv
 PASS = FAIL = 0
@@ -80,21 +82,6 @@ def write_json(path, obj):
     os.replace(tmp, path)
 
 
-def settings_update(mutate_fn):
-    """Stand-in for server.py's settings_update() — ONE locked
-    read-modify-write of settings.json, the only way an aux module is allowed
-    to write it since the 2026-09-10 audit (A01)."""
-    with _state_lock:
-        s = get_settings()
-        if not isinstance(s, dict):
-            s = {}
-        out = mutate_fn(s)
-        if isinstance(out, dict):
-            s = out
-        write_json(SETTINGS_FILE, s)
-        return json.loads(json.dumps(s))
-
-
 def bg_online():
     return LANE_ONLINE["bg"]
 
@@ -116,11 +103,9 @@ NS = {
     "HOME": SANDBOX,
     "DATA": DATA,
     "HERE": os.path.join(REPO, "dashboard"),
-    "SETTINGS_FILE": SETTINGS_FILE,
-    "_state_lock": _state_lock,
-    "get_settings": get_settings,
-    "write_json": write_json,
-    "settings_update": settings_update,
+    # server.py's own settings_update / settings_set / get_settings /
+    # read_json / write_json, sharing the module's _state_lock (C84)
+    **server_real.settings_api(SETTINGS_FILE, _state_lock),
     "bg_online": bg_online,
     "model_online": model_online,
     "bg_lane": bg_lane,
@@ -195,11 +180,18 @@ check("last anchor wins",
 check("i mean",
       clean("meet me on Tuesday, I mean, on Wednesday"),
       "Meet me on Wednesday.")
-check("scratch that with no anchor falls back to the clause",
+# A correction that cannot be anchored is left as spoken (2026-10-21 C124):
+# the old comma fallback produced "Call the vet, book a table." — the cancelled
+# instruction kept, the cancellation dropped.  Same for a marker with nothing
+# after it: dropping "no wait" asserted what the speaker took back.
+check("scratch that with no anchor is left as spoken",
       clean("call the vet, scratch that, book a table"),
-      "Call the vet, book a table.")
-check("marker with nothing after it is dropped",
-      clean("this is fine, no wait"), "This is fine.")
+      "Call the vet, scratch that, book a table.")
+check("scratch that with an anchor still corrects",
+      clean("send it to Bob, scratch that, send it to Alice"),
+      "Send it to Alice.")
+check("marker with nothing after it is kept",
+      clean("this is fine, no wait"), "This is fine, no wait.")
 
 # ---------------------------------------------------------------------------
 # 4. rules: capitalisation and punctuation
@@ -238,9 +230,11 @@ check("casual does not", clean("on my way", "casual"), "On my way")
 check("casual still capitalises and de-fillers",
       clean("um, on my way", "casual"), "On my way")
 check("verbatim leaves case and punctuation alone",
-      clean("um, git commit dash m fix", "verbatim"), "git commit dash m fix")
-check("verbatim still removes fillers and doubles",
-      clean("uh make make clean", "verbatim"), "make clean")
+      clean("git commit dash m fix", "verbatim"), "git commit dash m fix")
+check("verbatim keeps filler sounds too (a command line is data, E107)",
+      clean("uh make clean", "verbatim"), "uh make clean")
+check("verbatim keeps doubled tokens (a command line is data, C124)",
+      clean("make make clean", "verbatim"), "make make clean")
 check("verbatim applies the dictionary",
       clean("run kew bee logs", "verbatim", D), "run kubectl logs")
 check("unknown style falls back to prose",
@@ -295,7 +289,7 @@ truthy("finish is fast", r["ms"] < 200)
 r = POST("/api/dictation/finish", {"text": "um, ls dash l", "app_bundle":
                                    "com.apple.Terminal", "app_name": "Terminal"})
 check("terminal style resolved", r["style"], "verbatim")
-check("terminal text left alone", r["text"], "ls dash l")
+check("terminal text left alone (fillers too, E107)", r["text"], "um, ls dash l")
 
 r, code = POST_ROUTES["/api/dictation/finish"](Ctx(body={"text": "   "}))
 check("empty transcript is a 400", code, 400)

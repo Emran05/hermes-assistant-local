@@ -5,15 +5,16 @@
  * hooks — it never rewrites them:
  *
  *   B1 SHELL
- *     · injects #view-agent into .stage (left rail 232 · stream 860 · right
+ *     · injects #view-agent into .stage (left rail 232 · stream (fills) · right
  *       rail 320 · heartbeat ticker), all CSS in one injected <style>.
  *     · wraps setView() to add an 'agent' view + an "Agent" tab between Hub and
  *       Settings; aliases old keys (console/desktop -> agent, settings -> mind);
  *       migrates localStorage hermes_view.
  *     · on entering Agent, RE-PARENTS the live chat DOM (.chatcol = #msgs +
  *       composer) into #agent-stream and the #chat-side sidebar into #agent-side
- *       (reusing renderChatSide, not rewriting it); RETURNS both on exit so the
- *       Hub split-chat (deck[data-chat]) path is never touched.
+ *       (reusing renderChatSide, not rewriting it); RETURNS both on exit, where
+ *       the deck keeps them unshown: the chat lives on this page only (owner
+ *       decision 2026-11-12; index.html openChat() brings the owner here).
  *
  *   B2 THE ALIVE MOMENT
  *     · Status hero: the live Sigil (idle orbit -> local thinking -> Claude-deep
@@ -33,8 +34,14 @@
  * INVARIANTS honoured here: the approval path (streamJob's d.state==='approval'
  * -> /api/chat/approve) is UNTOUCHED and un-bypassable; NO show-in card contains
  * an approval control; the brain badge + hero are DISPLAY-ONLY; no emoji (all
- * glyphs bespoke two-tone SVG); all discrete motion via animate()+SPRING with
- * REDUCE fallbacks (matchMedia reduced-motion -> orbits frozen, fades only).
+ * glyphs bespoke two-tone SVG). Discrete motion goes through the motion
+ * runtime, HA() (docs/plans/motion-system-2026-10.md 8.10): the ticker
+ * crossfade is exit('fadeOut') then enter('fade') with no timer, the sigil
+ * tick / EKG blip / show-in head icon are spring()s, a show-in card is
+ * enter('rise'), and the Record rail's 3 s poll runs inside quiet(). Either
+ * reduce switch or a hidden window gives the end state at once. The orbits,
+ * blooms and shimmers stay CSS (frozen by the reduced-motion block below);
+ * only the Claude-dialogues sheet still uses the legacy animate()+SPRING.
  */
 (function () {
   "use strict";
@@ -59,6 +66,23 @@
   try { agAnimate = (typeof animate === "function") ? animate : null; } catch (e) { agAnimate = null; }
   if (!agAnimate && typeof window.animate === "function") agAnimate = window.animate;
   if (!agAnimate) agAnimate = function () { return null; };
+  // The motion runtime (docs/plans/motion-system-2026-10.md 8.10). index.html's
+  // HA() — aux_anim.js's window.HermesAnim, or its instant ANIM_NULL — is a
+  // top-level const like animate(), so it is looked up by name, per call. The
+  // runtime reads BOTH reduce switches live (the in-app one too, which the
+  // REDUCE below never saw), skips a hidden window and keeps quiet() calls
+  // still. A harness with neither gets AG_NULL: every call lands at once.
+  var AG_H = { done: true, finished: Promise.resolve(), cancel: function () {}, finish: function () {} };
+  var AG_NULL = {
+    quiet: function (fn) { return fn(); },
+    enter: function () { return AG_H; },
+    spring: function () { return AG_H; },
+    exit: function (t, p, done) { if (typeof done === "function") done(); return AG_H; }
+  };
+  function anim() {
+    try { if (typeof HA === "function") { var a = HA(); if (a) return a; } } catch (e) {}
+    return window.HermesAnim || AG_NULL;
+  }
   var SPRING = (typeof window.SPRING === "string")
     ? window.SPRING : "cubic-bezier(.22,1,.36,1)";
   var REDUCE = (typeof window.REDUCE !== "undefined")
@@ -135,25 +159,52 @@
       /* the view fills the stage as a 3-column cockpit */
       "#view-agent{display:flex;gap:12px;min-height:0;flex:1}",
       "#view-agent[hidden]{display:none!important}",
-      /* single-column deck while Agent is up so the stage spans full width */
-      ':root[data-agentview] .deck{grid-template-columns:1fr!important}',
-      ':root[data-agentview] #chat-restore{display:none!important}',
-      /* neutralise whatever chat-mode the deck was in when we entered Agent:
-         data-chat="full" hides .stage, data-chat="hidden" hides .chatcol —
-         both would blank the re-parented Agent view. */
-      ':root[data-agentview] .stage{display:flex!important}',
-      ':root[data-agentview] #agent-stream .chatcol{display:flex!important}',
 
       "#agent-side{width:232px;flex:none;min-height:0;display:flex;flex-direction:column}",
       "@media (max-width:1100px){#agent-side{display:none}}",
       /* reuse the moved #chat-side verbatim, just show it here */
       "#agent-side .chatside{display:flex!important;flex-direction:column;flex:1;min-height:0;overflow:hidden;margin:0}",
+      /* The conversation list owns the leftover height and scrolls. Before,
+         Tools (content-sized, up to 30%) and Local AI took their full height
+         first and the list got whatever was left: at the owner's 122% zoom in
+         WKWebView that was ~309px, its clip edge sliced a row through the
+         middle and the TOOLS label sat flush under the cut, so the row read as
+         tucked behind the heading. Now the list keeps a floor of ~5 rows (the
+         sections below give way and scroll first), the sections start on a
+         hairline, and the clip edge fades out instead of cutting a row. The
+         floor is min(168px, 26vh): in a window too short to hold 168px of list
+         plus the Local AI block and the status foot, a fixed floor pushed the
+         foot out of the (overflow:hidden) sidebar. */
+      "#agent-side #cs-convos{flex:1 1 0;min-height:min(168px,26vh);padding-bottom:20px;"
+        + "-webkit-mask-image:linear-gradient(to bottom,#000 calc(100% - 20px),transparent);"
+        + "mask-image:linear-gradient(to bottom,#000 calc(100% - 20px),transparent)}",
+      "#agent-side #cs-tools{flex:0 1 auto;min-height:0}",
+      /* Tools / Local AI: collapsible section headers (real buttons) */
+      ".chatside .cs-sechd{display:flex;align-items:center;gap:6px;width:100%;min-height:40px;flex:none;"
+        + "margin:0;padding:8px 14px 6px;border:0;border-top:1px solid var(--hairline);border-radius:0;"
+        + "background:none;color:var(--muted);font:inherit;font-size:11px;font-weight:600;"
+        + "text-transform:uppercase;letter-spacing:.07em;text-align:left;cursor:pointer;"
+        + "transition-property:color;transition-duration:var(--d-micro,150ms);transition-timing-function:ease-out}",
+      "#chat-side .cs-sechd:hover{color:var(--ink);background:none;border-color:var(--hairline);transform:none}",
+      "#chat-side .cs-sechd:active{scale:none}",
+      "#chat-side .cs-sechd:focus-visible{outline-offset:-2px}",
+      ".chatside .cs-sechd .chev{width:11px;height:11px;flex:none;stroke-width:2.2;"
+        + "transition-property:transform;transition-duration:var(--d-micro,150ms);transition-timing-function:var(--press,ease-out)}",
+      '.chatside .cs-sechd[aria-expanded="true"] .chev{transform:rotate(90deg)}',
+      "#chat-side #cs-tools[hidden],#chat-side #cs-ai[hidden]{display:none}",
+      "@media (prefers-reduced-motion:reduce){.chatside .cs-sechd,.chatside .cs-sechd .chev{transition:none}}",
+      ":root[data-reduce] .chatside :is(.cs-sechd,.cs-sechd .chev){transition:none}",
 
       "#agent-center{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0}",
       "#agent-stream{flex:1;min-height:0;display:flex;justify-content:center;overflow:hidden}",
-      "#agent-stream .chatcol{flex:1;max-width:860px;width:100%;min-height:0;display:flex;opacity:1}",
+      /* the chat card spans the full width of #agent-center, so its edges are
+         the status bar's (#agent-hero) at every width — it used to stop at
+         860px, centred, visibly narrower than the bar above it. The reading
+         measure is kept on the bubbles instead (the full-chat mode's 76%
+         rule, plus a ceiling for very wide windows). */
+      "#agent-stream .chatcol{flex:1;max-width:none;width:100%;min-height:0;display:flex;opacity:1}",
+      "#agent-stream .bubble{max-width:min(76%,52rem)}",
       "#agent-stream .chatcol .chat{flex:1;height:100%}",
-      "#agent-stream .chat-head #chat-max,#agent-stream .chat-head #chat-hide{display:none}",
 
       "#agent-rail{width:320px;flex:none;min-height:0;display:flex;flex-direction:column}",
       "@media (max-width:1280px){#agent-rail{display:none}}",
@@ -165,10 +216,10 @@
       "#agent-hero .sig svg{width:36px;height:36px;overflow:visible}",
       "#agent-hero .state{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}",
       "#agent-hero .state .s1{font-size:13px;font-weight:640;color:var(--ink);letter-spacing:-.01em}",
-      "#agent-hero .state .s2{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
+      "#agent-hero .state .s2{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
 
       /* the Sigil */
-      ".sig-ring{transform-origin:18px 18px}",
+      ".sig-ring{transform-box:fill-box;transform-origin:50% 50%}",
       ".sig-orbit{transform-origin:18px 18px;animation:agOrbit 18s linear infinite}",
       ".sig-orbit.two{animation:agOrbit 6s linear infinite}",
       ".sig-orbit.rev{animation:agOrbitRev 5s linear infinite}",
@@ -269,20 +320,40 @@
       "#agent-rail .railpane{flex:1;min-height:0;overflow-y:auto}",
       "#agent-rail .railpane[hidden]{display:none}",
       "#agent-rail .railstub{font-size:12px;color:var(--muted);padding:16px 4px;text-align:center;line-height:1.5}",
-      /* Screen rail = watch-only: hide the desktop panel's task-compose card */
-      "#agent-rail #desk-ctl-card{display:none}",
+      /* Screen rail compose card ("Give the agent a Mac task") is live: it was
+         hidden and unwired here while #view-desktop, the only place it worked,
+         became unreachable (B26). aux_desktop's wireCompose drives it. */
+      /* Tall enough for the whole placeholder: at the rail's width it is four
+         lines of 13px x 1.5 plus 10px padding and the border, and 54px cut it
+         off mid-line (visual audit V07). */
+      "#agent-rail .desk-compose textarea{min-height:100px}",
+      /* V07: in the 296px rail "On-screen activity" and its caption do not fit
+         one line; the title broke in two beside a cramped caption. The caption
+         takes its own line, indented to the title text (18px icon + 9px gap). */
+      "#agent-rail #desk-tl-card .desk-h{flex-wrap:wrap;row-gap:1px}",
+      "#agent-rail #desk-tl-card .desk-h .desk-note{flex-basis:100%;margin-left:27px}",
+      /* V07: the empty states are sized for the full-width Desktop view; in the
+         rail they pushed the compose card and "Send to agent" below the fold. */
+      "#agent-rail .desk-preview{min-height:120px}",
+      "#agent-rail .desk-empty{padding:18px 12px}",
       "#agent-rail #recorder-card{border:none;background:transparent;box-shadow:none}",
-      // 11.5px + a tighter tracking keeps "FLIGHT RECORDER" + the count on one
-      // line with room to spare at 296px (12.5px/.09em ran flush to the edge).
-      "#agent-rail #recorder-card>h2{font-size:11.5px;letter-spacing:.06em;padding:0 2px 6px}",
-      // The rail is 296px of usable width — the SOURCE column ("agent"/"claude")
-      // is the least load-bearing cell, and dropping it (plus a tighter gap) is
-      // what buys the tool name enough room to never collide with the badge.
-      // The full-width Console view keeps it.
-      "#agent-rail #recorder-card .rec-src{display:none}",
-      "#agent-rail #recorder-card .rec-row{gap:8px;padding:7px 4px}",
-      "#agent-rail #recorder-card .rec-when{width:46px}",
-      "#agent-rail #recorder-card .rec-undo{padding:4px 8px}",
+      // the card is .glass, so inside the (already glass) rail it painted a
+      // second blur and its own sheen: a lighter grey slab next to the dark
+      // panels. In the rail it is the rail's own surface, nothing on top.
+      "#agent-rail #recorder-card{-webkit-backdrop-filter:none;backdrop-filter:none}",
+      "#agent-rail #recorder-card::before,#agent-rail #recorder-card::after{display:none}",
+      // The header and the body share ONE 4px inset. They were 2px and 14px,
+      // which put the header icon 12px left of the filter row (outdented to
+      // the rail edge) and spent 24px of a 296px rail on empty padding. The
+      // row layout itself (two lines when the card is narrow) is
+      // aux_recorder's own @container rule, not a rail override any more.
+      "#agent-rail #recorder-card>h2{font-size:11.5px;letter-spacing:.06em;padding:2px 4px 8px}",
+      // Visual audit V07: the count ended 4px from the card's edge, inside its
+      // rounded top-right corner, which clipped "0 undone". 8px more on its
+      // right keeps it off the corner; with the room gone it wraps under the
+      // title, as aux_recorder's header rule intends for a narrow card.
+      "#agent-rail #recorder-card .rec-count{margin-right:8px}",
+      "#agent-rail #recorder-card>.body{padding:8px 4px 10px}",
       "#agent-rail .desk-card{margin-bottom:8px}",
       /* red LIVE dot on the Screen tab while computer_use runs */
       '#agent-rail .railtabs b[data-rail="screen"].live .udot{display:block;background:var(--bad);'
@@ -294,7 +365,7 @@
 
       /* ---------- Deep-thinking affordance + Claude-dialogue viewer ---------- */
       ".deepbtn{display:none;align-items:center;gap:5px;flex:none;font-size:11px;font-weight:600;"
-        + "padding:4px 10px;border-radius:99px;cursor:pointer;color:var(--claude);"
+        + "padding:4px 10px;border-radius:99px;cursor:pointer;color:color-mix(in srgb,var(--claude) 65%,var(--ink));"
         + "background:color-mix(in srgb,var(--claude) 13%,transparent);border:1px solid color-mix(in srgb,var(--claude) 30%,transparent)}",
       ".deepbtn.show{display:inline-flex}",
       ".deepbtn .ic{width:13px;height:13px}",
@@ -309,7 +380,13 @@
       "#ag-deep .dclose{margin-left:auto;cursor:pointer;color:var(--muted);background:none;border:none;padding:4px}",
       "#ag-deep .dlist{overflow-y:auto;min-height:0;display:flex;flex-direction:column;gap:8px}",
       ".dcall{border:1px solid var(--hairline);border-radius:var(--radius-sm);background:var(--glass-2);overflow:hidden}",
-      ".dcall .dc-head{display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer}",
+      // a <button> (R2-39): undo the global button chrome, keep the row look;
+      // the focus ring sits inside because .dcall clips (overflow:hidden)
+      ".dcall .dc-head{display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;width:100%;"
+        + "border:0;border-radius:0;background:none;color:inherit;font:inherit;text-align:left}",
+      ".dcall .dc-head:hover{transform:none;color:inherit}",
+      ".dcall .dc-head:focus-visible{outline-offset:-2px}",
+      "#ag-deep .dcall .dc-head:active{scale:none}",
       ".dcall .dc-task{font-size:12.5px;font-weight:560;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}",
       ".dcall .dc-model{font-size:10px;font-weight:640;padding:2px 7px;border-radius:99px;flex:none;"
         + "background:color-mix(in srgb,var(--claude) 15%,transparent);color:var(--claude);text-transform:capitalize}",
@@ -341,11 +418,27 @@
       ".deepcard.err .dk-head .ic{color:var(--bad)}",
 
       /* ---------- heartbeat ticker ---------- */
-      "#agent-ticker{display:flex;align-items:center;gap:9px;height:28px;padding:0 14px;margin-top:8px;"
-        + "border-radius:99px;font-size:11.5px;color:var(--muted);cursor:pointer;overflow:hidden}",
+      /* the ticker is the banner's third line (it used to float under the
+         composer, outside any card) */
+      "#agent-ticker{display:flex;align-items:center;gap:7px;min-height:18px;padding:0;margin-top:2px;"
+        + "font-size:12px;color:var(--muted);cursor:pointer;overflow:hidden;min-width:0}",
+      "#agent-ticker:hover .tk-txt{color:var(--ink)}",
       "#agent-ticker .ekg{width:6px;height:6px;border-radius:50%;background:var(--ok);flex:none;"
         + "box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 20%,transparent)}",
-      "#agent-ticker .tk-txt{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:opacity .5s}",
+      /* the model asleep or paused: the dot stops claiming "live" */
+      '#agent-ticker[data-model="asleep"] .ekg{background:var(--muted);box-shadow:0 0 0 3px color-mix(in srgb,var(--muted) 20%,transparent)}',
+      '#agent-ticker[data-model="paused"] .ekg{background:var(--bad);box-shadow:0 0 0 3px color-mix(in srgb,var(--bad) 20%,transparent)}',
+      /* Local AI: with no figure to show, one line says why instead of two
+         bare dashes (aiStateNote) */
+      "#chat-side .cs-ai-row.ag-nodata{display:none}",
+      /* the sidebar says the model's state once: the Local AI line above. The
+         footer chip is a copy of the header pill's words, so the Agent view
+         leaves it to the pill (it still shows in the chat's own sidebar) */
+      "#agent-side .cs-foot{display:none}",
+      "#chat-side .cs-ai-note{font-size:12px;line-height:1.45;color:var(--muted);padding:2.5px 0 4px;text-wrap:pretty}",
+      /* no opacity transition: the crossfade is HA().exit/enter, and a CSS
+         transition would chase every inline opacity the runtime writes */
+      "#agent-ticker .tk-txt{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
 
       /* reduced motion: freeze orbits/shimmers/blips — fades only */
       "@media (prefers-reduced-motion:reduce){"
@@ -376,24 +469,24 @@
       + '  <div id="agent-hero" class="glass" data-sig="idle">'
       + '    <div class="sig">' + sigilSvg() + '</div>'
       + '    <div class="state"><div class="s1" id="ag-s1">Watching</div>'
-      + '      <div class="s2" id="ag-s2">Ask, or just watch — your assistant is on watch.</div></div>'
+      + '      <div class="s2" id="ag-s2">Ask, or just watch — your assistant is on watch.</div>'
+      + '      <div id="agent-ticker" title="Open the Pulse feed"><span class="ekg" id="ag-ekg"></span>'
+      + '        <span class="tk-txt" id="ag-tick">On watch — nothing needs you right now</span></div></div>'
       + '    <button class="deepbtn" id="ag-deepbtn" title="See the full dialogues the agent had with Claude">'
       + svg("bridge") + '<span id="ag-deepbtn-t">Claude dialogues</span></button>'
       + '    ' + brainBadgeHtml()
       + '  </div>'
       + '  <div id="agent-stream"></div>'
-      + '  <div id="agent-ticker" title="Open the Pulse feed"><span class="ekg" id="ag-ekg"></span>'
-      + '    <span class="tk-txt" id="ag-tick">On watch — nothing needs you right now</span></div>'
       + '</div>'
       + '<div id="agent-rail" class="glass" style="padding:11px">'
-      + '  <div class="railtabs" role="tablist">'
-      + '    <b data-rail="record" class="on" role="tab">' + svg("record") + 'Record<span class="udot"></span></b>'
-      + '    <b data-rail="screen" role="tab">' + svg("screen") + 'Screen<span class="udot"></span></b>'
-      + '    <b data-rail="pulse" role="tab">' + svg("pulse") + 'Pulse<span class="udot"></span></b>'
+      + '  <div class="railtabs" role="tablist" aria-label="Agent rail">'
+      + '    <b data-rail="record" class="on" role="tab" id="ag-railtab-record" aria-controls="rail-record" aria-selected="true" tabindex="0">' + svg("record") + 'Record<span class="udot"></span></b>'
+      + '    <b data-rail="screen" role="tab" id="ag-railtab-screen" aria-controls="rail-screen" aria-selected="false" tabindex="-1">' + svg("screen") + 'Screen<span class="udot"></span></b>'
+      + '    <b data-rail="pulse" role="tab" id="ag-railtab-pulse" aria-controls="rail-pulse" aria-selected="false" tabindex="-1">' + svg("pulse") + 'Pulse<span class="udot"></span></b>'
       + '  </div>'
-      + '  <div class="railpane" data-rail="record" id="rail-record"><div class="railstub">Loading the Flight Recorder…</div></div>'
-      + '  <div class="railpane" data-rail="screen" id="rail-screen" hidden><div class="railstub">Loading the Screen panel…</div></div>'
-      + '  <div class="railpane" data-rail="pulse" id="rail-pulse" hidden><div class="railstub" id="ag-pulse-stub">The autonomous feed — what the agent did while you were away.</div></div>'
+      + '  <div class="railpane" data-rail="record" id="rail-record" role="tabpanel" aria-labelledby="ag-railtab-record"><div class="railstub">Loading the Flight Recorder…</div></div>'
+      + '  <div class="railpane" data-rail="screen" id="rail-screen" role="tabpanel" aria-labelledby="ag-railtab-screen" hidden><div class="railstub">Loading the Screen panel…</div></div>'
+      + '  <div class="railpane" data-rail="pulse" id="rail-pulse" role="tabpanel" aria-labelledby="ag-railtab-pulse" hidden><div class="railstub" id="ag-pulse-stub">The autonomous feed — what the agent did while you were away.</div></div>'
       + '</div>';
     stage.appendChild(v);
 
@@ -401,7 +494,7 @@
     var dm = document.createElement("div");
     dm.id = "ag-deep";
     dm.innerHTML =
-      '<section class="dsheet glass">'
+      '<section class="dsheet glass" role="dialog" aria-modal="true" aria-label="Claude dialogues">'
       + '<div class="dhead">' + svg("bridge") + 'Claude dialogues'
       + '<button class="dclose" id="ag-deep-x" aria-label="Close">' + svg("chevron") + '</button></div>'
       + '<div class="dsub">Every time the agent escalated to Claude — the exact question it asked and Claude\'s full response. Display only.</div>'
@@ -411,6 +504,16 @@
     dm.addEventListener("click", function (e) { if (e.target === dm) closeDeep(); });
     var dx = $("ag-deep-x"); if (dx) dx.addEventListener("click", closeDeep);
     var db = $("ag-deepbtn"); if (db) db.addEventListener("click", openDeep);
+    // E89 + S2 seam: index.html's OVL registry now lists this sheet too (its
+    // isOpen reads the .open class), so its document handler, which runs
+    // first, takes Esc/Tab for it and adds the modal focus pull-back; this
+    // handler stands down on a key already taken (defaultPrevented) and is
+    // kept for a page without the registry. A context menu opened over the
+    // sheet still gets the first Esc.
+    if (!document.__agDeepKeys) {
+      document.__agDeepKeys = true;
+      document.addEventListener("keydown", onDeepKey);
+    }
 
     // rail tab switching (local, no view change)
     var tabs = v.querySelectorAll(".railtabs b");
@@ -419,6 +522,7 @@
         openRail(this.getAttribute("data-rail"));
       });
     }
+    wireRailKeys(v.querySelector(".railtabs"));
     $("agent-ticker").addEventListener("click", function () {
       var t = v.querySelector('.railtabs b[data-rail="pulse"]');
       if (t) t.click();
@@ -461,6 +565,64 @@
     if (mind && mind.parentNode === seg) seg.insertBefore(b, mind);
     else seg.appendChild(b);
     b.onclick = function () { if (typeof window.setView === "function") window.setView("agent"); };
+    wireSegKeys(seg);
+  }
+
+  // --------------------------------------------------------------------------
+  // keyboard for the header switcher (C93). The tabs are <b role=tab>, which
+  // nothing could focus, so Hub/Agent was mouse-only. Now it is a tablist with
+  // a roving tabindex: the active tab is the one Tab stop, ArrowLeft/Right/
+  // Home/End move between the VISIBLE tabs (Settings and Console are hidden by
+  // CSS), Enter/Space switch. Manual activation: switching to Agent re-parents
+  // the chat, so it does not happen on every arrow press.
+  // --------------------------------------------------------------------------
+  function segTabs() {
+    var seg = document.querySelector("header .seg") || document.querySelector(".seg");
+    if (!seg) return [];
+    return Array.prototype.filter.call(seg.querySelectorAll('[role="tab"]'), function (t) {
+      return t.offsetParent !== null;               // display:none tabs have none
+    });
+  }
+  function syncSegTabs() {
+    var seg = document.querySelector("header .seg") || document.querySelector(".seg");
+    if (!seg) return;
+    var all = seg.querySelectorAll('[role="tab"]'), vis = segTabs(), on = null, i;
+    for (i = 0; i < vis.length; i++) if (vis[i].classList.contains("on")) on = vis[i];
+    on = on || vis[0] || null;
+    for (i = 0; i < all.length; i++) all[i].tabIndex = (all[i] === on) ? 0 : -1;
+  }
+  function onSegKey(e) {
+    var t = e.target;
+    if (!t || !t.getAttribute || t.getAttribute("role") !== "tab") return;
+    var tabs = segTabs(), i = tabs.indexOf(t), n = -1, k = e.key;
+    if (k === "Enter" || k === " " || k === "Spacebar") {
+      e.preventDefault();
+      if (e.repeat) return;                     // a held key switches once
+      try { t.click(); } catch (x) {}
+      syncSegTabs();
+      try { t.focus(); } catch (x) {}
+      return;
+    }
+    if (i < 0) return;
+    if (k === "ArrowRight" || k === "ArrowDown") n = (i + 1) % tabs.length;
+    else if (k === "ArrowLeft" || k === "ArrowUp") n = (i - 1 + tabs.length) % tabs.length;
+    else if (k === "Home") n = 0;
+    else if (k === "End") n = tabs.length - 1;
+    if (n < 0) return;
+    e.preventDefault();
+    for (var j = 0; j < tabs.length; j++) tabs[j].tabIndex = (j === n) ? 0 : -1;
+    try { tabs[n].focus(); } catch (x) {}
+  }
+  function wireSegKeys(seg) {
+    if (!seg || seg.__segKeys) return;
+    seg.__segKeys = true;
+    seg.addEventListener("keydown", onSegKey);
+    // focus leaving the switcher puts the Tab stop back on the active tab
+    seg.addEventListener("focusout", function (e) {
+      var to = e && e.relatedTarget;
+      if (!to || !seg.contains(to)) syncSegTabs();
+    });
+    syncSegTabs();
   }
 
   // ==========================================================================
@@ -485,6 +647,7 @@
     if (_orig.chatcol && stream) stream.appendChild(_orig.chatcol);
     if (_orig.chatside && side) side.appendChild(_orig.chatside);
     document.documentElement.setAttribute("data-agentview", "1");
+    try { upgradeSideSections(); } catch (e) {}      // the Agent page's section defaults
     _parked = true;
     try { if (typeof window.renderChatSide === "function") window.renderChatSide(); } catch (e) {}
     try { mountRecordRail(); } catch (e) {}          // default rail = the flight recorder
@@ -493,8 +656,8 @@
 
   function exitAgent() {
     if (!_parked) return;
-    // return the chat DOM to the deck at its exact original position so Hub's
-    // split-chat (deck[data-chat]) is byte-for-byte what it was.
+    // return the chat DOM to the deck at its exact original position (unshown
+    // there: the Hub and Settings have no chat column).
     if (_orig.chatside && _orig.deck) {
       if (_orig.chatsideNext && _orig.chatsideNext.parentNode === _orig.deck)
         _orig.deck.insertBefore(_orig.chatside, _orig.chatsideNext);
@@ -506,8 +669,76 @@
       else _orig.deck.appendChild(_orig.chatcol);
     }
     document.documentElement.removeAttribute("data-agentview");
+    try { upgradeSideSections(); } catch (e) {}      // back to the Hub's defaults
     _parked = false;
     stopAgentPolls();
+  }
+
+  // ==========================================================================
+  // the left sidebar's Tools / Local AI sections: collapsible (D)
+  // ==========================================================================
+  // index.html's #chat-side labels them with static <div class="cs-lab">s.
+  // Each becomes a real <button aria-expanded aria-controls> over its section
+  // (same text, same look, a chevron), once. An owner's choice is remembered
+  // per viewer; anything unreadable in storage is simply the default. The
+  // defaults on the Agent page: Local AI open, Tools COLLAPSED (the same
+  // actions already sit as chips over the composer and the conversation list
+  // needs the height). The sidebar is shown nowhere else since the Hub lost
+  // its full-screen chat (2026-11-12); sideDefault()'s off-page value only
+  // decides what the parked element holds.
+  var SIDE_KEY = "hermes_agent_side";
+  var SIDE_SECS = [{ name: "tools", body: "cs-tools", label: "Tools", agentOpen: false },
+                   { name: "ai", body: "cs-ai", label: "Local AI", agentOpen: true }];
+  function sideDefault(sec) {
+    return document.documentElement.hasAttribute("data-agentview") ? sec.agentOpen : true;
+  }
+  function sideState() {
+    var o = {};
+    try {
+      var v = JSON.parse(localStorage.getItem(SIDE_KEY) || "null");
+      if (v && typeof v === "object" && !Array.isArray(v))
+        SIDE_SECS.forEach(function (sec) { if (typeof v[sec.name] === "boolean") o[sec.name] = v[sec.name]; });
+    } catch (e) { o = {}; }
+    return o;
+  }
+  function saveSide(o) { try { localStorage.setItem(SIDE_KEY, JSON.stringify(o)); } catch (e) {} }
+  function upgradeSideSections() {
+    var st = sideState();
+    SIDE_SECS.forEach(function (sec) {
+      var body = $(sec.body);
+      if (!body) return;
+      var hd = $("cs-" + sec.name + "-hd");
+      if (!hd) {
+        var lab = body.previousElementSibling;
+        if (!lab || !lab.classList || !lab.classList.contains("cs-lab")) return;
+        hd = document.createElement("button");
+        hd.type = "button";
+        hd.id = "cs-" + sec.name + "-hd";
+        hd.className = "cs-lab cs-sechd";
+        hd.setAttribute("aria-controls", sec.body);
+        hd.innerHTML = svg("chevron", "chev") + '<span class="t">'
+          + esc((lab.textContent || "").trim() || sec.label) + "</span>";
+        lab.parentNode.replaceChild(hd, lab);
+        hd.addEventListener("click", function () { toggleSide(sec, hd); });
+      }
+      var open = Object.prototype.hasOwnProperty.call(st, sec.name) ? st[sec.name] : sideDefault(sec);
+      hd.setAttribute("aria-expanded", open ? "true" : "false");
+      body.hidden = !open;
+    });
+  }
+  // the owner's click: flip in place (focus stays on the header — it is a
+  // native button, Enter/Space are the browser's), remember it, and fade the
+  // section in through the motion runtime (opacity only, never a height;
+  // either reduce switch lands it at once)
+  function toggleSide(sec, hd) {
+    var open = hd.getAttribute("aria-expanded") !== "true";
+    hd.setAttribute("aria-expanded", open ? "true" : "false");
+    var body = $(sec.body);
+    if (body) body.hidden = !open;
+    var st = sideState();
+    st[sec.name] = open;
+    saveSide(st);
+    if (open && body) { try { anim().enter(body, "fade"); } catch (e) {} }
   }
 
   // ==========================================================================
@@ -540,6 +771,7 @@
         try { localStorage.setItem("hermes_view", "agent"); } catch (e) {}
         enterAgent();
         if (wantRail) { try { openRail(wantRail); } catch (e) {} }
+        syncSegTabs();
         return;
       }
       // leaving Agent (or never in it): tear down our view, then delegate
@@ -548,6 +780,7 @@
       if (ta2) { ta2.classList.remove("on"); ta2.setAttribute("aria-selected", "false"); }
       exitAgent();
       if (typeof prev === "function") prev(v);
+      syncSegTabs();
     };
   }
 
@@ -561,12 +794,15 @@
     var h = $("agent-hero"); if (!h) return;
     h.setAttribute("data-sig", state);
   }
-  function tickSigil() {                    // one 12deg spring tick per tool event
-    var h = $("agent-hero"); if (!h || REDUCE) return;
+  // one 12deg tick per tool event, on the snappy spring. The end angle stays
+  // (spring persists it), so the ticks add up; .sig-ring's fill-box origin
+  // keeps the pivot on the ring's centre (Motion 14 renders SVG transforms).
+  function tickSigil() {
+    var h = $("agent-hero"); if (!h) return;
     var ring = h.querySelector(".sig-ring");
     if (!ring) return;
     h.__tick = ((h.__tick || 0) + 12) % 360;
-    try { agAnimate(ring, { rotate: [h.__tick - 12 + "deg", h.__tick + "deg"] }, { duration: 0.4, easing: SPRING }); } catch (e) {}
+    anim().spring(ring, { rotate: [h.__tick - 12, h.__tick] }, "snappy");
   }
   function setStateLine(label, detail) {
     var s1 = $("ag-s1"), s2 = $("ag-s2");
@@ -587,7 +823,7 @@
     if (txt == null) {                       // idle / turn done
       _busy = false;
       if (agentBrain === "deep") { setSigil("deep"); setStateLine("Thinking with Claude", null); }
-      else { setSigil("idle"); setStateLine("Watching", idleDetail()); }
+      else { setSigil("idle"); setStateLine(idleLabel(), idleDetail()); }
       return;
     }
     _busy = true;
@@ -603,7 +839,93 @@
     setSigil(agentBrain === "deep" ? "deep" : "local");
     setStateLine(agentBrain === "deep" ? "Thinking with Claude" : "Thinking", String(txt));
   }
+  // The three real states of the local model, read from what the page
+  // already knows (index.html's loadModels() keeps agentPaused/agentIdle
+  // from /api/models; the header pill shows the same two). No poller here.
+  function modelState() {
+    var p = false, i = false;
+    try { p = (typeof agentPaused !== "undefined") && !!agentPaused; } catch (e) {}
+    try { i = (typeof agentIdle !== "undefined") && !!agentIdle; } catch (e) {}
+    return p ? "paused" : (i ? "asleep" : "awake");
+  }
+  var IDLE_LABEL = { awake: "Watching", asleep: "Asleep", paused: "Paused" };
+  function idleLabel() { return IDLE_LABEL[modelState()]; }
+  // a ticker fact claiming "On watch" while the model sleeps or is paused
+  // drops the claim: the banner right above already names the state, so the
+  // line says only what the banner does not ("Nothing needs you right now")
+  var ON_WATCH = "On watch — ";
+  function stateFact(f) {
+    var st = modelState();
+    if (st === "awake" || typeof f !== "string" || f.indexOf(ON_WATCH) !== 0) return f;
+    var rest = f.slice(ON_WATCH.length);
+    return rest.charAt(0).toUpperCase() + rest.slice(1);
+  }
+  // refresh the idle line, the ticker dot and the Local AI note; only while
+  // no turn is running (a busy or deep line is never overwritten)
+  function refreshIdle() {
+    var st = modelState();
+    var tk = $("agent-ticker"); if (tk) tk.setAttribute("data-model", st);
+    try { aiStateNote(); } catch (e) {}
+    if (_busy || agentBrain === "deep") return;
+    var s1 = $("ag-s1");
+    if (s1 && (s1.textContent === "Watching" || s1.textContent === "Asleep" || s1.textContent === "Paused")) {
+      setStateLine(idleLabel(), idleDetail());
+    }
+    var el = $("ag-tick");
+    // the line on screen now (one fact, or the one the crossfade left up)
+    if (el) {
+      var cur = el.textContent, f = stateFact(_tickFacts.length === 1 ? _tickFacts[0] : cur);
+      // awake again with several facts: put back the "On watch" fact the
+      // line was showing without its prefix
+      if (st === "awake" && _tickFacts.length !== 1) {
+        var all = _tickFacts.length ? _tickFacts : [ON_WATCH + "nothing needs you right now"];
+        for (var i = 0; i < all.length; i++) {
+          var tf = all[i];
+          if (typeof tf === "string" && tf.indexOf(ON_WATCH) === 0 && tf !== cur) {
+            var bare = tf.slice(ON_WATCH.length);
+            if (cur === bare.charAt(0).toUpperCase() + bare.slice(1)) { f = tf; break; }
+          }
+        }
+      }
+      if (cur !== f) el.textContent = f;
+    }
+  }
+  // Local AI rows (index.html's renderAIInfo writes them): a "—" figure is
+  // hidden and one line says what the state is instead
+  function aiStateNote() {
+    var box = $("cs-ai"), tps = $("ai-tps"), ttft = $("ai-ttft");
+    if (!box || !tps || !ttft) return;
+    var noT = tps.textContent === "—", noF = ttft.textContent === "—";
+    if (tps.parentNode && tps.parentNode.classList) tps.parentNode.classList.toggle("ag-nodata", noT);
+    if (ttft.parentNode && ttft.parentNode.classList) ttft.parentNode.classList.toggle("ag-nodata", noF);
+    var note = $("ag-ai-note");
+    var st = modelState();
+    var txt = !(noT || noF) ? ""
+      : st === "asleep" ? "Model asleep — it wakes on your next message."
+      : st === "paused" ? "Agent paused — nothing runs until you resume it from the model menu."
+      : "No reply measured yet — speed and first-reply time show after one.";
+    if (!txt) { if (note) note.parentNode.removeChild(note); return; }
+    if (!note) {
+      note = document.createElement("div");
+      note.className = "cs-ai-note"; note.id = "ag-ai-note";
+      box.insertBefore(note, box.firstChild);
+    }
+    if (note.textContent !== txt) note.textContent = txt;
+  }
+  function watchAiRows() {
+    if (typeof MutationObserver !== "function") return;
+    var ids = ["ai-tps", "ai-ttft", "ai-ram"], mo = null;
+    for (var i = 0; i < ids.length; i++) {
+      var el = $(ids[i]); if (!el) continue;
+      if (!mo) mo = new MutationObserver(function () { try { refreshIdle(); } catch (e) {} });
+      mo.observe(el, { childList: true, characterData: true, subtree: true });
+    }
+  }
+
   function idleDetail() {
+    var st = modelState();
+    if (st === "asleep") return "The model is asleep — it wakes on your next message.";
+    if (st === "paused") return "The agent is paused — nothing runs until you resume it.";
     var live = window.__liveTps;
     if (live != null) return "Local — " + live.toFixed(1) + " tok/s";
     var el = $("ai-tps");
@@ -833,15 +1155,14 @@
     }
     msgs.scrollTop = msgs.scrollHeight;
 
-    // spring enter + one head-icon tick (fade only under reduced motion)
-    if (!REDUCE) {
-      try {
-        agAnimate(card.el, { opacity: [0, 1], transform: ["translateY(8px)", "none"] },
-          { duration: 0.42, easing: SPRING });
-        var ic = card.el.querySelector(".showin-head .ic");
-        if (ic) agAnimate(ic, { rotate: ["0deg", "360deg"] }, { duration: 0.5, easing: SPRING });
-      } catch (e) {}
-    }
+    // the card rises in and its head icon turns once on the gel spring
+    // (reduced motion, a hidden window: both land at once)
+    try {
+      var A = anim();
+      A.enter(card.el, "rise");
+      var ic = card.el.querySelector(".showin-head .ic");
+      if (ic) A.spring(ic, { rotate: [0, 360] }, "gel");
+    } catch (e) {}
     // per-turn in-memory event log for the future scrubber (B8)
     (window.agentTurnLog = window.agentTurnLog || []).push({ type: type, ts: Date.now() });
     return card;
@@ -909,9 +1230,10 @@
   // ==========================================================================
   var _tickFacts = [], _tickIdx = 0, _tickTimer = null, _pulseTimer = null, _lastRecId = null;
 
+  // three keyframes: a short tween (spring() runs 3+ frames as one), not a spring
   function blipEkg() {
-    var d = $("ag-ekg"); if (!d || REDUCE) return;
-    try { agAnimate(d, { transform: ["scale(1)", "scale(1.5)", "scale(1)"] }, { duration: 0.3, easing: SPRING }); } catch (e) {}
+    var d = $("ag-ekg"); if (!d) return;
+    anim().spring(d, { scale: [1, 1.5, 1] });
   }
 
   async function loadPulse() {
@@ -955,10 +1277,15 @@
     if (!isAgentVisible() || !_tickFacts.length) return;
     var el = $("ag-tick"); if (!el) return;
     _tickIdx = (_tickIdx + 1) % _tickFacts.length;
-    var next = _tickFacts[_tickIdx];
-    if (REDUCE) { el.textContent = next; return; }
-    el.style.opacity = "0";
-    setTimeout(function () { el.textContent = next; el.style.opacity = "1"; }, 260);
+    var next = stateFact(_tickFacts[_tickIdx]);
+    if (el.textContent === next) return;          // one fact: nothing changes, nothing moves
+    // out, swap the words, in — no timer. The fade-in starts once the exit has
+    // fully ended: its clean-up puts the element's inline opacity back and
+    // releases it from Motion, which would undo a fade-in started inside done.
+    // A cancelled exit never swapped the words, so it fades nothing in.
+    var A = anim(), swapped = false;
+    var h = A.exit(el, "fadeOut", function () { el.textContent = next; swapped = true; });
+    Promise.resolve(h && h.finished).then(function () { if (swapped) anim().enter(el, "fade"); });
   }
 
   function renderPulseRail() {
@@ -990,6 +1317,55 @@
   }
 
   // switch the rail to a named pane (and lazily mount it)
+  // keyboard for the rail tabs (C96.2) — the same roving-tabindex pattern as
+  // the header switcher (wireSegKeys, C93): the active tab is the one Tab
+  // stop, ArrowLeft/Right/Up/Down/Home/End move focus, Enter/Space switch
+  // (manual activation: Screen fetches on open, so arrows must not).
+  function railTabs(list) {
+    return list ? Array.prototype.slice.call(list.querySelectorAll('[role="tab"]')) : [];
+  }
+  function syncRailTabs(list) {
+    var tabs = railTabs(list), on = null, i;
+    for (i = 0; i < tabs.length; i++) if (tabs[i].classList.contains("on")) on = tabs[i];
+    on = on || tabs[0] || null;
+    for (i = 0; i < tabs.length; i++) {
+      tabs[i].tabIndex = (tabs[i] === on) ? 0 : -1;
+      tabs[i].setAttribute("aria-selected", tabs[i] === on ? "true" : "false");
+    }
+  }
+  function onRailKey(e) {
+    var t = e.target;
+    if (!t || !t.getAttribute || t.getAttribute("role") !== "tab") return;
+    var tabs = railTabs(this), i = tabs.indexOf(t), n = -1, k = e.key;
+    if (i < 0) return;
+    if (k === "Enter" || k === " " || k === "Spacebar") {
+      e.preventDefault();
+      if (e.repeat) return;                     // a held key switches once
+      try { t.click(); } catch (x) {}
+      try { t.focus(); } catch (x) {}
+      return;
+    }
+    if (k === "ArrowRight" || k === "ArrowDown") n = (i + 1) % tabs.length;
+    else if (k === "ArrowLeft" || k === "ArrowUp") n = (i - 1 + tabs.length) % tabs.length;
+    else if (k === "Home") n = 0;
+    else if (k === "End") n = tabs.length - 1;
+    if (n < 0) return;
+    e.preventDefault();
+    for (var j = 0; j < tabs.length; j++) tabs[j].tabIndex = (j === n) ? 0 : -1;
+    try { tabs[n].focus(); } catch (x) {}
+  }
+  function wireRailKeys(list) {
+    if (!list || list.__railKeys) return;
+    list.__railKeys = true;
+    list.addEventListener("keydown", onRailKey);
+    // focus leaving the tab row puts the Tab stop back on the active tab
+    list.addEventListener("focusout", function (e) {
+      var to = e && e.relatedTarget;
+      if (!to || !list.contains(to)) syncRailTabs(list);
+    });
+    syncRailTabs(list);
+  }
+
   function openRail(name) {
     var v = $("view-agent"); if (!v) return;
     var bs = v.querySelectorAll(".railtabs b");
@@ -1000,6 +1376,7 @@
       // owned by screenLive() while computer_use runs — CSS shows it via .live).
       if (on) { var ud = bs[j].querySelector(".udot"); if (ud) ud.style.display = ""; }
     }
+    syncRailTabs(v.querySelector(".railtabs"));     // aria-selected + the one Tab stop
     var ps = v.querySelectorAll(".railpane");
     for (var k = 0; k < ps.length; k++) ps[k].hidden = ps[k].getAttribute("data-rail") !== name;
     if (name === "record") mountRecordRail();
@@ -1026,7 +1403,10 @@
         if (!isAgentVisible()) return;
         var rp = $("rail-record");
         if (!rp || rp.hidden) return;                     // only poll while shown
-        try { window.loadRecorder(); } catch (e) {}
+        // a repaint, not news: everything the recorder starts synchronously
+        // here lands at once (8.10). Its rows paint after a fetch, outside
+        // quiet(), so aux_recorder keys its own row entrance per id (8.11).
+        try { anim().quiet(function () { return window.loadRecorder(); }); } catch (e) {}
         var c = $("recorder-card");
         if (c && c.parentNode !== rp) rp.appendChild(c);  // keep it home after any re-render
       }, 3000);
@@ -1049,7 +1429,20 @@
       var shots = (st && st.shots) || [];
       var full = (_screenPinned && shots.some(function (s) { return s.name === _screenPinned.name; }))
         ? _screenPinned.uri : null;
-      pane.innerHTML = window.renderDesktop(st || {}, tl || {}, full);
+      var html = window.renderDesktop(st || {}, tl || {}, full);
+      if (pane.querySelector("#desk-ctl-card") && pane.querySelector("#desk-live-card")
+          && pane.querySelector("#desk-tl-card")) {
+        // swap only the two read-only cards: the compose card — what is being
+        // typed into it, its focus and its status line — must survive the 4 s poll
+        var tmp = document.createElement("div");
+        tmp.innerHTML = html;
+        ["desk-live-card", "desk-tl-card"].forEach(function (id) {
+          var cur = pane.querySelector("#" + id), next = tmp.querySelector("#" + id);
+          if (cur && next && cur.parentNode) cur.parentNode.replaceChild(next, cur);
+        });
+      } else {
+        pane.innerHTML = html;
+      }
       wireScreen(pane);
     } catch (e) {
       pane.innerHTML = '<div class="railstub">Screen panel unavailable.</div>';
@@ -1076,6 +1469,10 @@
     };
     var ref = pane.querySelector("#desk-refresh");
     if (ref) ref.onclick = function () { mountScreenRail(true); };
+    // "Send to agent": idempotent, so re-running it after every re-render is safe
+    if (typeof window.deskWireCompose === "function") {
+      try { window.deskWireCompose(pane, function () { mountScreenRail(true); }); } catch (e) {}
+    }
     var strip = pane.querySelectorAll(".desk-strip img");
     for (var i = 0; i < strip.length; i++) {
       strip[i].onclick = function () {
@@ -1117,10 +1514,43 @@
     if (t) t.textContent = "Claude dialogues" + (n ? " · " + n : "");
     if ($("ag-deep") && $("ag-deep").classList.contains("open")) renderDeepList();
   }
+  // The list is polled every 12 s while the sheet is open (R2-39): it is only
+  // rebuilt when the set of calls changed (keyed by id + ts — entries are
+  // immutable once written), and a rebuild keeps the rows the user expanded
+  // and the row they were reading where it was on screen.
+  function dcKeys(calls) {
+    var seen = Object.create(null), out = [];
+    for (var i = 0; i < calls.length; i++) {
+      var c = calls[i] || {};
+      var k = (c.id != null ? String(c.id) : "") + "@" + (c.ts != null ? String(c.ts) : "");
+      seen[k] = (seen[k] || 0) + 1;
+      out.push(k + "#" + seen[k]);
+    }
+    return out;
+  }
+  function dcRowByKey(list, k) {
+    var rows = list.querySelectorAll(".dcall");
+    for (var i = 0; i < rows.length; i++) if (rows[i].getAttribute("data-k") === k) return rows[i];
+    return null;
+  }
   function renderDeepList() {
     var list = $("ag-deep-list"); if (!list) return;
     var calls = window.__claudeRecent || [];
-    if (!calls.length) { list.innerHTML = '<div class="railstub">No deep escalations yet. When the agent asks Claude to reason, the full exchange appears here.</div>'; return; }
+    var keys = dcKeys(calls), sig = keys.join("\n");
+    if (list.__dcSig === sig) return;                 // nothing new: leave the DOM alone
+    if (!calls.length) { list.innerHTML = '<div class="railstub">No deep escalations yet. When the agent asks Claude to reason, the full exchange appears here.</div>'; list.__dcSig = sig; return; }
+    // what to keep: expanded rows, the focused row head, and the first row in view + its offset
+    var open = Object.create(null), st = list.scrollTop || 0, anchor = null, lt = 0, old = list.querySelectorAll(".dcall"), j;
+    for (j = 0; j < old.length; j++) if (old[j].classList.contains("open")) open[old[j].getAttribute("data-k")] = true;
+    var fk = null, ae = document.activeElement;
+    for (j = 0; j < old.length; j++) if (ae && old[j].contains(ae)) { fk = old[j].getAttribute("data-k"); break; }
+    try {
+      lt = list.getBoundingClientRect().top;
+      for (j = 0; j < old.length; j++) {
+        var b = old[j].getBoundingClientRect();
+        if (b.height && b.bottom > lt) { anchor = { k: old[j].getAttribute("data-k"), off: b.top - lt }; break; }
+      }
+    } catch (e) { anchor = null; }
     var h = "";
     for (var i = 0; i < calls.length; i++) {
       var c = calls[i] || {};
@@ -1128,31 +1558,94 @@
       var task = (c.task || "").trim() || "(no task)";
       var resp = bad ? (c.error || c.response || "Claude did not answer.") : (c.response || "(empty response)");
       var secs = c.ms ? (c.ms / 1000).toFixed(c.ms < 10000 ? 1 : 0) + "s" : "";
-      h += '<div class="dcall' + (bad ? " err" : "") + '" data-i="' + i + '">'
-        + '<div class="dc-head">'
+      var on = open[keys[i]] === true;
+      h += '<div class="dcall' + (bad ? " err" : "") + (on ? " open" : "") + '" data-i="' + i + '" data-k="' + esc(keys[i]) + '">'
+        + '<button type="button" class="dc-head" aria-expanded="' + (on ? "true" : "false") + '" aria-controls="ag-dc-' + i + '">'
         + '<span class="dc-task">' + esc(task) + '</span>'
         + '<span class="dc-model">' + esc(c.model || c.depth || "claude") + '</span>'
         + '<span class="dc-meta">' + esc([t12(c.ts), secs].filter(Boolean).join(" · ")) + '</span>'
-        + '</div>'
-        + '<div class="dc-body">'
+        + '</button>'
+        + '<div class="dc-body" id="ag-dc-' + i + '">'
         + '<div class="dc-k">Asked Claude</div><div class="dc-q">' + esc(task) + '</div>'
         + '<div class="dc-k">' + (bad ? "Result" : "Claude · " + esc(c.depth || "deep")) + '</div><div class="dc-a">' + esc(resp) + '</div>'
         + '</div></div>';
     }
     list.innerHTML = h;
+    list.__dcSig = sig;                               // only once the rows are really there
     var rows = list.querySelectorAll(".dcall");
-    for (var j = 0; j < rows.length; j++) {
-      rows[j].querySelector(".dc-head").addEventListener("click", function () { this.parentNode.classList.toggle("open"); });
+    for (j = 0; j < rows.length; j++) {
+      rows[j].querySelector(".dc-head").addEventListener("click", function () {
+        var row = this.parentNode;
+        row.classList.toggle("open");
+        this.setAttribute("aria-expanded", row.classList.contains("open") ? "true" : "false");
+      });
+    }
+    list.scrollTop = st;
+    if (anchor) {
+      try {
+        var nr = dcRowByKey(list, anchor.k);
+        if (nr) list.scrollTop = st + (nr.getBoundingClientRect().top - lt - anchor.off);
+      } catch (e) {}
+    }
+    // the rebuild replaced the focused head: hand focus to its replacement
+    if (fk) {
+      var fr = dcRowByKey(list, fk), fh = fr && fr.querySelector(".dc-head");
+      if (fh) { try { fh.focus({ preventScroll: true }); } catch (e) {} }
     }
   }
+  var deepOpener = null;
+  function deepIsOpen() { var dm = $("ag-deep"); return !!dm && dm.classList.contains("open"); }
   function openDeep() {
     var dm = $("ag-deep"); if (!dm) return;
+    var was = dm.classList.contains("open");
     renderDeepList();
     dm.classList.add("open");
+    if (!was) {
+      var a = document.activeElement;
+      deepOpener = (a && a !== document.body && !dm.contains(a)) ? a : null;
+      var x = $("ag-deep-x");
+      if (x) { try { x.focus({ preventScroll: true }); } catch (e) {} }
+    }
     loadClaudeRecent();
     if (!REDUCE) { try { agAnimate(dm.querySelector(".dsheet"), { opacity: [0, 1], transform: ["translateY(10px)", "none"] }, { duration: 0.4, easing: SPRING }); } catch (e) {} }
   }
-  function closeDeep() { var dm = $("ag-deep"); if (dm) dm.classList.remove("open"); }
+  function closeDeep() {
+    var dm = $("ag-deep"); if (!dm) return;
+    var was = dm.classList.contains("open");
+    dm.classList.remove("open");
+    if (!was) return;
+    // focus goes back where it came from (the Claude dialogues button)
+    var back = (deepOpener && deepOpener.isConnected) ? deepOpener : $("ag-deepbtn");
+    deepOpener = null;
+    var a = document.activeElement;
+    if (back && (!a || a === document.body || dm.contains(a))) { try { back.focus({ preventScroll: true }); } catch (e) {} }
+  }
+  function deepFocusables(root) {
+    var all = root.querySelectorAll("button,input,select,textarea,a[href],[tabindex]"), out = [];
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      if (el.tabIndex >= 0 && !el.disabled && !(el.closest && el.closest("[hidden]"))) out.push(el);
+    }
+    return out;
+  }
+  function onDeepKey(e) {
+    if (e.defaultPrevented || !deepIsOpen()) return;
+    var dm = $("ag-deep"), sheet = dm.querySelector(".dsheet") || dm;
+    if (e.key === "Escape" || e.key === "Esc") {
+      e.preventDefault();
+      closeDeep();
+      return;
+    }
+    if (e.key === "Tab") {               // keep Tab inside the open sheet
+      var f = deepFocusables(sheet);
+      if (!f.length) { e.preventDefault(); return; }
+      var i = f.indexOf(document.activeElement);
+      if (i < 0 || (e.shiftKey && i === 0) || (!e.shiftKey && i === f.length - 1)) {
+        e.preventDefault();
+        f[e.shiftKey ? (i <= 0 ? f.length - 1 : 0) : 0].focus();
+      }
+    }
+  }
 
   // ==========================================================================
   // On-demand "Escalate to Claude" on a normal bot reply (display/answer-only)
@@ -1268,7 +1761,7 @@
     if (_deepDone[jid]) return;
     _deepDone[jid] = true;
     fillDeepCard(card, d);
-    setSigil("idle"); setStateLine("Watching", idleDetail());
+    setSigil("idle"); setStateLine(idleLabel(), idleDetail());
     if (d.ok) { try { loadClaudeRecent(); } catch (e) {} }
     else if (!d.refused) {                             // unavailable → offer manual retry
       bubble.removeAttribute("data-esc"); try { decorateEscalate(); } catch (e) {}
@@ -1296,7 +1789,7 @@
     } catch (e) { d = { ok: false, error: "Could not reach Claude." }; }
     var meta = card.querySelector(".dk-meta");
     var body = card.querySelector(".dk-body");
-    setSigil("idle"); setStateLine("Watching", idleDetail());
+    setSigil("idle"); setStateLine(idleLabel(), idleDetail());
     if (d && d.ok && (d.text || d.response)) {
       var secs = d.ms ? (d.ms / 1000).toFixed(d.ms < 10000 ? 1 : 0) + "s" : "";
       if (meta) meta.textContent = [esc(d.model || "opus"), secs, t12(Date.now() / 1000)].filter(Boolean).join(" · ");
@@ -1332,6 +1825,7 @@
     // keep the Local AI panel live in the Agent left rail
     if (!window.__agentAiTimer) window.__agentAiTimer = setInterval(function () {
       if (isAgentVisible() && typeof window.renderAIInfo === "function") window.renderAIInfo();
+      if (isAgentVisible()) { try { refreshIdle(); } catch (e) {} }
     }, 5000);
   }
   function stopAgentPolls() {
@@ -1358,9 +1852,11 @@
 
   function boot() {
     buildShell();
+    try { upgradeSideSections(); } catch (e) {}
     addTab();
     wrapSetView();
     wrapAgentState();
+    try { watchAiRows(); refreshIdle(); } catch (e) {}
     var target = migrateStoredView();
     if (target === "agent" && typeof window.setView === "function") window.setView("agent");
     document.addEventListener("visibilitychange", function () {
@@ -1383,6 +1879,10 @@
     openRail: openRail, screenLive: screenLive,
     loadClaudeRecent: loadClaudeRecent, renderDeepList: renderDeepList,
     openDeep: openDeep, closeDeep: closeDeep,
-    decorateEscalate: decorateEscalate, doEscalate: doEscalate, t12: t12
+    decorateEscalate: decorateEscalate, doEscalate: doEscalate, t12: t12,
+    upgradeSideSections: upgradeSideSections, sideState: sideState,
+    modelState: modelState, idleLabel: idleLabel, idleDetail: idleDetail,
+    setFacts: function (a) { _tickFacts = Array.isArray(a) ? a.slice() : []; },
+    stateFact: stateFact, refreshIdle: refreshIdle, aiStateNote: aiStateNote
   };
 })();

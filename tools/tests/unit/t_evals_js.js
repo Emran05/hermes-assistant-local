@@ -38,7 +38,10 @@ check("hhmm12(13,0)", H.hhmm12(13, 0) === "1:00 PM", H.hhmm12(13, 0));
 check("hhmm12(0,5)", H.hhmm12(0, 5) === "12:05 AM", H.hhmm12(0, 5));
 check("hhmm12(12,0)", H.hhmm12(12, 0) === "12:00 PM", H.hhmm12(12, 0));
 check("when(0)", H.when(0) === "never", H.when(0));
-const now = Date.now();
+// today at local NOON, never the real clock: "1 h ago" must be today and
+// "26 h ago" yesterday, and the +120 s run must share its calendar day (the
+// real clock broke these between midnight and 02:00, and at 23:58)
+const now = (function () { const d = new Date(); d.setHours(12, 0, 0, 0); return d.getTime(); })();
 check("when(today)", /^today at /.test(H.when(now / 1000 - 3600, now)), H.when(now / 1000 - 3600, now));
 check("when(yesterday)", /^yesterday at /.test(H.when(now / 1000 - 26 * 3600, now)),
       H.when(now / 1000 - 26 * 3600, now));

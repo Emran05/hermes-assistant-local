@@ -20,9 +20,10 @@
 #   bash app/build-dictation.sh                      # build into app/build
 #   HERMES_SIGN_ID="Hermes Dev" bash app/...         # sign with a real identity
 #
-# NOTE: app/build-app.sh clears the WHOLE app/build directory before it compiles,
-# so building the main app removes this bundle. Re-run this script afterwards —
-# and expect to re-grant Microphone and Accessibility, since that is a rebuild.
+# NOTE: app/build-app.sh removes only its own bundle and icon files from
+# app/build, so building the main app leaves this bundle alone (before the
+# 2026-11-09 audit E126 fix it cleared the whole folder and deleted it).
+# Rebuilding THIS helper still means re-granting Microphone and Accessibility.
 #
 # The bundle is left in app/build.  Nothing is installed and nothing is
 # launched: the helper must be started by the user (double-click, or "Start at

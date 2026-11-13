@@ -88,6 +88,7 @@ def make_ns(scratch, spawn_fn):
         _upd_state_write=lambda obj: None,
         _upd_state_read=lambda: {},
         _upd_version=lambda: "a08-test",
+        _upd_chat_busy=lambda: False,   # no chat turn running (E18 has its own suite)
     )
 
 

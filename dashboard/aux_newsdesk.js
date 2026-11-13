@@ -6,6 +6,21 @@
 (function () {
   "use strict";
   function E(s) { return (typeof esc === "function") ? esc(s) : String(s == null ? "" : s); }
+  // Feed URLs are untrusted (B18.2): a raw <a href> is a navigation the app
+  // shell hands to macOS, which opens ANY scheme. Only an absolute http(s)
+  // URL becomes a link — through index.html's httpUrl() — and it opens with
+  // window.open, exactly like wireLinks(); anything else is plain text.
+  function U(u) { return (typeof httpUrl === "function") ? httpUrl(u) : ""; }
+  function wireOpen(root) {
+    var as = root.querySelectorAll("a[data-url]");
+    for (var i = 0; i < as.length; i++) {
+      as[i].onclick = function (e) {
+        e.preventDefault(); e.stopPropagation();
+        var u = U(this.getAttribute("data-url"));
+        if (u) window.open(u, "_blank", "noopener");
+      };
+    }
+  }
 
   // lean → accent colour (matches the World-Brief lean tags)
   var LEAN_C = { factual: "#6b8afd", public: "#14b8a6", left: "#3b82f6",
@@ -56,14 +71,16 @@
           ' <span class="w-sub" style="font-weight:400">· ' + E(s.sources) + " outlets</span></div>";
         (s.angles || []).forEach(function (a) {
           var c = LEAN_C[a.lean] || "var(--muted)";
+          var u = U(a.url), tag = u ? 'a href="#" data-url="' + E(u) + '"' : "span";
           h += '<div style="display:flex;gap:8px;align-items:baseline;margin:4px 0">' +
             '<span style="flex:0 0 auto;color:' + c + ';font-weight:600;font-size:11px;min-width:54px">' + E(a.lean) + "</span>" +
-            '<a href="' + E(a.url) + '" onclick="event.stopPropagation()" style="color:var(--ink);text-decoration:none;font-size:13px">' +
-            E(a.title) + ' <span class="w-sub">— ' + E(a.source) + "</span></a></div>";
+            "<" + tag + ' style="color:var(--ink);text-decoration:none;font-size:13px">' +
+            E(a.title) + ' <span class="w-sub">— ' + E(a.source) + "</span></" + (u ? "a" : "span") + "></div>";
         });
         h += "</div>";
       });
       el.innerHTML = h;
+      wireOpen(el);
     };
   }
 

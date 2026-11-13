@@ -5,6 +5,7 @@ Nothing here touches the real ~/.hermes."""
 import json
 import os
 import shutil
+import sys
 import tempfile
 import threading
 
@@ -12,6 +13,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.environ.get("HERMES_REPO") or os.path.dirname(
     os.path.dirname(os.path.dirname(_HERE)))
 AUX = os.path.join(REPO, "dashboard", "aux_toolbudget.py")
+sys.path.insert(0, os.path.join(REPO, "tools", "tests", "lib"))
+import server_real  # noqa: E402  the REAL settings_update & co (C84)
 
 SB = tempfile.mkdtemp(prefix="tb-aux-")
 os.makedirs(os.path.join(SB, ".hermes", "dashboard"), exist_ok=True)
@@ -43,33 +46,14 @@ def write_json(path, obj):
 _STATE_LOCK = threading.Lock()
 
 
-def settings_update(mutate_fn):
-    """Stand-in for server.py's settings_update() — ONE locked
-    read-modify-write of settings.json, the only way an aux module is allowed
-    to write it since the 2026-09-10 audit (A01)."""
-    with _STATE_LOCK:
-        s = read_json(SETTINGS, {})
-        if not isinstance(s, dict):
-            s = {}
-        out = mutate_fn(s)
-        if isinstance(out, dict):
-            s = out
-        write_json(SETTINGS, s)
-        return json.loads(json.dumps(s))
-
-
-
 G = {
     "__name__": "aux_toolbudget",
     "HOME": SB,
     "HERE": os.path.join(REPO, "dashboard"),
     "DATA": DATA,
-    "SETTINGS_FILE": SETTINGS,
-    "_state_lock": _STATE_LOCK,
-    "settings_update": settings_update,
-    "get_settings": lambda: read_json(SETTINGS, {}),
-    "read_json": read_json,
-    "write_json": write_json,
+    # server.py's own settings_update / settings_set / get_settings /
+    # read_json / write_json, sharing the module's _state_lock (C84)
+    **server_real.settings_api(SETTINGS, _STATE_LOCK),
     "register_get": lambda p, f: GET_ROUTES.__setitem__(p, f),
     "register_post": lambda p, f: POST_ROUTES.__setitem__(p, f),
 }
@@ -158,17 +142,35 @@ check("empty inline list", read_enabled("plugins:\n  enabled: []\n") == [])
 check("absent block", read_enabled("model:\n  default: x\n") == [])
 check("stops at the next top-level key",
       read_enabled("plugins:\n  enabled:\n    - a\nmodel:\n  x: 1\n") == ["a"])
-# The installed config is a bonus signal (it is the only hand-written YAML
-# around); absent — a fresh checkout, CI — the reader is already covered by
-# the synthetic cases above.
-_real_cfg = os.path.join(os.path.expanduser("~"), ".hermes", "config.yaml")
-if os.path.exists(_real_cfg):
-    _txt = open(_real_cfg).read()
-    _declares = "plugins:" in _txt and "enabled:" in _txt
-    check("the installed config's plugin list parses",
-          bool(read_enabled(_txt)) == _declares, read_enabled(_txt))
-else:
-    print("  skip the installed ~/.hermes/config.yaml is not present")
+# A config.yaml in the shape Hermes and install.sh write (nested maps, a
+# custom_providers list of maps, comments, quoted strings, the plugin list in
+# block form).  This used to read the owner's installed ~/.hermes/config.yaml
+# when present; a unit suite never reads owner data (S2 seam), and that file
+# carries the model api_key.  This suite no longer skips, and its
+# expected-skip entry is gone from ci.yml.
+_cfg = """# Hermes Agent config
+model:
+  default: mlx-community/Qwen3.8-27B-4bit
+  base_url: http://127.0.0.1:8080/v1
+  api_key: "sk-fixture-not-a-key"
+  context_length: 65536
+custom_providers:
+  - name: bg
+    base_url: http://127.0.0.1:8081/v1
+    model: mlx-community/Qwen3.5-9B-4bit
+approvals:
+  mode: manual
+plugins:
+  # linked by install.sh / update.sh
+  enabled:
+    - tool-budget
+    - approval-gate
+    - loop-breaker
+tts:
+  provider: local
+"""
+check("a Hermes-shaped config's plugin list parses",
+      read_enabled(_cfg) == ["tool-budget", "approval-gate", "loop-breaker"], read_enabled(_cfg))
 
 print("\n=== D. settings read/write validation ===")
 S = G["_tb_settings"]
@@ -233,12 +235,20 @@ check("not enabled in the sandbox config", p["enabled_in_config"] is False)
 
 print("\n=== G. stats read back off a real-looking log ===")
 today = __import__("datetime").date.today().isoformat()
+# today's rows sit at 00:00:01-03, i.e. always BEFORE the install below stamps
+# tool-budget-enabled-at; at 09:00-09:02 (the old values) a run before 09:02
+# saw them as evidence the plugin was already live (restart_required false).
+# In the first 10 s of a day, wait so "now" is after them.
+_tm = __import__("time")
+_into = (lambda t: t.tm_hour * 3600 + t.tm_min * 60 + t.tm_sec)(_tm.localtime())
+if _into < 10:
+    _tm.sleep(10 - _into)
 with open(os.path.join(DATA, "tool-budget.jsonl"), "w") as fh:
     fh.write('{"ts":"2020-01-01T00:00:00","tool":"terminal","kept_chars":10,"omitted_chars":90,"est_tokens_saved":25,"spill_path":"/x","session":"old"}\n')
     fh.write('{ this line is corrupt\n')
-    fh.write('{"ts":"%sT09:00:00","tool":"read_file","kept_chars":6000,"omitted_chars":35000,"est_tokens_saved":9722,"spill_path":"/a","session":"s1"}\n' % today)
-    fh.write('{"ts":"%sT09:01:00","tool":"terminal","kept_chars":5900,"omitted_chars":40000,"est_tokens_saved":11111,"spill_path":"","session":"s1"}\n' % today)
-    fh.write('{"ts":"%sT09:02:00","tool":"web_extract","kept_chars":6000,"omitted_chars":12000,"est_tokens_saved":3333,"spill_path":"/c","session":"s2"}\n' % today)
+    fh.write('{"ts":"%sT00:00:01","tool":"read_file","kept_chars":6000,"omitted_chars":35000,"est_tokens_saved":9722,"spill_path":"/a","session":"s1"}\n' % today)
+    fh.write('{"ts":"%sT00:00:02","tool":"terminal","kept_chars":5900,"omitted_chars":40000,"est_tokens_saved":11111,"spill_path":"","session":"s1"}\n' % today)
+    fh.write('{"ts":"%sT00:00:03","tool":"web_extract","kept_chars":6000,"omitted_chars":12000,"est_tokens_saved":3333,"spill_path":"/c","session":"s2"}\n' % today)
 p = get(Ctx({}))
 t = p["stats"]["today"]
 check("corrupt line skipped, yesterday excluded", t["calls"] == 3, t)

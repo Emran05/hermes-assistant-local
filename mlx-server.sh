@@ -27,6 +27,17 @@ set -euo pipefail
 # byte-identical to before.
 GATE_FILE="$HOME/.hermes/dashboard/model-autostart-off"
 START_TOKEN="$HOME/.hermes/dashboard/model-start-ok"
+# E102 (2026-11-09 audit): the owner's Pause wins over EVERY start, always-on
+# included. launchd forgets a bootout at logout/reboot and install-services.sh
+# re-bootstraps the job, so on an always-on install the app's blind kickstart
+# at launch used to load the model while agent-paused was on disk (and the
+# dashboard's memory guard and idle loop both stand down while paused). Only
+# the dashboard's Resume removes the marker — before it mints a start token.
+PAUSE_FILE="$HOME/.hermes/dashboard/agent-paused"
+if [ -e "$PAUSE_FILE" ]; then
+  echo "[mlx-server] the agent is paused ($PAUSE_FILE) — not loading the model; Resume in the dashboard starts it"
+  exit 0
+fi
 if [ "${HERMES_MODEL_ALWAYS_ON:-0}" = "1" ]; then
   echo "[mlx-server] HERMES_MODEL_ALWAYS_ON=1 — skipping the on-demand gate"
 else
@@ -94,13 +105,18 @@ TEMPLATE_ARGS="$(cat "$TEMPLATE_ARGS_FILE" 2>/dev/null || echo "{}")"
 BACKEND_FILE="$HOME/.hermes/dashboard/server-backend"
 VLM_PY="$HOME/.hermes/mlx-vlm-venv/bin/python"
 BACKEND="mlx_lm"; DRAFT_MODEL=""; DRAFT_KIND="mtp"; DRAFT_BLOCK="3"
-VLM_THINK="0"; VLM_EFFORT=""; HF_OFFLINE="0"
-if [ -f "$BACKEND_FILE" ] && [ -x "$VLM_PY" ]; then
+VLM_THINK="0"; VLM_EFFORT=""; HF_OFFLINE="0"; TRUST_REMOTE="0"
+MODEL_SUBFOLDER=""; SAMPLING_JSON=""; BACKEND_MODEL=""
+# Round 3: the roster is the ONLY source of these two — never an inherited env.
+unset MLX_VLM_MODEL_SUBFOLDER MLX_VLM_SAMPLING_DEFAULTS
+if [ -f "$BACKEND_FILE" ]; then
   eval "$(python3 - "$BACKEND_FILE" <<'PYEOF'
 import json, shlex, sys
 try:
     c = json.load(open(sys.argv[1]))
 except Exception:
+    c = {}
+if not isinstance(c, dict):
     c = {}
 print("BACKEND=" + shlex.quote(str(c.get("backend") or "mlx_lm")))
 print("DRAFT_MODEL=" + shlex.quote(str(c.get("draft_model") or "")))
@@ -109,9 +125,37 @@ print("DRAFT_BLOCK=" + shlex.quote(str(c.get("draft_block_size") or 3)))
 print("VLM_THINK=" + ("1" if c.get("enable_thinking") else "0"))
 print("VLM_EFFORT=" + shlex.quote(str(c.get("reasoning_effort") or "")))
 print("HF_OFFLINE=" + ("1" if c.get("hf_offline") else "0"))
+print("TRUST_REMOTE=" + ("1" if c.get("trust_remote_code") is True else "0"))
+# round 3 — forwarded as-is; mlx-vlm-launch.py validates both strictly
+sub = c.get("model_subfolder")
+print("MODEL_SUBFOLDER=" + shlex.quote(sub if isinstance(sub, str) else ""))
+smp = c.get("sampling")
+print("SAMPLING_JSON=" + shlex.quote(json.dumps(smp) if isinstance(smp, dict) and smp else ""))
+bm = c.get("model")
+print("BACKEND_MODEL=" + shlex.quote(bm if isinstance(bm, str) else ""))
 PYEOF
 )"
 fi
+# Round 3: server-backend names the model it describes. A file written for a
+# DIFFERENT model than active-model (a hand edit, a half-applied switch) must
+# not send this model's load into that one's subfolder or sampling.
+if [ -n "$BACKEND_MODEL" ] && [ "$BACKEND_MODEL" != "$MODEL" ] && \
+   { [ -n "$MODEL_SUBFOLDER" ] || [ -n "$SAMPLING_JSON" ]; }; then
+  echo "[mlx-server] server-backend describes $BACKEND_MODEL, not $MODEL — ignoring its model_subfolder/sampling" >&2
+  MODEL_SUBFOLDER=""; SAMPLING_JSON=""
+fi
+# Read for BOTH backends (trust_remote_code applies to mlx-lm too); a venv
+# that disappeared after the switch still means mlx-lm.
+[ -x "$VLM_PY" ] || BACKEND="mlx_lm"
+
+# --- Remote code (2026-10-08 audit B03 / F01) ------------------------------
+# Both servers used to start with --trust-remote-code unconditionally, so a
+# repo whose tokenizer_config/config carries an `auto_map` ran its own Python
+# in this process. Off unless the roster entry has a literal
+# `trust_remote_code: true` (copied into server-backend by the dashboard on
+# switch). None of the shipped Qwen entries needs it: no snapshot has an
+# auto_map or a *.py file.
+[ "$TRUST_REMOTE" = "1" ] && echo "[mlx-server] roster trust_remote_code=true — this model's own Python will run"
 
 # Roster `hf_offline` (via server-backend): the model is fully cached but its
 # repo carries variants we deliberately did NOT download (orcarouter's
@@ -121,11 +165,43 @@ fi
 # MLX_VLM_LOCAL_ONLY makes mlx-vlm-launch.py resolve repo ids to the cached
 # snapshot itself: huggingface_hub >=1.x raises IncompleteSnapshotError for a
 # partial mirror even offline, so HF_HUB_OFFLINE alone is not enough (verified
-# 2026-09-03). The mlx-lm fallback (venv missing) has no such shim — this model
-# needs the venv.
+# 2026-09-03). The mlx-lm fallback now goes through the same launcher, which
+# applies the same resolution to mlx_lm.utils._download (C49).
+#
+# Offline whenever the weights are complete (2026-10-21 audit C49): every
+# other start used to call snapshot_download() for the model AND the drafter,
+# i.e. revalidate the repo at huggingface.co on each wake and silently pull
+# whatever upstream had pushed since. `--local-ready` (stdlib, no mlx import)
+# checks config.json + every shard of the model and the drafter. Updates then
+# come only from the dashboard's download action (disk check included). An
+# incomplete snapshot — a download still in flight, or a model never fetched —
+# keeps the old online path.
+#
+# Roster `model_subfolder` (round 3): the weights live in a repo SUBFOLDER
+# (PocketAiHub's 4bit/ beside 2bit/6bit/8bit/bf16 in one 134 GB repo). The
+# launcher resolves the launch id to <snapshot>/<subfolder> for the loader,
+# --local-ready and the C130 pin; a subfolder model is ALWAYS offline (online,
+# get_model_path would snapshot_download every variant of the repo).
+OFFLINE_WHY="roster hf_offline"
+if [ -n "$MODEL_SUBFOLDER" ]; then
+  export MLX_VLM_MODEL_SUBFOLDER="$MODEL_SUBFOLDER"
+  if [ "$HF_OFFLINE" != 1 ]; then HF_OFFLINE=1; OFFLINE_WHY="roster model_subfolder"; fi
+  echo "[mlx-server] model_subfolder=$MODEL_SUBFOLDER — loading <snapshot>/$MODEL_SUBFOLDER"
+fi
+# Roster `sampling` (round 3): request defaults the launcher applies to every
+# request that does not set the field itself (mlx_vlm and mlx-lm alike).
+if [ -n "$SAMPLING_JSON" ]; then
+  export MLX_VLM_SAMPLING_DEFAULTS="$SAMPLING_JSON"
+  echo "[mlx-server] roster sampling defaults: $SAMPLING_JSON"
+fi
+READY_ARGS=("$MODEL")
+[ "$BACKEND" = "mlx_vlm" ] && [ -n "$DRAFT_MODEL" ] && READY_ARGS+=("$DRAFT_MODEL")
+if [ "$HF_OFFLINE" != 1 ] && python3 "$(dirname "$0")/mlx-vlm-launch.py" --local-ready "${READY_ARGS[@]}" 2>/dev/null; then
+  HF_OFFLINE=1; OFFLINE_WHY="weights complete on disk"
+fi
 if [ "$HF_OFFLINE" = 1 ]; then
   export HF_HUB_OFFLINE=1 MLX_VLM_LOCAL_ONLY=1
-  echo "[mlx-server] HF_HUB_OFFLINE=1 + MLX_VLM_LOCAL_ONLY=1 (roster hf_offline) — local cache only"
+  echo "[mlx-server] HF_HUB_OFFLINE=1 + MLX_VLM_LOCAL_ONLY=1 ($OFFLINE_WHY) — local cache only"
 fi
 
 # --- RAM-aware prompt-cache sizing (1.0.3) -----------------------------------
@@ -162,7 +238,8 @@ fi
 
 if [ "$BACKEND" = "mlx_vlm" ]; then
   echo "Starting MLX-VLM server: $MODEL on :$PORT draft=$DRAFT_MODEL ($DRAFT_KIND, block $DRAFT_BLOCK) thinking=$VLM_THINK effort=$VLM_EFFORT"
-  VLM_ARGS=(--model "$MODEL" --host 127.0.0.1 --port "$PORT" --max-tokens 4096 --trust-remote-code)
+  VLM_ARGS=(--model "$MODEL" --host 127.0.0.1 --port "$PORT" --max-tokens 4096)
+  [ "$TRUST_REMOTE" = "1" ] && VLM_ARGS+=(--trust-remote-code)
   [ -n "$DRAFT_MODEL" ] && VLM_ARGS+=(--draft-model "$DRAFT_MODEL" --draft-kind "$DRAFT_KIND" --draft-block-size "$DRAFT_BLOCK")
   # thinking on → --enable-thinking (+ effort default via the launcher shim; the
   # template's own default is xhigh) and a hard token budget as a safety net.
@@ -181,18 +258,16 @@ if [ "$BACKEND" = "mlx_vlm" ]; then
 fi
 
 echo "Starting MLX server: $MODEL on :$PORT (ctx=$CTX) template-args=$TEMPLATE_ARGS"
-# NOTE: use `python3 -m mlx_lm server` — the `mlx_lm.server` script is NOT on
-# PATH after a user-site pip install. mlx_lm.server has no --ctx flag; context
-# is taken from the model config (Qwen3-2507 = 262k native, so 65536 is fine).
-exec python3 -m mlx_lm server \
-  --model "$MODEL" \
-  --host 127.0.0.1 \
-  --port "$PORT" \
-  --max-tokens 4096 \
-  --prompt-cache-size "$APC_ENTRIES_DEFAULT" \
-  --prompt-cache-bytes "$PROMPT_CACHE_BYTES" \
-  --chat-template-args "$TEMPLATE_ARGS" \
-  --trust-remote-code
+# NOTE: `mlx-vlm-launch.py --mlx-lm` runs exactly what `python3 -m mlx_lm
+# server` did (the `mlx_lm.server` script is NOT on PATH after a user-site pip
+# install), plus the C130 pin + request guard: upstream mlx_lm loads whatever
+# model/draft_model/adapters a request names. mlx_lm.server has no --ctx flag;
+# context is taken from the model config (Qwen3-2507 = 262k native).
+LM_ARGS=(--model "$MODEL" --host 127.0.0.1 --port "$PORT" --max-tokens 4096
+  --prompt-cache-size "$APC_ENTRIES_DEFAULT" --prompt-cache-bytes "$PROMPT_CACHE_BYTES"
+  --chat-template-args "$TEMPLATE_ARGS")
+[ "$TRUST_REMOTE" = "1" ] && LM_ARGS+=(--trust-remote-code)
+exec python3 "$(dirname "$0")/mlx-vlm-launch.py" --mlx-lm "${LM_ARGS[@]}"
 # --prompt-cache-* CAPS the in-memory KV/prompt cache so it can't grow
 # unbounded and thrash RAM (root cause of the 49GB blowup; the dashboard's
 # memory_guard is now just a backstop). Measured (P3.B3) on the 64GB machine,

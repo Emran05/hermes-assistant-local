@@ -4,7 +4,7 @@
 // existing Mind-extras entry point (window.mindExtras) instead of editing
 // index.html.  Renders one card (#mind-extra-config) into #view-mind: snapshot
 // file status + per-section drift pills, an Export button (writes
-// docs/state-snapshot.json), Preview restore (dry-run plan table) and Apply
+// ~/.hermes/dashboard/state-snapshot.json), Preview restore (dry-run plan table) and Apply
 // restore (confirm()-gated — works in the WKWebView JS-dialog fix).
 //
 // Reuses global helpers when present (esc, animate, REDUCE, renderHub) — all
@@ -83,9 +83,11 @@
     s.id = "cfg-css";
     s.textContent = [
       "#mind-extra-config .cf-arch{color:var(--muted)}",
-      ".cf-file{display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--ink);",
+      // flex-wrap (V02): the path + "size · exported <time>" no longer fit one
+      // line in the panel, and the card's overflow:hidden cut the time off
+      ".cf-file{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;font-size:12.5px;color:var(--ink);",
       "padding:9px 11px;border-radius:11px;background:var(--glass-2);border:1px solid var(--hairline);margin-bottom:12px}",
-      ".cf-file code{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--ink)}",
+      ".cf-file code{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--ink);min-width:0;overflow-wrap:anywhere}",
       ".cf-file .cf-meta{color:var(--faint);margin-left:auto;white-space:nowrap}",
       ".cf-pills{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:14px}",
       ".cf-pill{font-size:11px;font-weight:560;padding:4px 10px;border-radius:99px;",
@@ -112,6 +114,9 @@
       ".cf-chg .cf-plabel{color:var(--warn)}",
       ".cf-warn .cf-plabel{color:var(--faint)}.cf-warn .cf-pdetail{color:var(--faint)}",
       ".cf-from{color:var(--faint)}.cf-to{color:var(--ink)}",
+      ".cf-loose .cf-plabel,.cf-loose .cf-to{color:var(--bad)}",
+      ".cf-loosetag{font-size:11px;color:var(--bad);border:1px solid var(--bad);border-radius:6px;" +
+      "padding:0 5px;margin-left:6px;white-space:nowrap}",
       ".cf-empty{font-size:12px;color:var(--muted);padding:8px 2px}",
       ".cf-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}",
       ".cf-chk{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);margin-top:10px}",
@@ -154,6 +159,10 @@
   function fromTo(a, b) {
     return '<span class="cf-from">' + E(shortVal(a)).slice(0, 160) + "</span> → " +
       '<span class="cf-to">' + E(shortVal(b)).slice(0, 160) + "</span>";
+  }
+
+  function tierName(t) {
+    return t === "auto" ? "Auto" : t === "ask" ? "Ask" : t === "never" ? "Never" : String(t == null ? "" : t);
   }
 
   function cfgPlanRows(plan) {
@@ -199,7 +208,28 @@
     var P = plan.permissions;
     if (P) {
       if (P.changed) any = true;
-      rows.push(planRow("Permissions", E(P.changed ? "policy differs" : "in sync"), !!P.changed));
+      var prows = Array.isArray(P.rows) ? P.rows : null;
+      if (prows && prows.length) {
+        // E112: one row per class/pattern whose effective tier changes;
+        // anything that gets LESS strict is flagged, loosened rows first.
+        prows.forEach(function (r) {
+          var lbl = (r.kind === "pattern" ? "pattern: " : "trust: ") + String(r.label || r.id || "");
+          rows.push('<tr class="cf-prow cf-chg' + (r.loosened ? " cf-loose" : "") + '">' +
+            '<td class="cf-plabel">' + E(lbl) + "</td>" +
+            '<td class="cf-pdetail">' + fromTo(tierName(r.from), tierName(r.to)) +
+            (r.loosened ? ' <span class="cf-loosetag">less strict</span>' : "") +
+            "</td></tr>");
+        });
+      } else {
+        rows.push(planRow("Permissions", E(P.changed ? "policy differs" : "in sync"), !!P.changed));
+      }
+      (Array.isArray(P.ignored) ? P.ignored : []).forEach(function (w) {
+        rows.push(warnRow("Permissions: ignored " + w));
+      });
+      if (P.lands_untrusted)
+        rows.push(warnRow("The restored policy lands untrusted: every Auto stays suspended " +
+          "until you use Review & re-trust in Settings › Trust. Entries the snapshot " +
+          "does not name are kept."));
     }
 
     var A = plan.agent_config;
@@ -268,14 +298,15 @@
 
     // status line
     if (file.exists) {
-      html += '<div class="cf-file">' + ARCHIVE_SVG + "<code>" + E(file.path || "docs/state-snapshot.json") +
+      html += '<div class="cf-file">' + ARCHIVE_SVG + "<code>" + E(file.path || "~/.hermes/dashboard/state-snapshot.json") +
         "</code>" + (file.valid === false ? ' <span style="color:var(--bad)">invalid</span>' : "") +
+        (file.legacy ? ' <span class="cf-meta">(the old location — the next Export goes to ~/.hermes/dashboard)</span>' : "") +
         '<span class="cf-meta">' + humanBytes(file.bytes) +
         (file.exported_at ? " · exported " + E(fmt12(file.exported_at)) : "") + "</span></div>";
     } else {
       html += '<div class="cf-file">' + ARCHIVE_SVG +
-        "<span>No snapshot yet — Export writes <code>docs/state-snapshot.json</code> so your layout, " +
-        "watchlists, model roster and permission policy are versioned with the repo.</span></div>";
+        "<span>No snapshot yet — Export writes <code>~/.hermes/dashboard/state-snapshot.json</code> so your layout, " +
+        "watchlists, model roster and permission policy can be restored later.</span></div>";
     }
 
     // drift pills
@@ -396,6 +427,19 @@
       var res;
       try { res = await postJSON("/api/config/import", body); }
       catch (e) { res = { ok: false, error: "network error" }; }
+      // C25: the server refuses when the promised pre-restore backup could
+      // not be written. Say why, and restore only on an explicit second yes.
+      if (res && res.ok === false && res.backup_failed === true) {
+        if (rMsg) { rMsg.className = "cf-msg bad"; rMsg.textContent = res.error || "Could not write the pre-restore backup."; }
+        if (typeof confirm === "function" &&
+            confirm((res.error || "Could not write the pre-restore backup.") +
+                    "\n\nRestore anyway, with NO backup of the current state?")) {
+          body.force = true;
+          if (rMsg) { rMsg.className = "cf-msg"; rMsg.textContent = "Applying without a backup…"; }
+          try { res = await postJSON("/api/config/import", body); }
+          catch (e) { res = { ok: false, error: "network error" }; }
+        }
+      }
       applyBtn.disabled = false;
       if (!res || res.ok === false) {
         if (rMsg) { rMsg.className = "cf-msg bad"; rMsg.textContent = (res && res.error) || "Restore failed."; }
@@ -426,7 +470,7 @@
     if (a.models) parts.push("models");
     if (a.active_model && a.active_model !== "skipped") parts.push("active: " + a.active_model);
     if (a.agent_config && a.agent_config.length) parts.push("agent config");
-    if (a.permissions) parts.push("permissions");
+    if (a.permissions === true) parts.push("permissions (untrusted until re-trusted)");
     var msg = parts.length ? "Restored " + parts.join(" · ") + "." : "Nothing to restore.";
     if (res.warnings && res.warnings.length) msg += " (" + res.warnings.join("; ") + ")";
     if (res.backup) msg += " Backup: " + res.backup;

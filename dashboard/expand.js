@@ -15,39 +15,41 @@ EXPAND_RENDER.markets = function(el, d){
           : (d.state==='POST') ? 'After hours'
           : 'At close · '+dt.toLocaleDateString([], {month:'short', day:'numeric'});}
 
-  function label(t){return '<div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;margin:0 0 8px">'+esc(t)+'</div>';}
+  function label(t){return '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;margin:0 0 8px">'+esc(t)+'</div>';}
   function px(v){return v!=null ? v.toLocaleString(undefined,{maximumFractionDigits:2}) : '—';}
-  function chip(q){var u=(q.pct||0)>=0;return '<span class="num delta '+(u?'up':'down')+'" style="font-weight:660;font-size:12px">'+(u?'+':'')+(q.pct!=null?q.pct:0)+'%</span>';}
-  function spark(q,h){return miniSpark(q.spark,(q.pct||0)>=0).replace('class="qspark"','class="qspark" style="width:100%;height:'+h+'px;display:block"');}
+  // signs come from the value printed (index.html's pctTxt/signedTxt/deltaCls):
+  // a flat day reads 0.00% in a neutral colour, never "+0%" / "+-0.01"
+  function chip(q){return '<span class="num delta '+deltaCls(q.pct)+'" style="font-weight:660;font-size:12px">'+pctTxt(q.pct!=null?q.pct:0)+'</span>';}
+  function spark(q,h){return miniSpark(q.spark,sgnOf(q.pct)>=0).replace('class="qspark"','class="qspark" style="width:100%;height:'+h+'px;display:block"');}
   function rangeBar(lbl,lo,val,hi,u){
     if(lo==null||hi==null||val==null||!(hi>lo)) return '';
     var pct=Math.max(2,Math.min(98,(val-lo)/(hi-lo)*100));
     var mc=u?'var(--ok)':'var(--bad)';
-    return '<div style="display:flex;align-items:center;gap:7px;font-size:10px;margin-top:6px" class="num">'+
+    return '<div style="display:flex;align-items:center;gap:7px;font-size:12px;margin-top:6px" class="num">'+
       '<span style="width:26px;color:var(--muted);letter-spacing:.05em;font-weight:600">'+lbl+'</span>'+
-      '<span style="width:56px;text-align:right;color:var(--faint)">'+fmtNum(lo)+'</span>'+
+      '<span style="width:56px;text-align:right;color:var(--muted)">'+fmtNum(lo)+'</span>'+
       '<div style="position:relative;flex:1;height:5px;border-radius:3px;background:var(--hairline)">'+
         '<i style="position:absolute;left:0;top:0;height:100%;width:'+pct+'%;border-radius:3px;background:linear-gradient(90deg,color-mix(in srgb,var(--iris) 35%,transparent),var(--iris))"></i>'+
         '<i style="position:absolute;left:'+pct+'%;top:50%;width:8px;height:8px;border-radius:50%;background:'+mc+';transform:translate(-50%,-50%);box-shadow:0 0 0 2px var(--glass-2)"></i>'+
       '</div>'+
-      '<span style="width:56px;color:var(--faint)">'+fmtNum(hi)+'</span></div>';
+      '<span style="width:56px;color:var(--muted)">'+fmtNum(hi)+'</span></div>';
   }
 
   var h='';
   h+='<div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin:2px 0 12px">'+
-     '<div style="font-size:11.5px;color:var(--muted);display:flex;align-items:center;gap:6px">'+
+     '<div style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px">'+
        (live?'<span class="livedot"></span>':'')+esc(fresh)+'</div>'+
-     '<div class="w-sub" style="font-size:11px"><span class="delta up">'+up+' up</span> · <span class="delta down">'+dn+' down</span></div></div>';
+     '<div class="w-sub" style="font-size:12px"><span class="delta up">'+up+' up</span> · <span class="delta down">'+dn+' down</span></div></div>';
 
   var tileCss='background:var(--glass-2);border:1px solid var(--hairline);border-radius:12px;padding:10px 11px';
   h+=label('Indices');
   h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px">';
   h+=idx.map(function(q){
-    if(q.error) return '<div style="'+tileCss+'"><div style="font-weight:660">'+esc(q.symbol)+'</div><div class="w-sub" style="color:var(--faint)">unavailable</div></div>';
+    if(q.error) return '<div style="'+tileCss+'"><div style="font-weight:660">'+esc(q.symbol)+'</div><div class="w-sub" style="color:var(--muted)">unavailable</div></div>';
     return '<div style="'+tileCss+'">'+
       '<div style="display:flex;align-items:baseline;gap:6px">'+
         '<span style="font-weight:720;font-size:12.5px">'+esc(q.symbol)+'</span>'+
-        '<span class="w-sub" style="font-size:10px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(q.friendly||q.name)+'</span></div>'+
+        '<span class="w-sub" style="font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(q.friendly||q.name)+'</span></div>'+
       '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:6px;margin:4px 0 2px">'+
         '<span class="num" style="font-size:19px;font-weight:700;line-height:1">'+px(q.price)+'</span>'+chip(q)+'</div>'+
       spark(q,26)+'</div>';
@@ -56,22 +58,22 @@ EXPAND_RENDER.markets = function(el, d){
 
   h+=label('Watchlist');
   h+=wl.map(function(q){
-    if(q.error) return '<div class="quoterow"><span class="sym">'+esc(q.symbol)+'</span><span style="color:var(--faint)">unavailable</span></div>';
-    var u=(q.pct||0)>=0;
+    if(q.error) return '<div class="quoterow"><span class="sym">'+esc(q.symbol)+'</span><span style="color:var(--muted)">unavailable</span></div>';
+    var u=sgnOf(q.pct)>=0;
     return '<div style="padding:11px 0;border-bottom:1px solid var(--hairline)">'+
       '<div style="display:flex;align-items:baseline;gap:8px">'+
         '<span style="font-weight:720;font-size:14px;min-width:54px">'+esc(q.symbol)+'</span>'+
         '<span class="w-sub" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(q.name)+'</span>'+
         '<span class="num" style="font-weight:680;font-size:14.5px">'+px(q.price)+'</span>'+
-        '<span class="num delta '+(u?'up':'down')+'" style="width:66px;text-align:right;font-weight:640">'+(u?'+':'')+(q.pct!=null?q.pct:0)+'%</span></div>'+
+        '<span class="num delta '+deltaCls(q.pct)+'" style="width:66px;text-align:right;font-weight:640">'+pctTxt(q.pct!=null?q.pct:0)+'</span></div>'+
       '<div style="margin:5px 0 1px">'+spark(q,28)+'</div>'+
       rangeBar('DAY',q.day_lo,q.price,q.day_hi,u)+
       rangeBar('52W',q.wk_lo,q.price,q.wk_hi,u)+
-      '<div style="display:flex;gap:12px;margin-top:7px;font-size:10px;color:var(--muted)" class="num">'+
-        '<span>Chg <b style="color:'+(u?'var(--ok)':'var(--bad)')+'">'+(u?'+':'')+fmtNum(q.chg)+'</b></span>'+
+      '<div style="display:flex;gap:12px;margin-top:7px;font-size:12px;color:var(--muted)" class="num">'+
+        '<span>Chg <b class="delta '+deltaCls(q.chg)+'">'+signedTxt(q.chg)+'</b></span>'+
         '<span>Vol '+kfmt(q.vol)+'</span>'+
-        (q.exch?'<span style="color:var(--faint)">'+esc(q.exch)+'</span>':'')+
-        '<span style="margin-left:auto;color:var(--faint)">Prev close '+px(q.prev)+'</span></div>'+
+        (q.exch?'<span style="color:var(--muted)">'+esc(q.exch)+'</span>':'')+
+        '<span style="margin-left:auto;color:var(--muted)">Prev close '+px(q.prev)+'</span></div>'+
     '</div>';
   }).join('') || '<div class="hint">No symbols.</div>';
 
@@ -99,12 +101,12 @@ EXPAND_RENDER.battery=function(el,data){
   let h='<div style="display:flex;align-items:center;gap:16px;margin:4px 0 6px">'+glyph+
     '<div><div style="display:flex;align-items:baseline;gap:4px"><span class="num" style="font-size:52px;font-weight:720;line-height:1;color:'+col+'">'+pct+'</span>'+
     '<span style="font-size:22px;font-weight:600;color:var(--muted)">%</span></div>'+
-    '<div class="w-sub" style="margin-top:3px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">'+bits.join('<span style="color:var(--faint)">&middot;</span>')+'</div></div></div>';
+    '<div class="w-sub" style="margin-top:3px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">'+bits.join('<span style="color:var(--muted)">&middot;</span>')+'</div></div></div>';
   const chips=[];
   if(d.low_power_mode)chips.push(['--warn','Low Power Mode']);
   if(d.warn)chips.push(['--bad','Low battery']);
   if(chips.length)h+='<div style="display:flex;gap:6px;margin:0 0 4px">'+chips.map(c=>
-    '<span style="font-size:10.5px;font-weight:650;letter-spacing:.02em;padding:3px 9px;border-radius:20px;color:var('+c[0]+');background:color-mix(in srgb,var('+c[0]+') 15%,transparent)">'+esc(c[1])+'</span>').join('')+'</div>';
+    '<span style="font-size:12px;font-weight:650;letter-spacing:.02em;padding:3px 9px;border-radius:20px;color:var('+c[0]+');background:color-mix(in srgb,var('+c[0]+') 15%,transparent)">'+esc(c[1])+'</span>').join('')+'</div>';
   const hh=d.health||{};
   h+=statGrid([
     ['Charge',pct+'%'],
@@ -112,7 +114,7 @@ EXPAND_RENDER.battery=function(el,data){
     ['Cycles',(hh.cycles!=null?fmtNum(hh.cycles):'—')],
   ]);
   // battery health
-  h+='<div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;margin:12px 0 6px">Battery health</div>';
+  h+='<div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;margin:12px 0 6px">Battery health</div>';
   const cond=hh.condition||'—';
   const condOk=/normal|good/i.test(cond);
   h+='<div style="display:flex;align-items:center;justify-content:space-between;padding:2px 0 8px;border-bottom:1px solid var(--hairline)">'+
@@ -128,14 +130,14 @@ EXPAND_RENDER.battery=function(el,data){
   if(hh.cycles!=null){
     const rc=hh.rated_cycles||1000, cp=Math.min(100,Math.round(hh.cycles/rc*100));
     h+='<div style="padding:9px 0 4px"><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:5px">'+
-       '<span class="w-sub">Cycle count</span><span class="num" style="font-weight:640">'+fmtNum(hh.cycles)+' <span style="color:var(--faint)">/ '+fmtNum(rc)+'</span></span></div>'+
+       '<span class="w-sub">Cycle count</span><span class="num" style="font-weight:640">'+fmtNum(hh.cycles)+' <span style="color:var(--muted)">/ '+fmtNum(rc)+'</span></span></div>'+
        '<div style="height:7px;border-radius:4px;background:var(--hairline);overflow:hidden"><i style="display:block;height:100%;width:'+Math.max(1.5,cp)+'%;background:linear-gradient(90deg,var(--iris),var(--quick))"></i></div>'+
        '<div class="hint" style="margin-top:4px">'+(rc-hh.cycles>0?fmtNum(rc-hh.cycles)+' cycles until Apple’s rated limit':'past rated cycle limit')+'</div></div>';
   }
   // power adapter
   const ad=d.adapter||{};
   if(ad.connected&&(ad.name||ad.watts)){
-    h+='<div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;margin:14px 0 6px">Power adapter</div>'+
+    h+='<div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;margin:14px 0 6px">Power adapter</div>'+
        '<div style="display:flex;align-items:center;gap:11px;background:var(--glass-2);border:1px solid var(--hairline);border-radius:11px;padding:11px 13px">'+
        '<span style="color:var(--quick);display:flex">'+icon('battery')+'</span>'+
        '<div style="flex:1;min-width:0"><div style="font-weight:620;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(ad.name||'USB-C adapter')+'</div>'+
@@ -148,10 +150,10 @@ EXPAND_RENDER.battery=function(el,data){
     const ord=[['left','L'],['right','R'],['case','Case'],['main','Batt'],['single','']];
     const pill=(lab,v)=>{const pc=v<=15?'--bad':v<=35?'--warn':'--ok';
       return '<div style="display:flex;align-items:center;gap:7px;flex:1;min-width:96px">'+
-        (lab?'<span style="width:30px;font-size:10.5px;color:var(--muted);font-weight:600">'+esc(lab)+'</span>':'')+
+        (lab?'<span style="width:30px;font-size:12px;color:var(--muted);font-weight:600">'+esc(lab)+'</span>':'')+
         '<div style="flex:1;height:6px;border-radius:3px;background:var(--hairline);overflow:hidden"><i style="display:block;height:100%;width:'+Math.max(3,v)+'%;background:var('+pc+')"></i></div>'+
-        '<span class="num" style="width:34px;text-align:right;font-size:11.5px;font-weight:600">'+v+'%</span></div>';};
-    h+='<div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;margin:14px 0 6px">Connected devices</div>';
+        '<span class="num" style="width:34px;text-align:right;font-size:12px;font-weight:600">'+v+'%</span></div>';};
+    h+='<div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;margin:14px 0 6px">Connected devices</div>';
     h+=devs.map(dv=>{const lv=dv.levels||{};
       const rows=ord.filter(o=>lv[o[0]]!=null).map(o=>pill(o[0]==='single'?'':o[1],lv[o[0]]));
       return '<div style="padding:9px 0;border-bottom:1px solid var(--hairline)">'+
@@ -177,7 +179,7 @@ EXPAND_RENDER.tasks=function(el,data){
     '<circle cx="33" cy="33" r="'+R+'" fill="none" stroke="url(#'+g+')" stroke-width="6" stroke-linecap="round" stroke-dasharray="'+C.toFixed(1)+'" stroke-dashoffset="'+off.toFixed(1)+'" transform="rotate(-90 33 33)" style="transition:stroke-dashoffset .5s"/>'+
     '<text x="33" y="34" text-anchor="middle" dominant-baseline="middle" class="num" style="font-size:16px;font-weight:700;fill:var(--ink)">'+(pct||0)+'%</text></svg>';}
   function chip(label,val,tone){var col=tone==='bad'?'var(--bad)':tone==='warn'?'var(--warn)':'var(--muted)';
-    return '<span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:'+col+';background:var(--chip);border:1px solid var(--hairline);border-radius:999px;padding:3px 10px"><b class="num" style="color:'+(tone?col:'var(--ink)')+';font-weight:680">'+val+'</b>'+esc(label)+'</span>';}
+    return '<span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;color:'+col+';background:var(--chip);border:1px solid var(--hairline);border-radius:999px;padding:3px 10px"><b class="num" style="color:'+(tone?col:'var(--ink)')+';font-weight:680">'+val+'</b>'+esc(label)+'</span>';}
   var DELX='<svg class="ic" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
   var TICK='<svg viewBox="0 0 24 24" style="width:13px;height:13px" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
   function taskRow(t,stale){
@@ -186,13 +188,13 @@ EXPAND_RENDER.tasks=function(el,data){
       (checked?'background:linear-gradient(135deg,var(--iris),var(--quick));border:1px solid transparent':'background:transparent;border:1.5px solid var(--muted)')+'">'+(checked?TICK:'')+'</button>';
     var age=t.ts?relTime(t.ts):'';
     var ageCol=stale?'var(--bad)':'var(--faint)';
-    var txt='<span style="flex:1;min-width:0;font-size:13px;line-height:1.4;'+(checked?'color:var(--faint);text-decoration:line-through':'color:var(--ink)')+'">'+esc(t.text)+'</span>';
-    var ageEl=age?'<span class="num" style="flex:0 0 auto;font-size:10.5px;color:'+ageCol+'">'+esc(age)+'</span>':'';
-    var del='<button class="tk-del" data-id="'+esc(t.id)+'" aria-label="Delete" style="flex:0 0 auto;background:none;border:none;cursor:pointer;color:var(--faint);opacity:.55;padding:2px;display:flex">'+DELX+'</button>';
+    var txt='<span style="flex:1;min-width:0;font-size:13px;line-height:1.4;'+(checked?'color:var(--muted);text-decoration:line-through':'color:var(--ink)')+'">'+esc(t.text)+'</span>';
+    var ageEl=age?'<span class="num" style="flex:0 0 auto;font-size:12px;color:'+ageCol+'">'+esc(age)+'</span>':'';
+    var del='<button class="tk-del" data-id="'+esc(t.id)+'" aria-label="Delete" style="flex:0 0 auto;background:none;border:none;cursor:pointer;color:var(--muted);opacity:.55;padding:2px;display:flex">'+DELX+'</button>';
     return '<div class="tk-row" style="display:flex;align-items:center;gap:11px;padding:9px 2px;border-bottom:1px solid var(--hairline)">'+box+txt+ageEl+del+'</div>';
   }
   function sectionLabel(txt,right){
-    return '<div style="display:flex;align-items:center;gap:8px;margin:16px 0 4px"><span style="font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600">'+esc(txt)+'</span>'+(right||'')+'</div>';
+    return '<div style="display:flex;align-items:center;gap:8px;margin:16px 0 4px"><span style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600">'+esc(txt)+'</span>'+(right||'')+'</div>';
   }
   function render(d){
     d=d||{};
@@ -212,7 +214,7 @@ EXPAND_RENDER.tasks=function(el,data){
     if(d.avg_open_age!=null&&openT.length)chips.push(chip('avg age',dur(d.avg_open_age)));
     if(d.stale)chips.push(chip('stale',d.stale,'bad'));
     if(chips.length)h+='<div style="display:flex;flex-wrap:wrap;gap:7px;margin:10px 0 2px">'+chips.join('')+'</div>';
-    h+='<div style="display:flex;gap:8px;margin:14px 0 2px"><input class="tk-new" placeholder="Add a task&hellip;" spellcheck="false" style="flex:1;background:var(--glass-2);border:1px solid var(--hairline);border-radius:10px;padding:10px 13px;color:var(--ink);font-size:13px;outline:none">'+
+    h+='<div style="display:flex;gap:8px;margin:14px 0 2px"><input class="tk-new" placeholder="Add a task&hellip;" spellcheck="false" style="flex:1;background:var(--glass-2);border:1px solid var(--hairline);border-radius:10px;padding:10px 13px;color:var(--ink);font-size:13px">'+
       '<button class="tk-add primary" style="flex:0 0 auto;display:flex;align-items:center;gap:5px;border-radius:10px;padding:0 15px;font-weight:600"><svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Add</button></div>';
     var stale=openT.filter(function(t){return t.age!=null&&t.age>604800;});
     var active=openT.filter(function(t){return !(t.age!=null&&t.age>604800);});
@@ -229,7 +231,7 @@ EXPAND_RENDER.tasks=function(el,data){
       h+='<div class="hint" style="margin-top:14px">All clear &mdash; no open tasks. Your assistant reads these too.</div>';
     }
     if(doneT.length){
-      var clr='<button class="tk-clear" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:10.5px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);font-weight:600;padding:0">Clear completed</button>';
+      var clr='<button class="tk-clear" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);font-weight:600;padding:0">Clear completed</button>';
       h+=sectionLabel('Completed · '+doneT.length,clr);
       doneT.sort(function(a,b){return (b.ts||0)-(a.ts||0);});
       h+='<div class="tk-done" style="opacity:.75">'+doneT.map(function(t){return taskRow(t,false);}).join('')+'</div>';
@@ -253,27 +255,27 @@ EXPAND_RENDER.reminders=function(el,d){
   var now=Date.now()/1000, pad=function(n){return (n<10?'0':'')+n;};
   var fmtTime=function(dt){var h=dt.getHours(),m=dt.getMinutes(),ap=h<12?'AM':'PM',hh=h%12;if(hh===0)hh=12;return hh+(m?':'+pad(m):'')+' '+ap;};
   var dueChip=function(it){
-    if(it.due_ts==null)return '<span style="font-size:10.5px;color:var(--faint);white-space:nowrap;align-self:center">no date</span>';
+    if(it.due_ts==null)return '<span style="font-size:12px;color:var(--muted);white-space:nowrap;align-self:center">no date</span>';
     var dt=new Date(it.due_ts*1000),label,col='var(--muted)',bg='var(--chip)';
     if(it.due_state==='overdue'){var days=Math.floor((now-it.due_ts)/86400);label=days>=1?days+'d overdue':(it.all_day?'overdue':fmtTime(dt));col='var(--bad)';bg='color-mix(in srgb,var(--bad) 15%,transparent)';}
     else if(it.due_state==='today'){label='Today'+(it.all_day?'':' '+fmtTime(dt));col='var(--warn)';bg='color-mix(in srgb,var(--warn) 16%,transparent)';}
     else{var d2=Math.ceil((it.due_ts-now)/86400);if(d2<=6)label=dt.toLocaleDateString([],{weekday:'short'})+(it.all_day?'':' '+fmtTime(dt));else label=dt.toLocaleDateString([],{month:'short',day:'numeric'});}
-    return '<span class="num" style="font-size:10.5px;font-weight:650;white-space:nowrap;align-self:center;color:'+col+';background:'+bg+';border-radius:7px;padding:2px 7px">'+esc(label)+'</span>';
+    return '<span class="num" style="font-size:12px;font-weight:650;white-space:nowrap;align-self:center;color:'+col+';background:'+bg+';border-radius:7px;padding:2px 7px">'+esc(label)+'</span>';
   };
   var priMark=function(p){if(!p)return '';if(p<=1)return '<span title="High priority" style="color:var(--bad);font-weight:800;font-size:12px;letter-spacing:-1.5px;margin-right:3px">!!!</span>';if(p<=5)return '<span title="Medium priority" style="color:var(--warn);font-weight:800;font-size:12px;letter-spacing:-1.5px;margin-right:3px">!!</span>';return '<span title="Low priority" style="color:var(--muted);font-weight:800;font-size:12px;margin-right:3px">!</span>';};
   var flag='<svg viewBox="0 0 24 24" width="11" height="11" style="vertical-align:-1px;margin-left:4px;fill:none;stroke:var(--warn);stroke-width:2.2"><path d="M6 21V4h11l-2.2 3.5L17 11H6"/></svg>';
-  var tile=function(label,val,color){return '<div style="background:var(--glass-2);border:1px solid var(--hairline);border-radius:10px;padding:9px 11px"><div class="num" style="font-size:19px;font-weight:700;line-height:1;color:'+(color||'var(--ink)')+'">'+val+'</div><div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-top:3px;font-weight:600">'+esc(label)+'</div></div>';};
+  var tile=function(label,val,color){return '<div style="background:var(--glass-2);border:1px solid var(--hairline);border-radius:10px;padding:9px 11px"><div class="num" style="font-size:19px;font-weight:700;line-height:1;color:'+(color||'var(--ink)')+'">'+val+'</div><div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-top:3px;font-weight:600">'+esc(label)+'</div></div>';};
   var h='<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:2px 0 12px">'+tile('Open',d.total)+tile('Overdue',d.overdue,d.overdue?'var(--bad)':'var(--ink)')+tile('Today',d.today,d.today?'var(--warn)':'var(--ink)')+tile('No date',d.no_due)+'</div>';
   var up=d.scheduled-d.overdue-d.today; if(up<0)up=0;
   var seg=function(n,c){return n>0?'<i style="display:block;height:100%;width:'+(n/d.total*100)+'%;background:'+c+'"></i>':'';};
   h+='<div style="display:flex;height:8px;border-radius:5px;overflow:hidden;background:var(--hairline);margin-bottom:7px">'+seg(d.overdue,'var(--bad)')+seg(d.today,'var(--warn)')+seg(up,'var(--iris)')+seg(d.no_due,'var(--faint)')+'</div>';
   var dot=function(c,label,n){return '<span style="display:inline-flex;align-items:center;gap:4px"><i style="width:7px;height:7px;border-radius:2px;background:'+c+';display:inline-block"></i>'+label+' '+n+'</span>';};
-  h+='<div class="num" style="display:flex;flex-wrap:wrap;gap:13px;font-size:10.5px;color:var(--muted);margin-bottom:12px">'+dot('var(--bad)','Overdue',d.overdue)+dot('var(--warn)','Today',d.today)+dot('var(--iris)','Upcoming',up)+dot('var(--faint)','No date',d.no_due)+'</div>';
+  h+='<div class="num" style="display:flex;flex-wrap:wrap;gap:13px;font-size:12px;color:var(--muted);margin-bottom:12px">'+dot('var(--bad)','Overdue',d.overdue)+dot('var(--warn)','Today',d.today)+dot('var(--iris)','Upcoming',up)+dot('var(--faint)','No date',d.no_due)+'</div>';
   (d.lists||[]).forEach(function(g){
-    h+='<div style="display:flex;align-items:center;gap:8px;margin:15px 0 3px"><span style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:700">'+esc(g.name)+'</span>'+(g.overdue?'<span class="num" style="font-size:10px;font-weight:700;color:var(--bad);background:color-mix(in srgb,var(--bad) 14%,transparent);border-radius:7px;padding:1px 6px">'+g.overdue+' overdue</span>':'')+'<span class="num" style="margin-left:auto;font-size:11px;color:var(--faint)">'+g.count+'</span></div>';
+    h+='<div style="display:flex;align-items:center;gap:8px;margin:15px 0 3px"><span style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:700">'+esc(g.name)+'</span>'+(g.overdue?'<span class="num" style="font-size:12px;font-weight:700;color:var(--bad);background:color-mix(in srgb,var(--bad) 14%,transparent);border-radius:7px;padding:1px 6px">'+g.overdue+' overdue</span>':'')+'<span class="num" style="margin-left:auto;font-size:12px;color:var(--muted)">'+g.count+'</span></div>';
     (g.items||[]).forEach(function(it){
       var ring=it.due_state==='overdue'?'var(--bad)':it.due_state==='today'?'var(--warn)':'var(--muted)';
-      h+='<div style="display:flex;align-items:flex-start;gap:9px;padding:7px 1px;border-bottom:1px solid var(--hairline)"><span style="flex:0 0 auto;width:13px;height:13px;margin-top:2px;border-radius:50%;border:1.6px solid '+ring+';opacity:.85"></span><div style="flex:1;min-width:0"><div style="font-size:12.5px;line-height:1.35;color:var(--ink)">'+priMark(it.priority)+esc(it.title)+(it.flagged?flag:'')+'</div>'+(it.note?'<div style="font-size:11px;color:var(--muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(it.note)+'</div>':'')+'</div>'+dueChip(it)+'</div>';
+      h+='<div style="display:flex;align-items:flex-start;gap:9px;padding:7px 1px;border-bottom:1px solid var(--hairline)"><span style="flex:0 0 auto;width:13px;height:13px;margin-top:2px;border-radius:50%;border:1.6px solid '+ring+';opacity:.85"></span><div style="flex:1;min-width:0"><div style="font-size:12.5px;line-height:1.35;color:var(--ink)">'+priMark(it.priority)+esc(it.title)+(it.flagged?flag:'')+'</div>'+(it.note?'<div style="font-size:12px;color:var(--muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(it.note)+'</div>':'')+'</div>'+dueChip(it)+'</div>';
     });
   });
   el.innerHTML=h;
@@ -286,20 +288,20 @@ EXPAND_RENDER.notes=function(el,data){
   var initial=(data.text!=null?data.text:'');
   el.innerHTML=
     '<div style="display:flex;align-items:center;gap:8px;margin:2px 0 7px">'+
-      '<span style="font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:700">Scratchpad</span>'+
-      '<span id="nt-save" class="w-sub" style="margin-left:auto;display:inline-flex;align-items:center;gap:5px;font-size:11px">'+
+      '<span style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:700">Scratchpad</span>'+
+      '<span id="nt-save" class="w-sub" style="margin-left:auto;display:inline-flex;align-items:center;gap:5px;font-size:12px">'+
         '<i id="nt-dot" style="width:6px;height:6px;border-radius:50%;background:var(--faint);display:inline-block"></i>'+
         '<span id="nt-savetxt">Saved</span></span>'+
     '</div>'+
     '<textarea id="nt-ta" spellcheck="true" placeholder="Type freely — everything saves automatically." '+
       'style="width:100%;min-height:300px;resize:vertical;box-sizing:border-box;padding:14px 15px;border:1px solid var(--hairline);'+
       'border-radius:14px;background:var(--glass-2);color:var(--ink);font:14px/1.65 -apple-system,BlinkMacSystemFont,\'SF Pro Text\',system-ui,sans-serif;'+
-      'outline:none;letter-spacing:.005em;transition:border-color .18s"></textarea>'+
-    '<div style="display:flex;align-items:center;gap:0;margin:9px 2px 2px;font-size:11.5px">'+
+      'letter-spacing:.005em;transition:border-color .18s"></textarea>'+
+    '<div style="display:flex;align-items:center;gap:0;margin:9px 2px 2px;font-size:12px">'+
       '<span class="num" style="font-weight:640"><span id="nt-words">0</span></span>&nbsp;<span class="w-sub">words</span>'+
-      '<span style="color:var(--faint);margin:0 9px">&middot;</span>'+
+      '<span style="color:var(--muted);margin:0 9px">&middot;</span>'+
       '<span class="num" style="font-weight:640"><span id="nt-chars">0</span></span>&nbsp;<span class="w-sub">chars</span>'+
-      '<span style="color:var(--faint);margin:0 9px">&middot;</span>'+
+      '<span style="color:var(--muted);margin:0 9px">&middot;</span>'+
       '<span class="num" style="font-weight:640"><span id="nt-lines">0</span></span>&nbsp;<span class="w-sub">lines</span>'+
       '<span id="nt-read" class="w-sub" style="margin-left:auto"></span>'+
     '</div>'+
@@ -308,45 +310,96 @@ EXPAND_RENDER.notes=function(el,data){
   var ta=el.querySelector('#nt-ta');
   var dot=el.querySelector('#nt-dot');
   var stxt=el.querySelector('#nt-savetxt');
+  var sEl=el.querySelector('#nt-save');
   var wEl=el.querySelector('#nt-words');
   var cEl=el.querySelector('#nt-chars');
   var lEl=el.querySelector('#nt-lines');
   var rEl=el.querySelector('#nt-read');
   ta.value=initial;
 
+  // C19: the server refuses (413) past this many characters; the counter
+  // shows the limit once the note gets near it, and turns red past it
+  var LIMIT=131072;
+  function cpLen(t){var n=0;for(var i=0;i<t.length;i++){var c=t.charCodeAt(i);if(c<0xDC00||c>0xDFFF)n++;}return n;}
   function counts(){
     var t=ta.value;
     var w=(t.match(/\S+/g)||[]).length;
     wEl.textContent=w.toLocaleString();
-    cEl.textContent=t.length.toLocaleString();
+    var n=t.length>LIMIT*0.9?cpLen(t):t.length;
+    cEl.textContent=n.toLocaleString()+(n>LIMIT*0.9?' / '+LIMIT.toLocaleString():'');
+    cEl.style.color=n>LIMIT?'var(--bad)':n>LIMIT*0.9?'var(--warn)':'';
     lEl.textContent=(t?t.split('\n').length:0).toLocaleString();
     var mins=w/200;
     rEl.textContent=w?(mins<1?Math.max(1,Math.round(mins*60))+' sec read':(Math.round(mins*10)/10)+' min read'):'';
   }
-  function setState(s){
+  function setState(s,msg){
     var map={saved:['var(--ok)','Saved'],dirty:['var(--warn)','Unsaved'],saving:['var(--muted)','Saving…'],error:['var(--bad)','Save failed']};
     var m=map[s]||map.saved;
     dot.style.background=m[0];
-    stxt.textContent=m[1];
-    ta.style.borderColor=(s==='dirty')?'color-mix(in srgb,var(--iris) 32%,var(--hairline))':'var(--hairline)';
+    stxt.textContent=msg||m[1];
+    stxt.style.color=(s==='error')?'var(--bad)':'';
+    [].slice.call(sEl.querySelectorAll('button')).forEach(function(b){b.remove();});
+    ta.style.borderColor=(s==='dirty')?'color-mix(in srgb,var(--iris) 32%,var(--hairline))':(s==='error')?'color-mix(in srgb,var(--bad) 45%,var(--hairline))':'var(--hairline)';
+  }
+  function act(label,fn){
+    var b=document.createElement('button');b.type='button';b.className='ghost';b.textContent=label;
+    b.style.cssText='padding:2px 8px;font-size:12px;color:var(--iris)';b.onclick=fn;sEl.appendChild(b);
   }
   counts();
   setState('saved');
   if(!initial) stxt.textContent='Empty';
 
-  var timer=null,lastSaved=initial;
+  // B05: every save carries the revision this editor was loaded at (base_rev);
+  // the server refuses a stale one with 409 instead of letting it overwrite
+  // a newer edit. rev comes from GET /api/notes; saves wait for it, and one
+  // save is in flight at a time so this editor never conflicts with itself.
+  var timer=null,lastSaved=initial,rev=null,busy=false,again=false,held=false,loading=false;
+  function conflict(j){
+    held=true;
+    setState('error','Changed elsewhere — not saved');
+    act('Load latest',function(){held=false;ta.value=j.text||'';lastSaved=ta.value;rev=j.rev;counts();setState('saved');});
+    act('Keep mine',function(){held=false;rev=j.rev;lastSaved=null;save();});
+  }
+  function loadRev(){
+    loading=true;
+    function fail(){loading=false;setState('error','Not saved — could not load the note');}
+    fetch('/api/notes').then(function(r){return r.status===404?{legacy:true}:r.ok?r.json():null;}).then(function(j){
+      loading=false;
+      // a dashboard not restarted since the upgrade has no GET route: save
+      // without base_rev, exactly as before, instead of never saving at all
+      if(j&&j.legacy){rev=undefined;if(again){again=false;save();}return;}
+      if(!j||typeof j.rev!=='number')return fail();
+      if(typeof j.limit==='number'){LIMIT=j.limit;counts();}
+      if(ta.value===lastSaved&&j.text!==lastSaved){ta.value=j.text;lastSaved=j.text;counts();setState('saved');if(!j.text)stxt.textContent='Empty';}
+      if(j.text===lastSaved)rev=j.rev;else{conflict(j);return;}
+      if(again){again=false;save();}
+    }).catch(fail);
+  }
+  loadRev();
   function save(){
+    if(held)return;
     var t=ta.value;
     if(t===lastSaved){setState(t?'saved':'saved');if(!t)stxt.textContent='Empty';return;}
+    if(rev===null){again=true;if(!loading)loadRev();return;}
+    if(busy){again=true;return;}
+    busy=true;
     setState('saving');
-    fetch('/api/notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:t})})
+    fetch('/api/notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:t,base_rev:rev})})
       .then(function(r){return r.json();})
-      .then(function(j){if(j&&j.ok){lastSaved=t;setState('saved');}else{setState('error');}})
-      .catch(function(){setState('error');});
+      .then(function(j){
+        busy=false;
+        if(j&&j.ok){lastSaved=t;rev=j.rev;setState(ta.value===t?'saved':'dirty');
+          try{window.dispatchEvent(new CustomEvent('hermes:notes',{detail:{text:t,rev:j.rev}}));}catch(e){}}
+        else if(j&&j.conflict){again=false;conflict(j);return;}
+        else if(j&&j.error==='too_long'){setState('error','Too long — '+(j.limit||LIMIT).toLocaleString()+' characters max');}
+        else{setState('error');}
+        if(again){again=false;save();}
+      })
+      .catch(function(){busy=false;setState('error');});
   }
   ta.addEventListener('input',function(){
     counts();
-    if(ta.value!==lastSaved)setState('dirty');
+    if(!held&&ta.value!==lastSaved)setState('dirty');   // a conflict stays on screen until resolved
     if(timer)clearTimeout(timer);
     timer=setTimeout(save,650);
   });
@@ -359,19 +412,19 @@ EXPAND_RENDER.notes=function(el,data){
   var N=A.notes||[];
   if(A.available&&N.length){
     var head='<div style="display:flex;align-items:baseline;gap:8px;margin:18px 0 6px;border-top:1px solid var(--hairline);padding-top:13px">'+
-      '<span style="font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:700">Recent Apple Notes</span>'+
-      '<span class="w-sub" style="margin-left:auto;font-size:11px">'+(A.total||N.length)+' total</span></div>';
+      '<span style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:700">Recent Apple Notes</span>'+
+      '<span class="w-sub" style="margin-left:auto;font-size:12px">'+(A.total||N.length)+' total</span></div>';
     var rows=N.map(function(n){
       return '<div style="display:flex;align-items:baseline;gap:10px;padding:6px 0;border-bottom:1px solid var(--hairline)">'+
-        '<span style="color:var(--faint);flex:0 0 auto;margin-top:1px;line-height:1">'+icon('note')+'</span>'+
+        '<span style="color:var(--muted);flex:0 0 auto;margin-top:1px;line-height:1">'+icon('note')+'</span>'+
         '<span style="flex:1;min-width:0;font-size:12.5px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(n.title||'Untitled')+'</span>'+
-        '<span class="num w-sub" style="flex:0 0 auto;font-size:10.5px">'+(n.ts?relTime(n.ts):'')+'</span></div>';
+        '<span class="num w-sub" style="flex:0 0 auto;font-size:12px">'+(n.ts?relTime(n.ts):'')+'</span></div>';
     }).join('');
-    ap.innerHTML=head+rows+'<div class="hint" style="margin-top:8px;color:var(--faint)">Read-only preview from the macOS Notes app.</div>';
+    ap.innerHTML=head+rows+'<div class="hint" style="margin-top:8px;color:var(--muted)">Read-only preview from the macOS Notes app.</div>';
   }else if(A.available===false){
     ap.innerHTML='<div style="margin:18px 0 0;border-top:1px solid var(--hairline);padding-top:13px">'+
-      '<div style="font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:5px">Apple Notes</div>'+
-      '<div class="hint" style="color:var(--faint);line-height:1.5">'+esc(A.reason||'Apple Notes preview unavailable.')+'</div></div>';
+      '<div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:5px">Apple Notes</div>'+
+      '<div class="hint" style="color:var(--muted);line-height:1.5">'+esc(A.reason||'Apple Notes preview unavailable.')+'</div></div>';
   }
 };
 
@@ -381,20 +434,20 @@ EXPAND_RENDER.briefing=function(el,data){
   const SPIN='<span style="width:16px;height:16px;border-radius:50%;border:2px solid var(--hairline);border-top-color:var(--iris);animation:spin .9s linear infinite;flex:0 0 auto"></span>';
   function pmin(t){if(!t)return null;const m=(''+t).match(/(\d{1,2}):(\d{2})\s*([AaPp][Mm])?/);if(!m)return null;let h=+m[1];const mi=+m[2],ap=(m[3]||'').toLowerCase();if(ap==='pm'&&h<12)h+=12;if(ap==='am'&&h===12)h=0;return h*60+mi;}
   function readLbl(s){s=s||0;return s<60?Math.max(1,Math.round(s))+'s':Math.max(1,Math.round(s/60))+'m';}
-  function cell(label,val,accent){return '<div style="background:var(--glass-2);border:1px solid var(--hairline);border-radius:12px;padding:9px 11px"><div class="num" style="font-size:19px;font-weight:680;letter-spacing:-.02em;color:'+(accent||'var(--ink)')+'">'+val+'</div><div style="font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-top:2px">'+label+'</div></div>';}
+  function cell(label,val,accent){return '<div style="background:var(--glass-2);border:1px solid var(--hairline);border-radius:12px;padding:9px 11px"><div class="num" style="font-size:19px;font-weight:680;letter-spacing:-.02em;color:'+(accent||'var(--ink)')+'">'+val+'</div><div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600;margin-top:2px">'+label+'</div></div>';}
   function hero(d){
     const up=d.generated_at?('Updated '+relTime(d.generated_at)+(d.stale?' · stale':'')):'Not generated yet';
     return '<div data-brf style="display:flex;align-items:flex-start;gap:12px;margin:2px 0 2px">'+
       '<div style="flex:1;min-width:0">'+
-        '<div style="font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--iris);font-weight:680">'+esc(d.greeting||'Daily briefing')+'</div>'+
+        '<div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--iris);font-weight:680">'+esc(d.greeting||'Daily briefing')+'</div>'+
         '<div style="font-family:ui-serif,Georgia,\'Times New Roman\',serif;font-size:20px;font-weight:560;letter-spacing:-.01em;color:var(--ink);margin-top:3px">'+esc(d.date_label||'Your brief')+'</div>'+
       '</div>'+
       '<div style="text-align:right;flex:0 0 auto;display:flex;flex-direction:column;align-items:flex-end;gap:6px">'+
-        '<button id="brf-regen" class="ghost" style="display:inline-flex;align-items:center;gap:6px;padding:5px 11px;font-size:11.5px;font-weight:600;border-radius:9px"><span class="brf-ic" style="display:flex">'+RIC+'</span>Regenerate</button>'+
-        '<div class="w-sub" style="font-size:10.5px'+(d.stale?';color:var(--warn)':'')+'">'+esc(up)+'</div>'+
+        '<button id="brf-regen" class="ghost" style="display:inline-flex;align-items:center;gap:6px;padding:5px 11px;font-size:12px;font-weight:600;border-radius:9px"><span class="brf-ic" style="display:flex">'+RIC+'</span>Regenerate</button>'+
+        '<div class="w-sub" style="font-size:12px'+(d.stale?';color:var(--warn)':'')+'">'+esc(up)+'</div>'+
       '</div></div>';
   }
-  function banner(){return '<div data-brf style="display:flex;align-items:center;gap:10px;padding:9px 12px;margin:10px 0 2px;border:1px solid var(--hairline);border-radius:12px;background:var(--glass-2)">'+SPIN+'<div style="min-width:0"><div style="font-size:12.5px;font-weight:600;color:var(--ink)">Refreshing your brief…</div><div class="w-sub" style="font-size:10.5px">Hermes is checking your calendar, inbox and folders.</div></div></div>';}
+  function banner(){return '<div data-brf style="display:flex;align-items:center;gap:10px;padding:9px 12px;margin:10px 0 2px;border:1px solid var(--hairline);border-radius:12px;background:var(--glass-2)">'+SPIN+'<div style="min-width:0"><div style="font-size:12.5px;font-weight:600;color:var(--ink)">Refreshing your brief…</div><div class="w-sub" style="font-size:12px">Hermes is checking your calendar, inbox and folders.</div></div></div>';}
   function stats(d){
     const st=d.stats||{};const sched=(d.sections||[]).find(function(s){return s.kind==='schedule';});
     const agenda=sched?sched.count:(st.sections||0);
@@ -405,11 +458,11 @@ EXPAND_RENDER.briefing=function(el,data){
   function secHead(s){
     return '<div style="display:flex;align-items:center;gap:8px;margin:18px 0 7px">'+
       '<span style="color:var(--muted);display:flex">'+icon(s.icon||'note')+'</span>'+
-      '<span style="font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:700">'+esc(s.title)+'</span>'+
-      (s.count?'<span class="num" style="font-size:10px;color:var(--faint);background:var(--chip);border-radius:9px;padding:1px 7px;font-weight:600">'+s.count+'</span>':'')+
+      '<span style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:700">'+esc(s.title)+'</span>'+
+      (s.count?'<span class="num" style="font-size:12px;color:var(--muted);background:var(--chip);border-radius:9px;padding:1px 7px;font-weight:600">'+s.count+'</span>':'')+
       '<span style="flex:1;height:1px;background:var(--hairline)"></span></div>';
   }
-  function emptyRow(){return '<div style="display:flex;align-items:center;gap:7px;padding:3px 0;color:var(--faint);font-size:12px"><span style="display:flex;opacity:.7">'+icon('check')+'</span>Nothing yet</div>';}
+  function emptyRow(){return '<div style="display:flex;align-items:center;gap:7px;padding:3px 0;color:var(--muted);font-size:12px"><span style="display:flex;opacity:.7">'+icon('check')+'</span>Nothing yet</div>';}
   function schedule(s){
     const now=new Date();const nowM=now.getHours()*60+now.getMinutes();let markDone=false,h='';
     s.items.forEach(function(it){
@@ -417,7 +470,7 @@ EXPAND_RENDER.briefing=function(el,data){
       let state='plain';
       if(st!=null){if(en!=null?en<=nowM:st<nowM-1)state='past';else if(st<=nowM&&(en==null||nowM<en))state='now';else state='next';}
       if(!markDone&&(state==='now'||state==='next')){markDone=true;
-        h+='<div style="display:flex;align-items:center;gap:8px;margin:4px 0 4px 60px"><span style="width:7px;height:7px;border-radius:50%;background:var(--iris);box-shadow:0 0 0 3px color-mix(in srgb,var(--iris) 22%,transparent)"></span><span style="font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--iris);font-weight:700">Now · '+now.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})+'</span><span style="flex:1;height:1px;background:var(--hairline)"></span></div>';
+        h+='<div style="display:flex;align-items:center;gap:8px;margin:4px 0 4px 60px"><span style="width:7px;height:7px;border-radius:50%;background:var(--iris);box-shadow:0 0 0 3px color-mix(in srgb,var(--iris) 22%,transparent)"></span><span style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--iris);font-weight:700">Now · '+now.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})+'</span><span style="flex:1;height:1px;background:var(--hairline)"></span></div>';
       }
       const tCol=state==='past'?'var(--faint)':state==='now'?'var(--iris)':'var(--ink)';
       const lCol=state==='past'?'var(--muted)':'var(--ink)';
@@ -426,10 +479,10 @@ EXPAND_RENDER.briefing=function(el,data){
         :'<span style="width:8px;height:8px;border-radius:50%;border:1.5px solid var(--muted);box-sizing:border-box"></span>';
       h+='<div style="display:flex;align-items:stretch">'+
         '<div style="width:52px;flex:0 0 auto;text-align:right;padding:5px 8px 5px 0">'+
-          '<div class="num" style="font-size:11.5px;font-weight:640;color:'+tCol+'">'+esc(it.time||'')+'</div>'+
-          (it.end?'<div class="num" style="font-size:9.5px;color:var(--faint)">'+esc(it.end)+'</div>':'')+'</div>'+
+          '<div class="num" style="font-size:12px;font-weight:640;color:'+tCol+'">'+esc(it.time||'')+'</div>'+
+          (it.end?'<div class="num" style="font-size:12px;color:var(--muted)">'+esc(it.end)+'</div>':'')+'</div>'+
         '<div style="width:16px;flex:0 0 auto;display:flex;justify-content:center;padding-top:7px;background:linear-gradient(var(--hairline),var(--hairline)) 50%/1.5px 100% no-repeat">'+dot+'</div>'+
-        '<div style="flex:1;min-width:0;padding:5px 0 9px 9px"><div style="font-size:12.5px;line-height:1.4;font-weight:'+(state==='now'?'640':'500')+';color:'+lCol+'">'+esc(it.label||it.text)+(state==='now'?' <span style="font-size:9.5px;color:var(--iris);font-weight:700">&larr; now</span>':'')+'</div></div>'+
+        '<div style="flex:1;min-width:0;padding:5px 0 9px 9px"><div style="font-size:12.5px;line-height:1.4;font-weight:'+(state==='now'?'640':'500')+';color:'+lCol+'">'+esc(it.label||it.text)+(state==='now'?' <span style="font-size:12px;color:var(--iris);font-weight:700">&larr; now</span>':'')+'</div></div>'+
       '</div>';
     });
     return h;
@@ -437,13 +490,13 @@ EXPAND_RENDER.briefing=function(el,data){
   function inboxHtml(t){
     let e=esc(t);
     e=e.replace(/(^|\s)([Ff]rom)\s+([A-Z][\wÀ-ÿ.'’\-]*(?:\s+[A-Z][\wÀ-ÿ.'’\-]*)?)/,function(_,p,f,n){return p+f+' <b style="color:var(--ink);font-weight:660">'+n+'</b>';});
-    e=e.replace(/\s*\(([^)]*)\)\s*$/,' <span style="color:var(--faint);font-size:11px">· $1</span>');
+    e=e.replace(/\s*\(([^)]*)\)\s*$/,' <span style="color:var(--muted);font-size:12px">· $1</span>');
     return e;
   }
   function itemRow(s,it,i){
     let lead,body;
     if(s.kind==='priority'){
-      lead='<span class="num" style="flex:0 0 auto;width:20px;height:20px;border-radius:50%;background:var(--chip);color:var(--iris);font-weight:700;font-size:11px;display:flex;align-items:center;justify-content:center">'+(i+1)+'</span>';
+      lead='<span class="num" style="flex:0 0 auto;width:20px;height:20px;border-radius:50%;background:var(--chip);color:var(--iris);font-weight:700;font-size:12px;display:flex;align-items:center;justify-content:center">'+(i+1)+'</span>';
       body=it.label?'<b style="font-weight:640">'+esc(it.label)+'</b>'+(it.rest?' — '+esc(it.rest):''):esc(it.text);
     }else if(s.kind==='inbox'){
       lead='<span style="flex:0 0 auto;width:6px;height:6px;border-radius:50%;background:var(--quick);margin-top:6px"></span>';
@@ -463,7 +516,7 @@ EXPAND_RENDER.briefing=function(el,data){
   }
   function footer(d){
     const st=d.stats||{};
-    return '<div data-brf style="margin-top:16px;padding-top:10px;border-top:1px solid var(--hairline);display:flex;gap:8px;flex-wrap:wrap;font-size:10.5px;color:var(--faint)">'+
+    return '<div data-brf style="margin-top:16px;padding-top:10px;border-top:1px solid var(--hairline);display:flex;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--muted)">'+
       (st.words?'<span>'+st.words+' words</span><span>·</span>':'')+
       '<span>Auto-refreshes every '+(d.refresh_min||30)+' min</span></div>';
   }
@@ -557,7 +610,7 @@ EXPAND_RENDER.messages = function(el, data){
   function hue(name){ var n=0,i; for(i=0;i<(name||'').length;i++) n=(n*31+name.charCodeAt(i))>>>0; return PAL[n%PAL.length]; }
   var GROUP_GLYPH = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M17 20v-2a4 4 0 0 0-3-3.87"/><path d="M9 20v-2a4 4 0 0 1 3-3.87"/><circle cx="9" cy="7" r="3"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>';
 
-  h += '<div style="font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:700;margin:14px 0 6px">Conversations</div>';
+  h += '<div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:700;margin:14px 0 6px">Conversations</div>';
 
   h += C.map(function(c){
     var unread = c.unread>0;
@@ -570,7 +623,7 @@ EXPAND_RENDER.messages = function(el, data){
     }
     // preview line: sender prefix for outgoing / group
     var pre = '';
-    if(c.from_me) pre = '<span style="color:var(--faint)">You: </span>';
+    if(c.from_me) pre = '<span style="color:var(--muted)">You: </span>';
     else if(c.group) pre = '<span style="color:'+hue(c.sender)+'">'+esc(String(c.sender).split(/\s+/)[0])+': </span>';
     var pv;
     if(c.attachment && (!c.last || c.last==='Attachment')){
@@ -580,15 +633,15 @@ EXPAND_RENDER.messages = function(el, data){
     } else {
       pv = pre + esc(c.last || '');
     }
-    var badge = unread ? '<span class="num" style="min-width:19px;height:19px;padding:0 6px;border-radius:10px;background:var(--iris);color:#fff;font-size:11px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;line-height:1">'+(c.unread>99?'99+':c.unread)+'</span>' : '';
+    var badge = unread ? '<span class="num" style="min-width:19px;height:19px;padding:0 6px;border-radius:10px;background:var(--iris);color:var(--iris-ink,#fff);font-size:12px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;line-height:1">'+(c.unread>99?'99+':c.unread)+'</span>' : '';
 
     return '<div style="display:flex;align-items:center;gap:11px;padding:9px 2px;border-bottom:1px solid var(--hairline)">'+
       av+
       '<div style="min-width:0;flex:1">'+
         '<div style="display:flex;align-items:baseline;gap:8px">'+
           '<span style="font-weight:'+(unread?'700':'600')+';font-size:13.5px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(c.name)+'</span>'+
-          (c.group?'<span class="w-sub" style="font-size:10px;flex:0 0 auto">'+c.participants+'</span>':'')+
-          '<span class="w-sub num" style="margin-left:auto;flex:0 0 auto;font-size:11px;color:'+(unread?'var(--iris)':'var(--faint)')+'">'+(c.ts?relTime(c.ts):'')+'</span>'+
+          (c.group?'<span class="w-sub" style="font-size:12px;flex:0 0 auto">'+c.participants+'</span>':'')+
+          '<span class="w-sub num" style="margin-left:auto;flex:0 0 auto;font-size:12px;color:'+(unread?'var(--iris)':'var(--faint)')+'">'+(c.ts?relTime(c.ts):'')+'</span>'+
         '</div>'+
         '<div style="display:flex;align-items:center;gap:8px;margin-top:2px">'+
           '<span style="min-width:0;flex:1;font-size:12px;line-height:1.35;color:'+(unread?'var(--ink)':'var(--muted)')+';overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+pv+'</span>'+
@@ -598,7 +651,7 @@ EXPAND_RENDER.messages = function(el, data){
     '</div>';
   }).join('');
 
-  h += '<div class="w-sub" style="margin-top:10px;font-size:10.5px;color:var(--faint);display:flex;align-items:center;gap:5px">'+
+  h += '<div class="w-sub" style="margin-top:10px;font-size:12px;color:var(--muted);display:flex;align-items:center;gap:5px">'+
        '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>'+
        'Local-only &middot; read straight from chat.db, never sent anywhere</div>';
 
@@ -610,8 +663,8 @@ EXPAND_RENDER.quicklinks=function(el,data){
   if(data&&data.error){el.innerHTML='<div class="hint">'+esc(data.error)+'</div>';return;}
   let links=(data&&data.links||[]).map(l=>({label:l.label||'',url:l.url||'',domain:l.domain||'',mono:l.mono||'#',hue:(l.hue||0)}));
   const sugg=(data&&data.suggestions||[]).slice();
-  const SEC='font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600;margin:16px 2px 8px';
-  const INP='flex:1;min-width:0;background:var(--chip);border:1px solid var(--hairline);border-radius:9px;padding:7px 10px;font-size:12.5px;color:var(--ink);outline:none';
+  const SEC='font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600;margin:16px 2px 8px';
+  const INP='flex:1;min-width:0;background:var(--chip);border:1px solid var(--hairline);border-radius:9px;padding:7px 10px;font-size:12.5px;color:var(--ink)';
   const _dom=u=>{try{let n=new URL(/:\/\//.test(u)?u:'https://'+u).hostname.toLowerCase();return n.replace(/^www\./,'');}catch(e){return '';}};
   const _mono=(lb,dm)=>{const s=(lb||dm||'').trim();return s?s[0].toUpperCase():'#';};
   const _hue=k=>{let h=0;for(const c of (k||'?'))h=(h*31+c.charCodeAt(0))>>>0;return h%360;};
@@ -619,7 +672,7 @@ EXPAND_RENDER.quicklinks=function(el,data){
   async function persist(){try{await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({quicklinks:links.map(l=>({label:l.label,url:l.url}))})});}catch(e){}}
   function render(){
     const nd=new Set(links.map(l=>l.domain).filter(Boolean)).size;
-    let h='<div class="w-sub" style="margin:2px 2px 12px;font-weight:600"><b class="num">'+links.length+'</b> link'+(links.length===1?'':'s')+' &middot; <b class="num">'+nd+'</b> domain'+(nd===1?'':'s')+' &middot; <span style="color:var(--faint)">click a tile to open</span></div>';
+    let h='<div class="w-sub" style="margin:2px 2px 12px;font-weight:600"><b class="num">'+links.length+'</b> link'+(links.length===1?'':'s')+' &middot; <b class="num">'+nd+'</b> domain'+(nd===1?'':'s')+' &middot; <span style="color:var(--muted)">click a tile to open</span></div>';
     if(links.length){
       h+='<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px">'+links.map((l,i)=>
         '<div style="position:relative;background:var(--glass-2);border:1px solid var(--hairline);border-radius:12px;transition:border-color .15s">'+
@@ -627,9 +680,9 @@ EXPAND_RENDER.quicklinks=function(el,data){
             chip(l,34,15)+
             '<span style="min-width:0;display:flex;flex-direction:column;gap:1px">'+
               '<span style="font-weight:620;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(l.label)+'</span>'+
-              '<span style="font-size:10.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(l.domain||'—')+'</span>'+
+              '<span style="font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(l.domain||'—')+'</span>'+
             '</span></a>'+
-          '<button data-del="'+i+'" title="Remove" style="position:absolute;top:6px;right:6px;width:20px;height:20px;display:flex;align-items:center;justify-content:center;border:none;border-radius:6px;background:transparent;color:var(--faint);cursor:pointer;padding:0">'+
+          '<button data-del="'+i+'" title="Remove" style="position:absolute;top:6px;right:6px;width:20px;height:20px;display:flex;align-items:center;justify-content:center;border:none;border-radius:6px;background:transparent;color:var(--muted);cursor:pointer;padding:0">'+
             '<svg class="ic" viewBox="0 0 24 24" style="width:13px;height:13px"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>'+
         '</div>').join('')+'</div>';
     }else{h+='<div class="hint">No links yet — add one below.</div>';}
@@ -673,21 +726,22 @@ EXPAND_RENDER.quicklinks=function(el,data){
 // ===== recent =====
 EXPAND_RENDER.recent = function(el, d){
   if(!d || !d.available){ el.innerHTML='<div class="hint">'+esc((d&&d.reason)||'No recent file activity.')+'</div>'; return; }
-  var SL=function(t){return '<div style="font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600;margin:16px 0 7px">'+esc(t)+'</div>';};
+  var SL=function(t){return '<div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600;margin:16px 0 7px">'+esc(t)+'</div>';};
   var fmtSize=function(b){b=+b||0; if(b>=1073741824)return (b/1073741824).toFixed(1)+' GB'; if(b>=1048576)return (b/1048576).toFixed(1)+' MB'; if(b>=1024)return (b/1024).toFixed(0)+' KB'; return b+' B';};
   var CODE={py:1,js:1,ts:1,jsx:1,tsx:1,java:1,go:1,rs:1,c:1,cpp:1,cc:1,h:1,hpp:1,cs:1,rb:1,php:1,swift:1,kt:1,sh:1,bash:1,zsh:1,sql:1,json:1,yaml:1,yml:1,toml:1,xml:1,html:1,css:1,scss:1,vue:1};
   var NOTE={md:1,txt:1,rtf:1,doc:1,docx:1,pages:1,org:1,tex:1,pdf:1};
   var SHEET={csv:1,xls:1,xlsx:1,numbers:1,tsv:1};
   var extIc=function(e){return CODE[e]?'code':(NOTE[e]?'note':(SHEET[e]?'activity':'file'));};
-  var fileURL=function(p){return 'file://'+String(p).split('/').map(encodeURIComponent).join('/');};
+  // a row REVEALS its file in Finder (/api/files/reveal -> open -R); it used to
+  // window.open a file:// URL, which the app shell OPENS — ran a .command (B18)
   var fileRow=function(f){
-    var chip=(f.ext&&f.ext!=='—')?'<span style="font-size:9.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);background:var(--chip);padding:1px 6px;border-radius:8px;flex:0 0 auto">'+esc(f.ext)+'</span>':'';
-    return '<a href="#" data-url="'+esc(fileURL(f.path))+'" title="'+esc(f.path)+'" style="display:flex;align-items:center;gap:9px;padding:5px 2px 5px 4px;border-bottom:1px solid var(--hairline);text-decoration:none;color:var(--ink)">'+
+    var chip=(f.ext&&f.ext!=='—')?'<span style="font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);background:var(--chip);padding:1px 6px;border-radius:8px;flex:0 0 auto">'+esc(f.ext)+'</span>':'';
+    return '<a href="#" data-reveal="'+esc(f.path)+'" title="'+esc(f.path)+'" style="display:flex;align-items:center;gap:9px;padding:5px 2px 5px 4px;border-bottom:1px solid var(--hairline);text-decoration:none;color:var(--ink)">'+
       '<span style="color:var(--muted);display:flex;flex:0 0 auto">'+icon(extIc(f.ext))+'</span>'+
       '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px">'+esc(f.name)+'</span>'+
       chip+
       '<span class="num w-sub" style="width:60px;text-align:right;flex:0 0 auto">'+fmtSize(f.size)+'</span>'+
-      '<span class="num" style="width:62px;text-align:right;color:var(--faint);font-size:11px;flex:0 0 auto">'+relTime(f.mtime)+'</span></a>';
+      '<span class="num" style="width:62px;text-align:right;color:var(--muted);font-size:12px;flex:0 0 auto">'+relTime(f.mtime)+'</span></a>';
   };
   var h='<div style="display:flex;align-items:flex-end;gap:14px;margin:2px 0 6px">'+
     '<div class="num" style="font-size:44px;font-weight:700;line-height:1">'+d.count+'</div>'+
@@ -705,19 +759,29 @@ EXPAND_RENDER.recent = function(el, d){
       '<span style="color:var(--iris);display:flex;flex:0 0 auto">'+icon('folder')+'</span>'+
       '<span style="font-weight:640;font-size:13px;flex:0 0 auto;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(g.name)+'</span>'+
       '<span class="w-sub" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(g.rel)+'</span>'+
-      '<span class="num" style="color:var(--faint);font-size:11px;flex:0 0 auto">'+g.count+' &middot; '+fmtSize(g.size)+'</span></div>';
+      '<span class="num" style="color:var(--muted);font-size:12px;flex:0 0 auto">'+g.count+' &middot; '+fmtSize(g.size)+'</span></div>';
     h+=(g.files||[]).map(fileRow).join('');
     var more=g.count-(g.files?g.files.length:0);
-    if(more>0) h+='<div style="padding:3px 0 1px 27px;color:var(--faint);font-size:11px">+ '+more+' more file'+(more===1?'':'s')+'</div>';
+    if(more>0) h+='<div style="padding:3px 0 1px 27px;color:var(--muted);font-size:12px">+ '+more+' more file'+(more===1?'':'s')+'</div>';
   });
-  h+='<div class="hint" style="margin-top:12px">Scanned '+d.scanned+' files &middot; click a row to open in Finder.</div>';
+  h+='<div class="hint" style="margin-top:12px">Scanned '+d.scanned+' files &middot; click a row to show it in Finder.</div>';
   el.innerHTML=h; wireLinks(el);
+  el.querySelectorAll('a[data-reveal]').forEach(function(a){
+    a.onclick=function(e){
+      e.preventDefault();
+      fetch('/api/files/reveal',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({path:a.getAttribute('data-reveal')})})
+        .then(function(r){return r.json();})
+        .then(function(j){if(!j||!j.ok)throw 0;})
+        .catch(function(){if(typeof toast==='function')toast('Could not show that file in Finder.');});
+    };
+  });
 };
 
 // ===== folders =====
 EXPAND_RENDER.folders=function(el,data){
   const fb=b=>{b=+b||0;if(b>=1073741824)return (b/1073741824).toFixed(b>=10737418240?0:1)+' GB';if(b>=1048576)return (b/1048576).toFixed(b>=10485760?0:1)+' MB';if(b>=1024)return (b/1024).toFixed(0)+' KB';return b+' B';};
-  const lbl=t=>'<div style="font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600;margin:12px 0 5px">'+t+'</div>';
+  const lbl=t=>'<div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600;margin:12px 0 5px">'+t+'</div>';
   const shield='<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto"><path d="M12 3l7 3v5c0 4.4-3 7.5-7 8.7C8 20.5 5 17.4 5 13V6z"/><path d="M9.2 12l1.9 1.9 3.7-3.9"/></svg>';
   if(!data||data.available===false){el.innerHTML='<div class="hint">'+esc((data&&data.reason)||'Folder access unavailable.')+'</div>';return;}
   const F=data.folders||[],total=data.total_bytes||0;
@@ -726,18 +790,18 @@ EXPAND_RENDER.folders=function(el,data){
 
   let h='<div style="display:flex;gap:9px;align-items:flex-start;padding:9px 11px;border:1px solid var(--hairline);border-radius:11px;background:var(--glass-2);margin-bottom:12px;color:var(--muted)">'+
     '<span style="color:var(--iris)">'+shield+'</span>'+
-    '<div style="font-size:11.5px;line-height:1.45"><b style="color:var(--ink);font-weight:650">Read-only workspace.</b> The assistant may list, read and search inside these folders. It will not modify or delete anything unless you ask.</div></div>';
+    '<div style="font-size:12px;line-height:1.45"><b style="color:var(--ink);font-weight:650">Read-only workspace.</b> The assistant may list, read and search inside these folders. It will not modify or delete anything unless you ask.</div></div>';
 
   h+=statGrid([['Folders',''+(data.count||0)],['Files',kfmt(data.total_files||0)],['Total size',fb(total)]]);
 
   h+=lbl('Grant a folder');
   h+='<div style="display:flex;gap:7px;margin-bottom:4px"><input id="fadd" placeholder="/Users/you/Projects  (paste or type a path)" '+
     'style="flex:1;min-width:0;background:var(--chip);border:1px solid var(--hairline);border-radius:9px;padding:7px 10px;font-size:12px;color:var(--ink);font-family:inherit"/>'+
-    '<button id="faddb" style="border:1px solid var(--hairline);background:var(--iris);color:#fff;border-radius:9px;padding:0 14px;font-size:12px;font-weight:600;cursor:pointer">Grant</button></div>';
-  h+='<div id="ferr" style="color:var(--bad);font-size:11px;min-height:0;margin-bottom:4px"></div>';
+    '<button id="faddb" style="border:1px solid var(--hairline);background:var(--iris);color:var(--iris-ink,#fff);border-radius:9px;padding:0 14px;font-size:12px;font-weight:600;cursor:pointer">Grant</button></div>';
+  h+='<div id="ferr" style="color:var(--bad);font-size:12px;min-height:0;margin-bottom:4px"></div>';
   const sug=(data.suggestions||[]);
   if(sug.length){h+='<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:2px">'+sug.map(p=>{const nm=p.split('/').filter(Boolean).pop();
-    return '<button class="fsug" data-p="'+esc(p)+'" style="display:inline-flex;align-items:center;gap:4px;border:1px dashed var(--hairline);background:transparent;color:var(--muted);border-radius:20px;padding:3px 10px;font-size:11px;cursor:pointer">+ '+esc(nm)+'</button>';}).join('')+'</div>';}
+    return '<button class="fsug" data-p="'+esc(p)+'" style="display:inline-flex;align-items:center;gap:4px;border:1px dashed var(--hairline);background:transparent;color:var(--muted);border-radius:20px;padding:3px 10px;font-size:12px;cursor:pointer">+ '+esc(nm)+'</button>';}).join('')+'</div>';}
 
   h+=lbl((data.count||0)+' granted '+((data.count===1)?'folder':'folders'));
   if(!F.length){h+='<div class="hint" style="padding:14px 0">No folders granted yet. Add one above so the assistant can help with your files.</div>';}
@@ -747,15 +811,15 @@ EXPAND_RENDER.folders=function(el,data){
     c+='<span style="color:var(--iris);margin-top:1px">'+icon('folder')+'</span>';
     c+='<div style="min-width:0;flex:1">';
     c+='<div style="display:flex;align-items:baseline;gap:8px"><span style="font-weight:650;font-size:13.5px">'+esc(f.name)+'</span>';
-    c+='<button class="frm" data-p="'+esc(f.path)+'" title="Revoke access" style="margin-left:auto;flex:0 0 auto;border:1px solid var(--hairline);background:transparent;color:var(--muted);border-radius:8px;padding:2px 9px;font-size:11px;cursor:pointer">Revoke</button></div>';
-    c+='<div class="num" style="font-size:10.5px;color:var(--faint);word-break:break-all;margin-top:2px">'+esc(f.path)+'</div>';
-    if(f.exists===false){c+='<div style="color:var(--warn);font-size:11.5px;margin-top:7px">This folder no longer exists on disk.</div></div></div>';return c;}
+    c+='<button class="frm" data-p="'+esc(f.path)+'" title="Revoke access" style="margin-left:auto;flex:0 0 auto;border:1px solid var(--hairline);background:transparent;color:var(--muted);border-radius:8px;padding:2px 9px;font-size:12px;cursor:pointer">Revoke</button></div>';
+    c+='<div class="num" style="font-size:12px;color:var(--muted);word-break:break-all;margin-top:2px">'+esc(f.path)+'</div>';
+    if(f.exists===false){c+='<div style="color:var(--warn);font-size:12px;margin-top:7px">This folder no longer exists on disk.</div></div></div>';return c;}
     const meta=['<b class="num" style="color:var(--ink)">'+kfmt(f.files||0)+'</b> files',
       '<b class="num" style="color:var(--ink)">'+fb(f.bytes||0)+'</b>',
       kfmt(f.dirs||0)+' subfolders',
       (f.last_mtime?('updated '+relTime(f.last_mtime)):'no recent edits')];
-    c+='<div class="w-sub" style="margin:7px 0 6px;font-size:11.5px">'+meta.join('&nbsp;·&nbsp;')+(f.truncated?' <span style="color:var(--faint)">(sampled)</span>':'')+'</div>';
-    c+='<div style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--muted)"><span style="width:78px">of workspace</span>'+
+    c+='<div class="w-sub" style="margin:7px 0 6px;font-size:12px">'+meta.join('&nbsp;·&nbsp;')+(f.truncated?' <span style="color:var(--muted)">(sampled)</span>':'')+'</div>';
+    c+='<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted)"><span style="width:78px">of workspace</span>'+
       '<div style="flex:1;height:7px;border-radius:4px;background:var(--hairline);overflow:hidden"><i style="display:block;height:100%;width:'+share+'%;background:linear-gradient(90deg,var(--iris),var(--quick))"></i></div>'+
       '<span class="num" style="width:34px;text-align:right;color:var(--ink)">'+share+'%</span></div>';
     const ty=(f.types||[]).filter(t=>t.bytes>0);
@@ -764,7 +828,7 @@ EXPAND_RENDER.folders=function(el,data){
     if(lg.length){c+=lbl('Largest files');c+=lg.map(x=>'<div style="display:flex;align-items:baseline;gap:8px;padding:2px 0;font-size:12px">'+
       '<span style="color:var(--muted);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">'+esc(x.name)+'</span>'+
       '<span class="num" style="color:var(--ink);flex:0 0 auto">'+fb(x.bytes)+'</span></div>').join('');}
-    if(f.newest&&f.newest.name){c+='<div class="w-sub" style="margin-top:7px;font-size:11px;color:var(--faint)">Newest: <span class="num" style="color:var(--muted)">'+esc(f.newest.name)+'</span> · '+relTime(f.newest.mtime)+'</div>';}
+    if(f.newest&&f.newest.name){c+='<div class="w-sub" style="margin-top:7px;font-size:12px;color:var(--muted)">Newest: <span class="num" style="color:var(--muted)">'+esc(f.newest.name)+'</span> · '+relTime(f.newest.mtime)+'</div>';}
     c+='</div></div>';
     return c;
   }).join('');
@@ -818,7 +882,7 @@ EXPAND_RENDER.clock = function(el, data){
   var deltaHtml = '';
   if(sun.available && sun.delta_min!=null){
     var dm = sun.delta_min, up = dm>=0;
-    deltaHtml = '<span class="delta '+(up?'up':'down')+'" style="font-size:11px">'+(up?'+':'−')+fmtDur(Math.abs(dm))+' vs. yesterday</span>';
+    deltaHtml = '<span class="delta '+(up?'up':'down')+'" style="font-size:12px">'+(up?'+':'−')+fmtDur(Math.abs(dm))+' vs. yesterday</span>';
   }
 
   var now0 = new Date();
@@ -840,7 +904,7 @@ EXPAND_RENDER.clock = function(el, data){
     weekCells +=
       '<div style="flex:1;text-align:center;padding:8px 0;border-radius:11px;'+
         (isToday?'background:linear-gradient(160deg,var(--iris),var(--quick));box-shadow:0 4px 14px color-mix(in srgb,var(--iris) 35%,transparent);':'background:var(--glass-2);border:1px solid var(--hairline);')+'">'+
-        '<div style="font-size:10px;font-weight:700;letter-spacing:.06em;color:'+(isToday?'rgba(255,255,255,.85)':'var(--muted)')+'">'+WL[i]+'</div>'+
+        '<div style="font-size:11px;font-weight:700;letter-spacing:.06em;color:'+(isToday?'rgba(255,255,255,.85)':'var(--muted)')+'">'+WL[i]+'</div>'+
         '<div class="num" style="font-size:16px;font-weight:700;margin-top:2px;color:'+(isToday?'#fff':'var(--ink)')+'">'+dd.getDate()+'</div>'+
       '</div>';
   }
@@ -859,7 +923,7 @@ EXPAND_RENDER.clock = function(el, data){
     sunStats = '<div class="hint" style="margin:6px 0">'+esc(sun.reason||'Sun times unavailable.')+'</div>';
   }
 
-  var LBL='font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600;margin:14px 0 7px';
+  var LBL='font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600;margin:14px 0 7px';
   var UP='<svg viewBox="0 0 24 24" width="10" height="10" style="vertical-align:-1px" fill="none" stroke="#F5B94A" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 14 12 8 18 14"/></svg>';
   var DN='<svg viewBox="0 0 24 24" width="10" height="10" style="vertical-align:-1px" fill="none" stroke="#E9963B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 10 12 16 18 10"/></svg>';
 
@@ -882,7 +946,7 @@ EXPAND_RENDER.clock = function(el, data){
       '<i id="ck-now" style="position:absolute;top:0;bottom:0;left:0%;width:2px;margin-left:-1px;background:var(--ink);box-shadow:0 0 8px var(--ink)"></i>'+
       '<i id="ck-nowdot" style="position:absolute;top:50%;left:0%;width:9px;height:9px;margin:-4.5px 0 0 -4.5px;border-radius:50%;background:var(--ink);box-shadow:0 0 0 3px color-mix(in srgb,var(--ink) 25%,transparent)"></i>'+
     '</div>'+
-    '<div style="display:flex;justify-content:space-between;font-size:10.5px;color:var(--faint);margin-top:5px" class="num">'+
+    '<div style="display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-top:5px" class="num">'+
       '<span>12 AM</span>'+
       (sr!=null?'<span style="color:#F5B94A">'+UP+' '+esc(sun.sunrise)+'</span>':'')+
       (ss!=null?'<span style="color:#E9963B">'+DN+' '+esc(sun.sunset)+'</span>':'')+
@@ -986,7 +1050,7 @@ function _ddCSS(){
     '.dd-open .ddw-chev{transform:rotate(90deg);color:var(--iris)}'+
     '.ddw-body,.ddc-body{overflow:hidden}'+
     '.ddw-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}'+
-    '.ddw-chip{display:inline-flex;align-items:center;gap:5px;font-size:11px;padding:3px 9px;border:1px solid var(--hairline);border-radius:9px;background:var(--chip)}'+
+    '.ddw-chip{display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:3px 9px;border:1px solid var(--hairline);border-radius:9px;background:var(--chip)}'+
     '.ddw-chip b{font-weight:640}'+
     '@keyframes ddw-draw{from{stroke-dashoffset:1}to{stroke-dashoffset:0}}'+
     '.ddw-line{stroke-dasharray:1;stroke-dashoffset:0;animation:ddw-draw .9s cubic-bezier(.4,0,.2,1) both}'+
@@ -999,7 +1063,7 @@ function _ddCSS(){
     '.ddc-strip{display:flex;gap:2px;align-items:flex-end;margin:6px 0 8px;padding:7px 4px 5px;border:1px solid var(--hairline);border-radius:12px;background:var(--glass-2)}'+
     '.ddc-cell{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer;border-radius:8px;padding:2px 0;min-width:0}'+
     '.ddc-cell:hover{background:var(--chip)}'+
-    '.ddc-lb{font-size:9.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--faint);font-weight:600}'+
+    '.ddc-lb{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600}'+
     '@keyframes ddc-pop{from{transform:scale(0)}to{transform:scale(1)}}'+
     '.ddc-dot{transform-box:fill-box;transform-origin:center;animation:ddc-pop .45s cubic-bezier(.34,1.4,.4,1) both}'+
     '@keyframes ddc-ring{0%{transform:scale(.55);opacity:.5}75%,100%{transform:scale(1.6);opacity:0}}'+
@@ -1007,7 +1071,7 @@ function _ddCSS(){
     '.ddc-head{display:flex;align-items:baseline;gap:8px;margin:10px -4px 0;padding:5px 4px 4px;border-bottom:1px solid var(--hairline);cursor:pointer;user-select:none;-webkit-user-select:none;border-radius:8px;transition:background .15s}'+
     '.ddc-head:hover{background:var(--glass-2)}'+
     '.ddc-head .ddw-chev{align-self:center}'+
-    '.ddc-badge{margin-left:auto;font-size:10px;color:var(--muted);background:var(--hairline);border-radius:8px;padding:0 7px;line-height:16px;min-width:16px;text-align:center}'+
+    '.ddc-badge{margin-left:auto;font-size:12px;color:var(--muted);background:var(--hairline);border-radius:8px;padding:0 7px;line-height:16px;min-width:16px;text-align:center}'+
     '@media (prefers-reduced-motion:reduce){.ddw-line,.ddw-bar,.ddw-area,.ddw-hidot,.ddc-dot,.ddc-ring,.ddw-chev{animation:none;transition:none}.ddc-ring{opacity:0}}';
   document.head.appendChild(st);
 }
@@ -1066,10 +1130,10 @@ EXPAND_RENDER.weather=function(el,d){
   h+=statGrid([['Humidity',c.humidity+'%'],['Wind',c.wind+' '+c.wind_dir],['UV index',c.uv],['Pressure',c.pressure+' hPa'],['Cloud',c.cloud+'%'],['Precip',c.precip+' mm']]);
   h+='<div class="w-sub" style="margin:6px 0 4px;font-weight:600">Next 24 hours</div>';
   h+='<div style="display:flex;gap:2px;overflow-x:auto;padding-bottom:6px">'+(d.hourly||[]).map(x=>
-    '<div style="flex:0 0 auto;width:44px;text-align:center;font-size:10.5px"><div class="num" style="font-weight:600">'+x.temp+'&deg;</div>'+
+    '<div style="flex:0 0 auto;width:44px;text-align:center;font-size:12px"><div class="num" style="font-weight:600">'+x.temp+'&deg;</div>'+
     '<div style="height:'+(20+x.pop*0.4)+'px;width:8px;margin:4px auto 3px;border-radius:3px;background:linear-gradient(180deg,var(--quick),color-mix(in srgb,var(--quick) 20%,transparent))"></div>'+
-    '<div style="color:var(--muted)">'+x.pop+'%</div><div style="color:var(--faint);margin-top:2px">'+esc(x.t)+'</div></div>').join('')+'</div>';
-  h+='<div class="w-sub" style="margin:8px 0 4px;font-weight:600">7-day forecast <span style="font-weight:500;color:var(--faint)">&middot; tap a day for hourly</span></div>';
+    '<div style="color:var(--muted)">'+x.pop+'%</div><div style="color:var(--muted);margin-top:2px">'+esc(x.t)+'</div></div>').join('')+'</div>';
+  h+='<div class="w-sub" style="margin:8px 0 4px;font-weight:600">7-day forecast <span style="font-weight:500;color:var(--muted)">&middot; tap a day for hourly</span></div>';
   const days=d.daily||[];
   h+=days.map((x,i)=>{const dt=new Date(x.date+'T00:00');const dn=i===0?'Today':dt.toLocaleDateString([],{weekday:'short'});
     return '<div class="ddw-day">'+
@@ -1117,7 +1181,7 @@ EXPAND_RENDER.today=function(el,d){
     svg+='<circle class="ddc-dot" style="animation-delay:'+(x.i*55)+'ms;'+(x.n?'fill:'+fill:'fill:none;stroke:var(--faint);stroke-width:1.2')+'" cx="13" cy="13" r="'+r.toFixed(1)+'"/></svg>';
     return '<div class="ddc-cell" data-key="'+x.key+'" role="button" tabindex="0" aria-label="'+esc(x.rel)+', '+x.n+' events">'+svg+
       '<span class="ddc-lb"'+(today?' style="color:var(--iris)"':'')+'>'+esc(x.dt.toLocaleDateString([],{weekday:'narrow'}))+'</span>'+
-      '<span class="num" style="font-size:9px;color:var(--muted);line-height:1">'+(x.n||'&nbsp;')+'</span></div>';
+      '<span class="num" style="font-size:12px;color:var(--muted);line-height:1">'+(x.n||'&nbsp;')+'</span></div>';
   }).join('')+'</div>';
   h+=rows.map(x=>{const open=x.i<2;
     return '<div class="ddc-day" data-key="'+x.key+'">'+
@@ -1127,7 +1191,7 @@ EXPAND_RENDER.today=function(el,d){
       '<div class="ddc-body"'+(open?'':' hidden')+'>'+
       (x.day&&x.day.events.length?
         x.day.events.map(e=>'<div class="ev"><span class="t num">'+esc(e.all_day?'all-day':(e.time+(e.end?('&ndash;'+e.end):'')))+'</span><span class="n">'+esc(e.title)+'</span></div>').join(''):
-        '<div style="padding:2px 0 4px;color:var(--faint);font-size:11.5px">No events</div>')+
+        '<div style="padding:2px 0 4px;color:var(--muted);font-size:12px">No events</div>')+
       '</div></div>';}).join('');
   el.innerHTML=h;
   el.querySelectorAll('.ddc-day').forEach(sec=>{
@@ -1159,10 +1223,10 @@ EXPAND_RENDER.rss = function(el, data){
     var st=document.createElement('style'); st.id='nd-style';
     st.textContent=
       '.nd-tabs{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0 2px}'+
-      '.nd-tab{font-size:11px;font-weight:620;letter-spacing:.02em;padding:4px 11px;border-radius:999px;border:1px solid var(--hairline);background:transparent;color:var(--muted);cursor:pointer;font-family:inherit;transition:color .15s,background .15s,border-color .15s}'+
+      '.nd-tab{font-size:12px;font-weight:620;letter-spacing:.02em;padding:4px 11px;border-radius:999px;border:1px solid var(--hairline);background:transparent;color:var(--muted);cursor:pointer;font-family:inherit;transition:color .15s,background .15s,border-color .15s}'+
       '.nd-tab:hover{color:var(--ink)}'+
       '.nd-tab.on{background:color-mix(in srgb,var(--iris) 15%,transparent);border-color:color-mix(in srgb,var(--iris) 45%,transparent);color:var(--ink)}'+
-      '.nd-tab .n{font-size:9.5px;color:var(--faint);margin-left:5px;font-variant-numeric:tabular-nums}'+
+      '.nd-tab .n{font-size:12px;color:var(--muted);margin-left:5px;font-variant-numeric:tabular-nums}'+
       '.nd-lead a{font-size:13.5px;font-weight:650;line-height:1.35;color:var(--ink);text-decoration:none}'+
       '.nd-lead a:hover{color:var(--wac)}'+
       '@keyframes ndring{0%{transform:scale(.25);opacity:.9}70%{opacity:0}100%{transform:scale(1);opacity:0}}'+
@@ -1183,17 +1247,17 @@ EXPAND_RENDER.rss = function(el, data){
   }
   function srcLine(x){
     return '<span style="color:var(--wac);font-weight:640">'+esc(x.source||'')+'</span>'+
-           (x.ts?'<span style="color:var(--faint)"> · '+relTime(x.ts)+'</span>':'');
+           (x.ts?'<span style="color:var(--muted)"> · '+relTime(x.ts)+'</span>':'');
   }
   function row(x, lead){
     if(lead) return '<div class="nd-lead" style="padding:7px 0 10px;border-bottom:1px solid var(--hairline)">'+
-      '<div style="font-size:10.5px;margin-bottom:3px">'+srcLine(x)+'</div>'+
+      '<div style="font-size:12px;margin-bottom:3px">'+srcLine(x)+'</div>'+
       '<a href="#" data-url="'+esc(x.url)+'">'+esc(x.title)+'</a>'+
-      (x.summary?'<div style="color:var(--muted);font-size:11.5px;line-height:1.45;margin-top:4px">'+esc(x.summary)+'</div>':'')+'</div>';
+      (x.summary?'<div style="color:var(--muted);font-size:12px;line-height:1.45;margin-top:4px">'+esc(x.summary)+'</div>':'')+'</div>';
     return '<div class="news-item"><div style="min-width:0">'+
       '<a href="#" data-url="'+esc(x.url)+'">'+esc(x.title)+'</a>'+
       '<div class="sub">'+srcLine(x)+'</div>'+
-      (x.summary?'<div class="ds" style="color:var(--muted);font-size:11px;margin-top:3px;line-height:1.4">'+esc(x.summary)+'</div>':'')+'</div></div>';
+      (x.summary?'<div class="ds" style="color:var(--muted);font-size:12px;margin-top:3px;line-height:1.4">'+esc(x.summary)+'</div>':'')+'</div></div>';
   }
 
   var S=(data&&data.sections)||[];
@@ -1211,11 +1275,11 @@ EXPAND_RENDER.rss = function(el, data){
   el.innerHTML=
     '<div style="display:flex;align-items:center;gap:10px;margin-top:2px">'+glyph()+
       '<div style="min-width:0">'+
-        '<div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600">News desk</div>'+
-        '<div class="w-sub" style="font-size:11px"><b class="num">'+total+'</b> stories · '+S.length+' desks</div>'+
+        '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600">News desk</div>'+
+        '<div class="w-sub" style="font-size:12px"><b class="num">'+total+'</b> stories · '+S.length+' desks</div>'+
       '</div>'+
       '<span class="livedot" style="margin-left:auto"></span>'+
-      '<span style="font-size:10px;letter-spacing:.06em;color:var(--muted);font-weight:600">WIRE</span>'+
+      '<span style="font-size:11px;letter-spacing:.06em;color:var(--muted);font-weight:600">WIRE</span>'+
     '</div>'+
     '<div class="nd-tabs">'+S.map(function(s){
       return '<button class="nd-tab'+(s.name===cur?' on':'')+'" data-nd="'+esc(s.name)+'">'+esc(s.name)+
@@ -1254,13 +1318,17 @@ EXPAND_RENDER.markets = function(el, d){
   el._mktSeen = true;
 
   // ---------- shared bits ----------
-  function label(t){ return '<div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;margin:0 0 8px">'+esc(t)+'</div>'; }
+  function label(t){ return '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;margin:0 0 8px">'+esc(t)+'</div>'; }
+  // each figure carries its OWN sign and colour (index.html's signedTxt /
+  // pctTxt / deltaCls): chg -0.01 on a -0.0% day used to print "+-0.01 · +0%"
+  // because the sign of pct was glued in front of both numbers
   function chgTxt(q){
-    var u = (q.pct||0) >= 0, sgn = u?'+':'';
-    return '<span class="num" style="font-size:11.5px;font-weight:640;color:'+(u?'var(--ok)':'var(--bad)')+'">'+sgn+fmtNum(q.chg)+' &middot; '+sgn+(q.pct!=null?q.pct:0)+'%</span>';
+    return '<span class="num" style="font-size:12px;font-weight:640">'+
+      '<span class="delta '+deltaCls(q.chg)+'">'+signedTxt(q.chg)+'</span> &middot; '+
+      '<span class="delta '+deltaCls(q.pct)+'">'+pctTxt(q.pct!=null?q.pct:0)+'</span></span>';
   }
   function spark(q,h,w){
-    var s = miniSpark(q.spark,(q.pct||0)>=0);
+    var s = miniSpark(q.spark,sgnOf(q.pct)>=0);
     return s ? s.replace('class="qspark"','class="qspark" style="width:'+(w||'100%')+';height:'+h+'px;display:block"') : '';
   }
   function starIc(on){
@@ -1272,13 +1340,13 @@ EXPAND_RENDER.markets = function(el, d){
     if(lo==null||hi==null||v==null||!(hi>lo)) return '<div style="flex:1"></div>';
     var p = Math.max(2, Math.min(98,(v-lo)/(hi-lo)*100));
     return '<div style="display:flex;align-items:center;gap:5px;flex:1;min-width:0" class="num">'+
-      '<span style="font-size:9px;color:var(--muted);letter-spacing:.05em;font-weight:600;flex:0 0 auto">'+lbl+'</span>'+
-      '<span style="font-size:9.5px;color:var(--faint);flex:0 0 auto">'+fmtNum(lo)+'</span>'+
+      '<span style="font-size:11px;color:var(--muted);letter-spacing:.05em;font-weight:600;flex:0 0 auto">'+lbl+'</span>'+
+      '<span style="font-size:12px;color:var(--muted);flex:0 0 auto">'+fmtNum(lo)+'</span>'+
       '<div style="position:relative;flex:1;height:4px;border-radius:2px;background:var(--hairline);min-width:24px">'+
         '<i style="position:absolute;left:0;top:0;height:100%;width:'+p.toFixed(1)+'%;border-radius:2px;background:color-mix(in srgb,var(--iris) 40%,transparent)"></i>'+
         '<i style="position:absolute;left:'+p.toFixed(1)+'%;top:50%;width:7px;height:7px;border-radius:50%;background:'+(u?'var(--ok)':'var(--bad)')+';transform:translate(-50%,-50%);box-shadow:0 0 0 1.5px var(--glass-2)"></i>'+
       '</div>'+
-      '<span style="font-size:9.5px;color:var(--faint);flex:0 0 auto">'+fmtNum(hi)+'</span></div>';
+      '<span style="font-size:12px;color:var(--muted);flex:0 0 auto">'+fmtNum(hi)+'</span></div>';
   }
 
   // ---------- freshness (12-hour time always) ----------
@@ -1320,12 +1388,12 @@ EXPAND_RENDER.markets = function(el, d){
   h += '<div style="display:flex;align-items:center;gap:16px;margin:2px 0 14px">'+gauge+
     '<div style="flex:1;min-width:0">'+ label('Market breadth') +
       '<div class="num" style="display:flex;align-items:baseline;gap:6px;line-height:1;flex-wrap:wrap">'+
-        '<span style="font-size:23px;font-weight:720;color:var(--ok)">'+br.adv+'</span><span style="font-size:9.5px;color:var(--muted);font-weight:600;letter-spacing:.05em">ADV</span>'+
-        '<span style="font-size:23px;font-weight:720;color:var(--bad);margin-left:8px">'+br.dec+'</span><span style="font-size:9.5px;color:var(--muted);font-weight:600;letter-spacing:.05em">DEC</span>'+
-        (br.flat?'<span style="font-size:23px;font-weight:720;color:var(--muted);margin-left:8px">'+br.flat+'</span><span style="font-size:9.5px;color:var(--muted);font-weight:600;letter-spacing:.05em">FLAT</span>':'')+
+        '<span style="font-size:23px;font-weight:720;color:var(--ok)">'+br.adv+'</span><span style="font-size:11px;color:var(--muted);font-weight:600;letter-spacing:.05em">ADV</span>'+
+        '<span style="font-size:23px;font-weight:720;color:var(--bad);margin-left:8px">'+br.dec+'</span><span style="font-size:11px;color:var(--muted);font-weight:600;letter-spacing:.05em">DEC</span>'+
+        (br.flat?'<span style="font-size:23px;font-weight:720;color:var(--muted);margin-left:8px">'+br.flat+'</span><span style="font-size:11px;color:var(--muted);font-weight:600;letter-spacing:.05em">FLAT</span>':'')+
       '</div>'+
-      '<div style="font-size:11px;color:var(--muted);margin-top:5px;display:flex;align-items:center;gap:6px">'+(live?'<span class="livedot"></span>':'')+fresh+
-        '<span style="color:var(--faint)">&middot; '+(idx.length+wl.length)+' symbols</span></div>'+
+      '<div style="font-size:12px;color:var(--muted);margin-top:5px;display:flex;align-items:center;gap:6px">'+(live?'<span class="livedot"></span>':'')+fresh+
+        '<span style="color:var(--muted)">&middot; '+(idx.length+wl.length)+' symbols</span></div>'+
     '</div></div>';
 
   // ---------- indices ----------
@@ -1333,11 +1401,11 @@ EXPAND_RENDER.markets = function(el, d){
   h += label('Indices');
   h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:14px">';
   h += idx.map(function(q){
-    if(q.error) return '<div style="'+tileCss+'"><div style="font-weight:660">'+esc(q.symbol)+'</div><div class="w-sub" style="color:var(--faint)">unavailable</div></div>';
+    if(q.error) return '<div style="'+tileCss+'"><div style="font-weight:660">'+esc(q.symbol)+'</div><div class="w-sub" style="color:var(--muted)">unavailable</div></div>';
     return '<div style="'+tileCss+'">'+
       '<div style="display:flex;align-items:baseline;gap:6px">'+
         '<span style="font-weight:720;font-size:12px">'+esc(q.symbol)+'</span>'+
-        '<span class="w-sub" style="font-size:10px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(q.friendly||q.name)+'</span></div>'+
+        '<span class="w-sub" style="font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(q.friendly||q.name)+'</span></div>'+
       '<div class="num" style="font-size:17px;font-weight:700;line-height:1.15;margin:3px 0 1px">'+fmtNum(q.price)+'</div>'+
       '<div style="margin-bottom:3px">'+chgTxt(q)+'</div>'+ spark(q,22) +'</div>';
   }).join('');
@@ -1345,11 +1413,11 @@ EXPAND_RENDER.markets = function(el, d){
 
   // ---------- watchlist header: label + status + search ----------
   h += '<div style="display:flex;align-items:center;gap:10px;margin:0 0 4px">'+
-    '<span style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;flex:0 0 auto">Watchlist</span>'+
-    '<span id="mkt-status" class="num" style="font-size:10.5px;color:var(--iris);font-weight:640"></span>'+
+    '<span style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600;flex:0 0 auto">Watchlist</span>'+
+    '<span id="mkt-status" class="num" style="font-size:12px;color:var(--iris);font-weight:640"></span>'+
     '<div style="position:relative;margin-left:auto;flex:0 1 250px;min-width:150px">'+
       '<svg viewBox="0 0 24 24" width="12" height="12" style="position:absolute;left:9px;top:50%;transform:translateY(-50%);pointer-events:none"><circle cx="11" cy="11" r="7" fill="none" stroke="var(--muted)" stroke-width="2"/><line x1="16.5" y1="16.5" x2="21" y2="21" stroke="var(--muted)" stroke-width="2" stroke-linecap="round"/></svg>'+
-      '<input id="mkt-q" placeholder="Add symbol&hellip;" autocomplete="off" spellcheck="false" style="width:100%;box-sizing:border-box;padding:5px 9px 5px 27px;font:inherit;font-size:12px;background:var(--glass-2);border:1px solid var(--hairline);border-radius:8px;color:var(--ink);outline:none">'+
+      '<input id="mkt-q" placeholder="Add symbol&hellip;" autocomplete="off" spellcheck="false" style="width:100%;box-sizing:border-box;padding:5px 9px 5px 27px;font:inherit;font-size:12px;background:var(--glass-2);border:1px solid var(--hairline);border-radius:8px;color:var(--ink)">'+
       '<div id="mkt-dd" class="mkt-dd" hidden></div>'+
     '</div></div>';
 
@@ -1359,19 +1427,19 @@ EXPAND_RENDER.markets = function(el, d){
     var xBtn = q.removable ? '<button class="mkt-x" data-del="'+sym+'" title="Remove '+sym+'" aria-label="Remove '+sym+'">'+xIc+'</button>' : '<span style="width:16px;flex:0 0 16px"></span>';
     if(q.error) return '<div class="mkt-row" style="display:flex;align-items:center;gap:8px">'+
       '<span style="width:18px;flex:0 0 18px"></span><span style="font-weight:700;font-size:13px;min-width:52px">'+sym+'</span>'+
-      '<span class="w-sub" style="flex:1;color:var(--faint)">quote unavailable</span>'+xBtn+'</div>';
+      '<span class="w-sub" style="flex:1;color:var(--muted)">quote unavailable</span>'+xBtn+'</div>';
     var u = (q.pct||0) >= 0;
     var starBtn = '<button class="mkt-star" data-star="'+sym+'" title="'+(q.starred?'Unpin':'Pin to top')+'" aria-label="'+(q.starred?'Unstar':'Star')+' '+sym+'" '+(q.starred?'data-on="1"':'')+'>'+starIc(q.starred)+'</button>';
     return '<div class="mkt-row">'+
       '<div style="display:flex;align-items:center;gap:8px;min-width:0">'+ starBtn +
         '<span style="font-weight:720;font-size:13px;min-width:52px;flex:0 0 auto">'+sym+'</span>'+
-        '<span class="w-sub" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px">'+esc(q.name)+'</span>'+
+        '<span class="w-sub" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px">'+esc(q.name)+'</span>'+
         '<span style="flex:0 0 66px">'+spark(q,20,'66px')+'</span>'+
         '<span class="num" style="font-weight:680;font-size:13.5px;flex:0 0 auto">'+fmtNum(q.price)+'</span>'+
         '<span style="flex:0 0 118px;text-align:right">'+chgTxt(q)+'</span>'+ xBtn +'</div>'+
       '<div style="display:flex;gap:14px;align-items:center;margin-top:4px;padding-left:26px">'+
         rng('D', q.day_lo, q.price, q.day_hi, u) + rng('52W', q.wk_lo, q.price, q.wk_hi, u) +
-        '<span class="num" style="font-size:9.5px;color:var(--muted);flex:0 0 auto">VOL '+(q.vol!=null?kfmt(q.vol):'&mdash;')+'</span>'+
+        '<span class="num" style="font-size:12px;color:var(--muted);flex:0 0 auto">VOL '+(q.vol!=null?kfmt(q.vol):'&mdash;')+'</span>'+
       '</div></div>';
   }).join('') || '<div class="hint">No symbols yet — search above to add one.</div>';
 
@@ -1440,15 +1508,15 @@ EXPAND_RENDER.markets = function(el, d){
     }
     function renderDD(r){
       items = r.results||[];
-      if(r.error){ dd.innerHTML = '<div style="padding:8px 11px;font-size:11px;color:var(--muted)">'+esc(r.error)+'</div>'; dd.hidden=false; return; }
-      if(!items.length){ dd.innerHTML = '<div style="padding:8px 11px;font-size:11px;color:var(--muted)">No equity or ETF matches for &ldquo;'+esc(r.q)+'&rdquo;</div>'; dd.hidden=false; return; }
+      if(r.error){ dd.innerHTML = '<div style="padding:8px 11px;font-size:12px;color:var(--muted)">'+esc(r.error)+'</div>'; dd.hidden=false; return; }
+      if(!items.length){ dd.innerHTML = '<div style="padding:8px 11px;font-size:12px;color:var(--muted)">No equity or ETF matches for &ldquo;'+esc(r.q)+'&rdquo;</div>'; dd.hidden=false; return; }
       dd.innerHTML = items.map(function(it,i){
         var dup = have[it.symbol];
         return '<div class="mkt-dd-item'+(dup?' dim':'')+'" data-i="'+i+'">'+
           '<span class="num" style="font-weight:700;min-width:56px;flex:0 0 auto">'+esc(it.symbol)+'</span>'+
           '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)">'+esc(it.name)+'</span>'+
-          '<span style="font-size:9.5px;color:var(--faint);letter-spacing:.04em;flex:0 0 auto">'+esc(it.exch)+(it.type==='ETF'?' &middot; ETF':'')+'</span>'+
-          (dup ? '<span style="font-size:9.5px;color:var(--ok);font-weight:650;flex:0 0 auto">ADDED</span>' : plusIc)+
+          '<span style="font-size:11px;color:var(--muted);letter-spacing:.04em;flex:0 0 auto">'+esc(it.exch)+(it.type==='ETF'?' &middot; ETF':'')+'</span>'+
+          (dup ? '<span style="font-size:12px;color:var(--ok);font-weight:650;flex:0 0 auto">ADDED</span>' : plusIc)+
         '</div>';
       }).join('');
       dd.hidden = false; sel = -1;
@@ -1500,7 +1568,7 @@ EXPAND_RENDER.system = (function(){
     }
     return c;
   }
-  var SEC_S='font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:650';
+  var SEC_S='font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:650';
   function sec(t){ return '<div style="'+SEC_S+';margin:10px 0 4px">'+esc(t)+'</div>'; }
   function fmtRate(k){ k=+k||0; return k>=1024 ? (k/1024).toFixed(k>=10240?0:1)+' MB/s' : k.toFixed(k>=100?0:1)+' KB/s'; }
   function t12(ts){ var d=new Date(ts*1000),h=d.getHours(),m=d.getMinutes(),ap=h>=12?'PM':'AM'; h=h%12||12; return h+':'+(m<10?'0':'')+m+' '+ap; }
@@ -1517,7 +1585,7 @@ EXPAND_RENDER.system = (function(){
       +(RM?'':' style="transition:stroke-dasharray .9s cubic-bezier(.22,1,.36,1),stroke .4s linear"')+'/></svg>'
       +'<div id="'+gid+'-v" class="num" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;font-variant-numeric:tabular-nums">—</div></div>'
       +'<div style="'+SEC_S+';margin-top:3px">'+esc(label)+'</div>'
-      +'<div id="'+gid+'-s" class="num" style="font-size:10px;color:var(--faint);margin-top:1px;white-space:nowrap">&nbsp;</div></div>';
+      +'<div id="'+gid+'-s" class="num" style="font-size:12px;color:var(--muted);margin-top:1px;white-space:nowrap">&nbsp;</div></div>';
   }
   function setGauge(root,gid,pct,sub){
     var c=root.querySelector('#'+gid); if(!c)return;
@@ -1585,7 +1653,7 @@ EXPAND_RENDER.system = (function(){
         +(RM?'':'animation:lpulse 2s ease-in-out infinite')+'"></span>';}).join('');
   }
   function lg(cvar,txt,vid){
-    return '<span style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:var(--muted)">'
+    return '<span style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--muted)">'
       +'<i style="width:8px;height:8px;border-radius:2px;background:var(--'+cvar+')"></i>'+txt
       +' <b id="'+vid+'" class="num" style="color:var(--ink);font-variant-numeric:tabular-nums"></b></span>';
   }
@@ -1600,7 +1668,7 @@ EXPAND_RENDER.system = (function(){
       + chartCard('sp-cv-cpu','CPU · 30 min',56) + chartCard('sp-cv-ram','Memory · 30 min',56) +'</div>'
       +'<div style="margin-top:8px">'+chartCard('sp-cv-net','Network',72,
         lg('iris','IN','sp-in-now')+lg('quick','OUT','sp-out-now'))+'</div>'
-      +'<div id="sp-x" class="num" style="display:flex;justify-content:space-between;font-size:9.5px;color:var(--faint);padding:2px 2px 0"></div>'
+      +'<div id="sp-x" class="num" style="display:flex;justify-content:space-between;font-size:12px;color:var(--muted);padding:2px 2px 0"></div>'
       +'<div id="sp-tops" style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px"></div>'
       +'<div id="sp-memsto" style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px"></div>'
       +'<div id="sp-nettot" class="w-sub" style="margin-top:8px"></div>';
@@ -1620,7 +1688,7 @@ EXPAND_RENDER.system = (function(){
                ['Uptime',upTxt(data.uptime_hr)],['Cores',data.cores!=null?data.cores:'—'],
                ['Samples',n+' · 5s']];
       el.querySelector('#sp-info').innerHTML=inf.map(function(p){
-        return '<div style="display:flex;justify-content:space-between;gap:8px;font-size:11px">'
+        return '<div style="display:flex;justify-content:space-between;gap:8px;font-size:12px">'
           +'<span style="'+SEC_S+'">'+p[0]+'</span><span class="num" style="font-weight:640;font-variant-numeric:tabular-nums">'+esc(p[1])+'</span></div>';}).join('');
       setDots(el,'sp-cv-cpu',drawChart(el.querySelector('#sp-cv-cpu'),hist,[{key:'cpu',cvar:'--iris',fill:1}],100));
       setDots(el,'sp-cv-ram',drawChart(el.querySelector('#sp-cv-ram'),hist,[{key:'ram',cvar:'--quick',fill:1}],100));
@@ -1647,7 +1715,10 @@ EXPAND_RENDER.system = (function(){
     }
     requestAnimationFrame(function(){paint(d);});
     window.__sysProTimer=setInterval(function(){
-      if(!el.isConnected){clearInterval(window.__sysProTimer);window.__sysProTimer=null;return;}
+      // closePop() only HIDES #wpop, so the body stays connected: stop on any
+      // hidden ancestor too, or this polled (~86 ms CPU, 8 spawns) forever (C88)
+      if(!el.isConnected||(el.closest&&el.closest('[hidden]'))){clearInterval(window.__sysProTimer);window.__sysProTimer=null;return;}
+      if(document.hidden)return;
       fetch('/api/expand?id=system').then(function(r){return r.json();}).then(function(nd){
         if(el.isConnected&&nd&&nd.history)paint(nd);}).catch(function(){});
     },5000);
@@ -1963,7 +2034,7 @@ EXPAND_RENDER.battery=function(el,d){
   if(chg){var bx=c,by=c+9;
     bolt='<path class="vk-bolt" d="M'+bx+' '+by+' L'+(bx-6)+' '+(by+12)+' L'+(bx-1)+' '+(by+12)+' L'+(bx-4)+' '+(by+21)+' L'+(bx+5)+' '+(by+9)+' L'+bx+' '+(by+9)+' Z" fill="'+col+'"/>';}
   var inner='<text x="'+c+'" y="'+ty+'" text-anchor="middle" class="num" style="font-size:29px;font-weight:750;fill:'+col+'">'+pct+'<tspan style="font-size:13px;font-weight:600;fill:var(--muted)">%</tspan></text>'+bolt+
-    (chg?'':'<text x="'+c+'" y="'+(c+21)+'" text-anchor="middle" style="font-size:8.5px;letter-spacing:.09em;font-weight:700;fill:var(--muted)">'+(ac?'ON AC':'ON BATTERY')+'</text>');
+    (chg?'':'<text x="'+c+'" y="'+(c+21)+'" text-anchor="middle" style="font-size:11px;letter-spacing:.09em;font-weight:700;fill:var(--muted)">'+(ac?'ON AC':'ON BATTERY')+'</text>');
   var ring=vkRing(pct,124,9,inner,col);
   var sub=[];
   if(d.time_label)sub.push('<b class="num">'+esc(d.time_label)+'</b>');
@@ -1976,7 +2047,7 @@ EXPAND_RENDER.battery=function(el,d){
   var ad=d.adapter||{};
   var adRow='';
   if(ad.connected&&(ad.name||ad.watts)){
-    adRow='<div style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:11.5px;color:var(--muted)">'+
+    adRow='<div style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:12px;color:var(--muted)">'+
       '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--quick)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto"><path d="M13 2 3 14h7l-1 8 10-12h-7z"/></svg>'+
       '<span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(ad.name||'USB-C adapter')+'</span>'+
       (ad.watts!=null?'<b class="num" style="color:var(--quick);flex:0 0 auto">'+ad.watts+' W</b>':'')+'</div>';}
@@ -1985,7 +2056,7 @@ EXPAND_RENDER.battery=function(el,d){
       '<div style="font-size:14.5px;font-weight:660;color:var(--ink)">'+esc(d.state||'Battery')+'</div>'+
       (sub.length?'<div class="w-sub" style="margin-top:2px">'+sub.join(' · ')+'</div>':'')+
       (chips.length?'<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:7px">'+chips.map(function(x){
-        return '<span style="font-size:10px;font-weight:650;letter-spacing:.02em;padding:2.5px 8px;border-radius:20px;color:var('+x[0]+');background:color-mix(in srgb,var('+x[0]+') 15%,transparent)">'+esc(x[1])+'</span>';}).join('')+'</div>':'')+
+        return '<span style="font-size:12px;font-weight:650;letter-spacing:.02em;padding:2.5px 8px;border-radius:20px;color:var('+x[0]+');background:color-mix(in srgb,var('+x[0]+') 15%,transparent)">'+esc(x[1])+'</span>';}).join('')+'</div>':'')+
       adRow+'</div></div>';
   var hh=d.health||{};
   h+=vkLbl('Battery health');
@@ -1995,16 +2066,16 @@ EXPAND_RENDER.battery=function(el,d){
     ['Cycles',hh.cycles!=null?fmtNum(hh.cycles):'—']]);
   if(hh.max_capacity_pct!=null){
     var capc=hh.max_capacity_pct>=80?'--ok':(hh.max_capacity_pct>=60?'--warn':'--bad');
-    h+='<div style="display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--muted);margin:0 0 6px" class="num">'+
+    h+='<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin:0 0 6px" class="num">'+
       '<span style="width:62px">Capacity</span>'+
       '<div style="flex:1;height:6px;border-radius:3px;background:var(--hairline);overflow:hidden"><i style="display:block;height:100%;width:'+hh.max_capacity_pct+'%;background:var('+capc+')"></i></div>'+
       '<span style="width:34px;text-align:right;color:var(--ink)">'+hh.max_capacity_pct+'%</span></div>';}
   if(hh.cycles!=null){
     var rc=hh.rated_cycles||1000,cp=Math.min(100,Math.round(hh.cycles/rc*100));
-    h+='<div style="display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--muted)" class="num">'+
+    h+='<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted)" class="num">'+
       '<span style="width:62px">Cycles</span>'+
       '<div style="flex:1;height:6px;border-radius:3px;background:var(--hairline);overflow:hidden"><i style="display:block;height:100%;width:'+Math.max(1.5,cp)+'%;background:linear-gradient(90deg,var(--iris),var(--quick))"></i></div>'+
-      '<span style="width:60px;text-align:right;color:var(--ink)">'+fmtNum(hh.cycles)+' <span style="color:var(--faint)">/ '+fmtNum(rc)+'</span></span></div>'+
+      '<span style="width:60px;text-align:right;color:var(--ink)">'+fmtNum(hh.cycles)+' <span style="color:var(--muted)">/ '+fmtNum(rc)+'</span></span></div>'+
       '<div class="hint" style="margin-top:3px">'+(rc-hh.cycles>0?fmtNum(rc-hh.cycles)+' cycles until the rated limit':'past rated cycle limit')+'</div>';}
   var devs=d.devices||[];
   h+=vkLbl('Connected devices'+(devs.length?' · '+devs.length:''));
@@ -2013,8 +2084,8 @@ EXPAND_RENDER.battery=function(el,d){
     h+=devs.map(function(dv){var lv=dv.levels||{};
       var rows=ord.filter(function(o){return lv[o[0]]!=null;}).map(function(o){var v=lv[o[0]];
         return '<span style="display:inline-flex;align-items:center;gap:5px">'+
-          (o[1]?'<span style="font-size:10px;color:var(--muted);font-weight:600">'+o[1]+'</span>':'')+
-          vkBattGlyph(v)+'<b class="num" style="font-size:11px">'+v+'%</b></span>';}).join('<span style="width:10px"></span>');
+          (o[1]?'<span style="font-size:12px;color:var(--muted);font-weight:600">'+o[1]+'</span>':'')+
+          vkBattGlyph(v)+'<b class="num" style="font-size:12px">'+v+'%</b></span>';}).join('<span style="width:10px"></span>');
       return '<div style="display:flex;align-items:center;gap:9px;padding:7px 0;border-bottom:1px solid var(--hairline)">'+
         '<span style="min-width:0;flex:1;font-weight:620;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(dv.name)+
         (dv.type?' <span class="hint">'+esc(dv.type)+'</span>':'')+'</span>'+rows+'</div>';}).join('');
@@ -2074,11 +2145,11 @@ EXPAND_RENDER.clock=function(el,data){
     var isT=dd.toDateString()===now0.toDateString();
     weekCells+='<div style="flex:1;text-align:center;padding:5px 0;border-radius:9px;'+
       (isT?'background:linear-gradient(160deg,var(--iris),var(--quick));':'background:var(--glass-2);border:1px solid var(--hairline);')+'">'+
-      '<div style="font-size:9px;font-weight:700;letter-spacing:.06em;color:'+(isT?'rgba(255,255,255,.85)':'var(--muted)')+'">'+WL[k]+'</div>'+
+      '<div style="font-size:11px;font-weight:700;letter-spacing:.06em;color:'+(isT?'rgba(255,255,255,.85)':'var(--muted)')+'">'+WL[k]+'</div>'+
       '<div class="num" style="font-size:14px;font-weight:700;margin-top:1px;color:'+(isT?'#fff':'var(--ink)')+'">'+dd.getDate()+'</div></div>';}
   var deltaHtml='';
   if(sun.available&&sun.delta_min!=null){var dm=sun.delta_min,up=dm>=0;
-    deltaHtml='<span class="delta '+(up?'up':'down')+'" style="font-size:10.5px;font-weight:640">'+(up?'+':'−')+fmtDur(Math.abs(dm))+' vs. yesterday</span>';}
+    deltaHtml='<span class="delta '+(up?'up':'down')+'" style="font-size:12px;font-weight:640">'+(up?'+':'−')+fmtDur(Math.abs(dm))+' vs. yesterday</span>';}
   var sunStats=sun.available?statGrid([
       ['Sunrise',sun.sunrise||'—'],['Sunset',sun.sunset||'—'],['Daylight',sun.daylight||'—'],
       ['Solar noon',sun.solar_noon||'—'],['Rise tmrw',sun.tomorrow_sunrise||'—'],['Set tmrw',sun.tomorrow_sunset||'—']])
@@ -2090,14 +2161,14 @@ EXPAND_RENDER.clock=function(el,data){
         '<span id="ck-time" class="num" style="font-size:42px;font-weight:750;line-height:1;letter-spacing:-.02em">—</span>'+
         '<span style="display:flex;flex-direction:column;padding-bottom:2px">'+
           '<span id="ck-ampm" style="font-size:14px;font-weight:700;color:var(--iris);line-height:1.1"></span>'+
-          '<span id="ck-sec" class="num" style="font-size:11px;color:var(--muted);font-weight:600"></span></span></div>'+
+          '<span id="ck-sec" class="num" style="font-size:12px;color:var(--muted);font-weight:600"></span></span></div>'+
       '<div id="ck-date" style="font-size:13px;font-weight:600;color:var(--ink);margin-top:4px"></div>'+
-      '<div class="w-sub" style="font-size:11px;margin-top:1px">'+esc(sun.tz?(sun.tz.replace(/_/g,' ')+' · '+(sun.tzabbr||'')):'')+'</div>'+
-      '<div class="w-sub" style="font-size:11px">Day '+doy+' of '+(isLeap?366:365)+' · Week '+weekNo+'</div>'+
-      '<div style="margin-top:7px;font-size:11.5px"><span id="ck-count" style="font-weight:640;color:var(--ink)"></span></div>'+
-      '<div id="ck-elapsed" class="w-sub" style="font-size:10.5px;margin-top:1px"></div>'+
+      '<div class="w-sub" style="font-size:12px;margin-top:1px">'+esc(sun.tz?(sun.tz.replace(/_/g,' ')+' · '+(sun.tzabbr||'')):'')+'</div>'+
+      '<div class="w-sub" style="font-size:12px">Day '+doy+' of '+(isLeap?366:365)+' · Week '+weekNo+'</div>'+
+      '<div style="margin-top:7px;font-size:12px"><span id="ck-count" style="font-weight:640;color:var(--ink)"></span></div>'+
+      '<div id="ck-elapsed" class="w-sub" style="font-size:12px;margin-top:1px"></div>'+
     '</div></div>'+
-    '<div style="display:flex;justify-content:space-between;font-size:10px;color:var(--faint);margin:2px 2px 0" class="num">'+
+    '<div style="display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin:2px 2px 0" class="num">'+
       '<span>Ring · 24h from midnight (top)</span>'+
       (sr!=null?'<span style="color:#F5B94A">Rise '+esc(sun.sunrise)+'</span>':'')+
       (ss!=null?'<span style="color:#E9963B">Set '+esc(sun.sunset)+'</span>':'')+'</div>'+
@@ -2160,22 +2231,22 @@ EXPAND_RENDER.crypto=function(el,d){
       '<path d="M16 31 H30" stroke="#fff" stroke-opacity=".5" stroke-width="1.2" stroke-linecap="round"/></svg>';}
   function px(v){if(v==null)return '—';
     return '$'+v.toLocaleString(undefined,{maximumFractionDigits:v>=1000?0:(v>=1?2:4)});}
-  function dchip(lbl,p){return '<span class="num" style="font-size:10.5px;color:var(--muted)">'+lbl+' '+deltaTxt(p!=null?p:0)+'</span>';}
+  function dchip(lbl,p){return '<span class="num" style="font-size:12px;color:var(--muted)">'+lbl+' '+deltaTxt(p!=null?p:0)+'</span>';}
   var tot=coins.reduce(function(a,c){return a+(+c.mcap||0);},0);
   var up24=coins.filter(function(c){return (c.pct24h||0)>=0;}).length;
   var h='<div style="display:flex;align-items:center;gap:12px;margin:2px 0 10px">'+
     '<div style="display:flex">'+coins.slice(0,4).map(function(c,i){
       return '<span style="display:inline-flex;'+(i?'margin-left:-9px;':'')+'position:relative;z-index:'+(9-i)+'">'+medal(c.symbol,30)+'</span>';}).join('')+'</div>'+
     '<div style="min-width:0"><div style="display:flex;align-items:baseline;gap:6px"><span class="num" style="font-size:21px;font-weight:720;line-height:1">$'+vkCap(tot)+'</span>'+
-    '<span class="w-sub" style="font-size:10.5px">combined mcap</span></div>'+
-    '<div class="w-sub" style="font-size:11px;margin-top:1px">'+coins.length+' coins · <span class="delta up">'+up24+' up</span> · <span class="delta down">'+(coins.length-up24)+' down</span> <span style="color:var(--faint)">24h</span></div></div></div>';
+    '<span class="w-sub" style="font-size:12px">combined mcap</span></div>'+
+    '<div class="w-sub" style="font-size:12px;margin-top:1px">'+coins.length+' coins · <span class="delta up">'+up24+' up</span> · <span class="delta down">'+(coins.length-up24)+' down</span> <span style="color:var(--muted)">24h</span></div></div></div>';
   // dominance — share of combined market cap
   if(tot>0){
     h+=vkLbl('Dominance · share of shown mcap');
     h+='<div style="display:flex;height:9px;border-radius:5px;overflow:hidden;background:var(--hairline);margin-bottom:6px">'+
       coins.map(function(c){var w=(+c.mcap||0)/tot*100;
         return '<i class="vk-domseg" style="display:block;height:100%;width:'+w.toFixed(2)+'%;min-width:'+(w>0?'3px':'0')+';background:'+ccol(c.symbol)+'"></i>';}).join('')+'</div>';
-    h+='<div class="num" style="display:flex;flex-wrap:wrap;gap:5px 13px;font-size:10.5px;color:var(--muted);margin-bottom:4px">'+
+    h+='<div class="num" style="display:flex;flex-wrap:wrap;gap:5px 13px;font-size:12px;color:var(--muted);margin-bottom:4px">'+
       coins.map(function(c){var w=(+c.mcap||0)/tot*100;
         return '<span style="display:inline-flex;align-items:center;gap:4px"><i style="width:7px;height:7px;border-radius:2px;background:'+ccol(c.symbol)+';display:inline-block"></i>'+esc(c.symbol)+' <b>'+w.toFixed(1)+'%</b></span>';}).join('')+'</div>';
   }
@@ -2187,21 +2258,21 @@ EXPAND_RENDER.crypto=function(el,d){
     var rng='';
     if(c.lo24!=null&&c.hi24!=null&&c.price!=null&&c.hi24>c.lo24){
       var p=Math.max(2,Math.min(98,(c.price-c.lo24)/(c.hi24-c.lo24)*100));
-      rng='<div style="display:flex;align-items:center;gap:7px;font-size:10px;margin-top:6px" class="num">'+
+      rng='<div style="display:flex;align-items:center;gap:7px;font-size:12px;margin-top:6px" class="num">'+
         '<span style="width:26px;color:var(--muted);letter-spacing:.05em;font-weight:600">24H</span>'+
-        '<span style="color:var(--faint)">'+fmtNum(c.lo24)+'</span>'+
+        '<span style="color:var(--muted)">'+fmtNum(c.lo24)+'</span>'+
         '<div style="position:relative;flex:1;height:4px;border-radius:2px;background:var(--hairline)">'+
         '<i style="position:absolute;left:0;top:0;height:100%;width:'+p+'%;border-radius:2px;background:color-mix(in srgb,'+col+' 45%,transparent)"></i>'+
         '<i style="position:absolute;left:'+p+'%;top:50%;width:7px;height:7px;border-radius:50%;background:'+col+';transform:translate(-50%,-50%);box-shadow:0 0 0 2px var(--glass-2)"></i></div>'+
-        '<span style="color:var(--faint)">'+fmtNum(c.hi24)+'</span></div>';}
+        '<span style="color:var(--muted)">'+fmtNum(c.hi24)+'</span></div>';}
     return '<div style="padding:9px 0;border-bottom:1px solid var(--hairline)">'+
       '<div style="display:flex;align-items:center;gap:10px">'+medal(c.symbol,34)+
       '<div style="min-width:0;flex:1"><div style="display:flex;align-items:baseline;gap:7px">'+
         '<span style="font-weight:720;font-size:13.5px">'+esc(c.symbol||c.id)+'</span>'+
-        '<span class="w-sub" style="font-size:11px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(c.name||'')+'</span>'+
+        '<span class="w-sub" style="font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(c.name||'')+'</span>'+
         '<span class="num" style="margin-left:auto;font-weight:700;font-size:14.5px">'+px(c.price)+'</span></div>'+
       '<div style="display:flex;gap:11px;margin-top:2px;align-items:baseline">'+dchip('1h',c.pct1h)+dchip('24h',c.pct24h)+dchip('7d',c.pct7d)+
-        '<span class="num" style="margin-left:auto;font-size:10px;color:var(--faint)">MC $'+vkCap(c.mcap)+' · Vol $'+vkCap(c.vol)+'</span></div></div></div>'+
+        '<span class="num" style="margin-left:auto;font-size:12px;color:var(--muted)">MC $'+vkCap(c.mcap)+' · Vol $'+vkCap(c.vol)+'</span></div></div></div>'+
       spark+rng+'</div>';
   }).join('');
   el.innerHTML=h;
@@ -2214,7 +2285,7 @@ EXPAND_RENDER.tasks=function(el,data){
   function op(body){post(body).then(function(){refresh();}).catch(function(){});}
   function dur(s){s=+s||0;if(s<3600)return Math.max(1,Math.round(s/60))+'m';if(s<86400)return Math.round(s/3600)+'h';if(s<604800)return Math.round(s/86400)+'d';return Math.round(s/604800)+'w';}
   function chip(label,val,tone){var col=tone==='bad'?'var(--bad)':tone==='warn'?'var(--warn)':'var(--muted)';
-    return '<span style="display:inline-flex;align-items:center;gap:5px;font-size:10.5px;color:'+col+';background:var(--chip);border:1px solid var(--hairline);border-radius:999px;padding:2.5px 9px"><b class="num" style="color:'+(tone?col:'var(--ink)')+';font-weight:680">'+val+'</b>'+esc(label)+'</span>';}
+    return '<span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;color:'+col+';background:var(--chip);border:1px solid var(--hairline);border-radius:999px;padding:2.5px 9px"><b class="num" style="color:'+(tone?col:'var(--ink)')+';font-weight:680">'+val+'</b>'+esc(label)+'</span>';}
   var DELX='<svg class="ic" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
   var TICK='<svg viewBox="0 0 24 24" style="width:13px;height:13px" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
   function taskRow(t,stale){
@@ -2223,9 +2294,9 @@ EXPAND_RENDER.tasks=function(el,data){
       (checked?'background:linear-gradient(135deg,var(--iris),var(--quick));border:1px solid transparent':'background:transparent;border:1.5px solid var(--muted)')+'">'+(checked?TICK:'')+'</button>';
     var age=t.ts?relTime(t.ts):'';
     return '<div class="tk-row" style="display:flex;align-items:center;gap:10px;padding:8px 2px;border-bottom:1px solid var(--hairline)">'+box+
-      '<span style="flex:1;min-width:0;font-size:13px;line-height:1.4;'+(checked?'color:var(--faint);text-decoration:line-through':'color:var(--ink)')+'">'+esc(t.text)+'</span>'+
-      (age?'<span class="num" style="flex:0 0 auto;font-size:10.5px;color:'+(stale?'var(--bad)':'var(--faint)')+'">'+esc(age)+'</span>':'')+
-      '<button class="tk-del" data-id="'+esc(t.id)+'" aria-label="Delete" style="flex:0 0 auto;background:none;border:none;cursor:pointer;color:var(--faint);opacity:.55;padding:2px;display:flex">'+DELX+'</button></div>';
+      '<span style="flex:1;min-width:0;font-size:13px;line-height:1.4;'+(checked?'color:var(--muted);text-decoration:line-through':'color:var(--ink)')+'">'+esc(t.text)+'</span>'+
+      (age?'<span class="num" style="flex:0 0 auto;font-size:12px;color:'+(stale?'var(--bad)':'var(--faint)')+'">'+esc(age)+'</span>':'')+
+      '<button class="tk-del" data-id="'+esc(t.id)+'" aria-label="Delete" style="flex:0 0 auto;background:none;border:none;cursor:pointer;color:var(--muted);opacity:.55;padding:2px;display:flex">'+DELX+'</button></div>';
   }
   function render(d){
     d=d||{};
@@ -2235,12 +2306,12 @@ EXPAND_RENDER.tasks=function(el,data){
     var doneT=tasks.filter(function(t){return t.done;});
     var total=d.total!=null?d.total:tasks.length;
     var pct=d.pct!=null?d.pct:(total?Math.round(doneT.length/total*100):0);
-    var inner='<text x="41" y="38" text-anchor="middle" class="num" style="font-size:17px;font-weight:750;fill:var(--ink)">'+pct+'<tspan style="font-size:10px;fill:var(--muted)">%</tspan></text>'+
-      '<text x="41" y="52" text-anchor="middle" class="num" style="font-size:9px;font-weight:600;fill:var(--muted)">'+doneT.length+' / '+total+'</text>';
+    var inner='<text x="41" y="38" text-anchor="middle" class="num" style="font-size:17px;font-weight:750;fill:var(--ink)">'+pct+'<tspan style="font-size:12px;fill:var(--muted)">%</tspan></text>'+
+      '<text x="41" y="52" text-anchor="middle" class="num" style="font-size:12px;font-weight:600;fill:var(--muted)">'+doneT.length+' / '+total+'</text>';
     var h='<div style="display:flex;align-items:center;gap:14px;margin:2px 0 2px">'+vkRing(pct,82,7,inner)+
       '<div style="min-width:0;flex:1"><div style="display:flex;align-items:baseline;gap:7px"><span class="num" style="font-size:28px;font-weight:720;line-height:1">'+openT.length+'</span>'+
       '<span class="w-sub" style="font-size:12.5px">open</span></div>'+
-      '<div class="w-sub" style="margin-top:2px;font-size:11.5px">'+doneT.length+' of '+total+' done'+(total===0?' — nothing yet':'')+'</div>';
+      '<div class="w-sub" style="margin-top:2px;font-size:12px">'+doneT.length+' of '+total+' done'+(total===0?' — nothing yet':'')+'</div>';
     var chips=[];
     if(d.added_24h)chips.push(chip('added today',d.added_24h));
     if(d.added_7d)chips.push(chip('this week',d.added_7d));
@@ -2248,7 +2319,7 @@ EXPAND_RENDER.tasks=function(el,data){
     if(d.stale)chips.push(chip('stale',d.stale,'bad'));
     if(chips.length)h+='<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:7px">'+chips.join('')+'</div>';
     h+='</div></div>';
-    h+='<div style="display:flex;gap:7px;margin:11px 0 2px"><input class="tk-new" placeholder="Add a task&hellip;" spellcheck="false" style="flex:1;background:var(--glass-2);border:1px solid var(--hairline);border-radius:10px;padding:8px 12px;color:var(--ink);font-size:13px;outline:none">'+
+    h+='<div style="display:flex;gap:7px;margin:11px 0 2px"><input class="tk-new" placeholder="Add a task&hellip;" spellcheck="false" style="flex:1;background:var(--glass-2);border:1px solid var(--hairline);border-radius:10px;padding:8px 12px;color:var(--ink);font-size:13px">'+
       '<button class="tk-add primary" style="flex:0 0 auto;display:flex;align-items:center;gap:5px;border-radius:10px;padding:0 14px;font-weight:600"><svg class="ic" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Add</button></div>';
     var stale=openT.filter(function(t){return t.age!=null&&t.age>604800;});
     var active=openT.filter(function(t){return !(t.age!=null&&t.age>604800);});
@@ -2263,7 +2334,7 @@ EXPAND_RENDER.tasks=function(el,data){
     }
     if(doneT.length){
       doneT.sort(function(a,b){return (b.ts||0)-(a.ts||0);});
-      h+=vkLbl('Completed · '+doneT.length,'<button class="tk-clear" style="background:none;border:none;cursor:pointer;font-size:10px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);font-weight:600;padding:0">Clear</button>');
+      h+=vkLbl('Completed · '+doneT.length,'<button class="tk-clear" style="background:none;border:none;cursor:pointer;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);font-weight:600;padding:0">Clear</button>');
       h+='<div style="opacity:.75">'+doneT.map(function(t){return taskRow(t,false);}).join('')+'</div>';
     }
     el.innerHTML=h;
@@ -2293,17 +2364,17 @@ EXPAND_RENDER.quicklinks=function(el,data){
       '<rect x="1" y="1" width="22" height="22" rx="6.5" fill="url(#'+g+')"/>'+
       '<path d="M3 6 Q3 3 6 3 L14 3" fill="none" stroke="#fff" stroke-opacity=".45" stroke-width="1.6" stroke-linecap="round"/>'+
       '<rect class="vk-sheen" x="2" y="1" width="7" height="22" rx="3.5" fill="#fff"/>'+
-      '<text x="12" y="13" text-anchor="middle" dominant-baseline="middle" style="font-size:11.5px;font-weight:800;fill:#fff">'+esc(l.mono)+'</text></svg>';}
+      '<text x="12" y="13" text-anchor="middle" dominant-baseline="middle" style="font-size:12px;font-weight:800;fill:#fff">'+esc(l.mono)+'</text></svg>';}
   function persist(){return fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({quicklinks:links.map(function(l){return {label:l.label,url:l.url};})})}).catch(function(){});}
-  var INP='min-width:0;background:var(--chip);border:1px solid var(--hairline);border-radius:8px;padding:6px 9px;font-size:12px;color:var(--ink);outline:none';
+  var INP='min-width:0;background:var(--chip);border:1px solid var(--hairline);border-radius:8px;padding:6px 9px;font-size:12px;color:var(--ink)';
   function render(){
     var nd={},i;for(i=0;i<links.length;i++)if(links[i].domain)nd[links[i].domain]=1;
-    var h='<div class="w-sub" style="margin:0 1px 8px;font-size:11px;font-weight:600"><b class="num">'+links.length+'</b> link'+(links.length===1?'':'s')+' · <b class="num">'+Object.keys(nd).length+'</b> domain'+(Object.keys(nd).length===1?'':'s')+'</div>';
+    var h='<div class="w-sub" style="margin:0 1px 8px;font-size:12px;font-weight:600"><b class="num">'+links.length+'</b> link'+(links.length===1?'':'s')+' · <b class="num">'+Object.keys(nd).length+'</b> domain'+(Object.keys(nd).length===1?'':'s')+'</div>';
     if(links.length){
       h+='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:6px">'+links.map(function(l,idx){
         return '<a href="#" class="vk-ql" data-url="'+esc(l.url)+'" title="'+esc(l.domain||l.url)+'" style="text-decoration:none;color:var(--ink)">'+
           qchip(l,20)+
-          '<span style="min-width:0;flex:1;font-weight:600;font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(l.label)+'</span>'+
+          '<span style="min-width:0;flex:1;font-weight:600;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(l.label)+'</span>'+
           '<button class="vk-qlx" data-del="'+idx+'" title="Remove" aria-label="Remove"><svg viewBox="0 0 24 24" width="9" height="9" fill="none" stroke="#fff" stroke-width="3.4" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></a>';}).join('')+'</div>';
     }else h+='<div class="hint">No links yet — add one below.</div>';
     h+='<div style="display:flex;gap:6px;align-items:center;margin-top:9px">'+
@@ -2314,7 +2385,7 @@ EXPAND_RENDER.quicklinks=function(el,data){
     if(av.length){
       h+=vkLbl('Quick add');
       h+='<div style="display:flex;flex-wrap:wrap;gap:5px">'+av.map(function(s,i2){
-        return '<button data-sg="'+i2+'" style="display:inline-flex;align-items:center;gap:6px;background:var(--chip);border:1px solid var(--hairline);border-radius:999px;padding:2.5px 9px 2.5px 3.5px;font-size:11px;color:var(--ink);cursor:pointer;font-weight:540">'+qchip(s,16)+esc(s.label)+'</button>';}).join('')+'</div>';
+        return '<button data-sg="'+i2+'" style="display:inline-flex;align-items:center;gap:6px;background:var(--chip);border:1px solid var(--hairline);border-radius:999px;padding:2.5px 9px 2.5px 3.5px;font-size:12px;color:var(--ink);cursor:pointer;font-weight:540">'+qchip(s,16)+esc(s.label)+'</button>';}).join('')+'</div>';
     }
     el.innerHTML=h;
     wireLinks(el);
@@ -2324,6 +2395,10 @@ EXPAND_RENDER.quicklinks=function(el,data){
       var lb=el.querySelector('#ql-lb'),ur=el.querySelector('#ql-url');
       if(!ur)return;var u=(ur.value||'').trim();if(!u)return;
       if(!/:\/\//.test(u))u='https://'+u;
+      // only http(s) is ever opened (index.html httpUrl, B18) — say so now
+      // rather than save a tile that does nothing when clicked
+      if(!(typeof httpUrl==='function'?httpUrl(u):/^https?:\/\/[^\/]/i.test(u))){
+        if(typeof toast==='function')toast('Only http:// and https:// links can be added.');return;}
       var dm=_dom(u),lab=((lb&&lb.value)||'').trim()||dm||u;
       links.push({label:lab,url:u,domain:dm,mono:_mono(lab,dm),hue:_hue(dm||lab)});
       persist();render();};
@@ -2364,9 +2439,9 @@ EXPAND_RENDER.agent_pulse=function(el,d){
     '</svg>';
   var h='<div style="margin:2px 0 0">'+
     '<div class="vk-lbl" style="margin:0 0 2px"><span style="display:inline-flex;align-items:center;gap:6px"><span class="livedot"></span>Heartbeat · last '+n+' session'+(n===1?'':'s')+'</span><span class="vk-rule"></span>'+
-    '<span class="num" style="text-transform:none;letter-spacing:0;color:var(--faint)">spike = tool calls</span></div>'+wave+'</div>';
+    '<span class="num" style="text-transform:none;letter-spacing:0;color:var(--muted)">spike = tool calls</span></div>'+wave+'</div>';
   h+=statGrid([['Sessions today',kfmt(t.sessions)||'0'],['Tool calls today',kfmt(t.tool_calls)||'0'],['Tokens today',kfmt(t.tokens)||'0']]);
-  h+='<div class="w-sub" style="margin:-4px 0 2px;font-size:11px">All time: <b class="num">'+kfmt(g.sessions)+'</b> sessions · <b class="num">'+kfmt(g.tool_calls)+'</b> tool calls · <b class="num">'+kfmt(g.tokens)+'</b> tokens</div>';
+  h+='<div class="w-sub" style="margin:-4px 0 2px;font-size:12px">All time: <b class="num">'+kfmt(g.sessions)+'</b> sessions · <b class="num">'+kfmt(g.tool_calls)+'</b> tool calls · <b class="num">'+kfmt(g.tokens)+'</b> tokens</div>';
   var plats=d.platforms||[];
   if(plats.length){h+=vkLbl('Platforms')+
     barRows(plats.map(function(pf){return {label:pf.name.charAt(0).toUpperCase()+pf.name.slice(1),val:pf.sessions,sub:(pf.today||0)+' / '+pf.sessions};}),96,66);}
@@ -2384,7 +2459,7 @@ EXPAND_RENDER.agent_pulse=function(el,d){
     var meta=[s.msgs+' msg',s.tools+' tool'+(s.tools===1?'':'s'),kfmt(s.tokens)+' tok'];
     if(s.dur&&typeof _pulseDur==='function')meta.push(_pulseDur(s.dur));
     var lead=s.title?esc(s.title):esc(s.model||'session');
-    return '<div class="pulse"><span class="pf">'+esc(s.source)+'</span><span class="pm"><span style="color:var(--ink)">'+lead+'</span><span style="display:block;color:var(--faint);font-size:10.5px;margin-top:1px">'+meta.join(' · ')+'</span></span><span class="pw">'+(s.ts?relTime(s.ts):'')+'</span></div>';
+    return '<div class="pulse"><span class="pf">'+esc(s.source)+'</span><span class="pm"><span style="color:var(--ink)">'+lead+'</span><span style="display:block;color:var(--muted);font-size:12px;margin-top:1px">'+meta.join(' · ')+'</span></span><span class="pw">'+(s.ts?relTime(s.ts):'')+'</span></div>';
   }).join('')||'<div class="hint">No recent sessions.</div>';
   el.innerHTML=h;
 };

@@ -8,7 +8,8 @@
 # PRIVACY (enforced here, in code):
 #   * Every screenshot written under ~/.hermes/dashboard/desktop/ is chmod 0600.
 #   * The store is a ring buffer: capped at DESK_MAX_FRAMES and auto-pruned of
-#     anything older than DESK_MAX_AGE_S on every list/capture.
+#     anything older than DESK_MAX_AGE_S at module load and on every list,
+#     capture and shot fetch; the shot route never serves a frame past it.
 #   * Frames are served ONLY over the loopback dashboard, as a base64 data URI
 #     inside JSON (the aux dispatcher normalises every return to JSON — there is
 #     no raw-bytes path, which keeps frames on the loopback JSON channel).
@@ -338,13 +339,23 @@ def desktop_shots_handler(ctx):
 
 
 def desktop_shot_handler(ctx):
+    # E118: the age cap holds here too — prune first, then refuse (and delete)
+    # anything past DESK_MAX_AGE_S that is still on disk, frame or thumb.
+    try:
+        _desk_prune()
+    except Exception:
+        pass
     name = ctx.q1("name", "")
     p = _desk_in_dir(name)
     if not p:
         return {"ok": False, "reason": "no such frame"}
     try:
+        ts = os.path.getmtime(p)
+        if time.time() - ts > DESK_MAX_AGE_S:
+            _desk_rm(p)
+            return {"ok": False, "reason": "frame expired"}
         return {"ok": True, "name": os.path.basename(p),
-                "ts": os.path.getmtime(p), "data_uri": _desk_data_uri(p)}
+                "ts": ts, "data_uri": _desk_data_uri(p)}
     except Exception as e:
         return ({"ok": False, "reason": str(e)}, 500)
 
@@ -352,6 +363,11 @@ def desktop_shot_handler(ctx):
 def desktop_capture_handler(ctx):
     body = ctx.body or {}
     display = body.get("display")
+    # E123: a list/dict or a non-finite number is a client error (400), not a
+    # capture of the main display and not an OverflowError
+    if isinstance(display, bool) or not isinstance(display, (type(None), int, float, str)) \
+            or (isinstance(display, float) and not display.is_integer()):
+        return ({"ok": False, "reason": "display must be a display number"}, 400)
     try:
         display = int(display) if display not in (None, "", 0, "0") else None
     except (TypeError, ValueError):
@@ -378,6 +394,10 @@ def desktop_timeline_handler(ctx):
 # module-load side effects: register routes (ensure the store dir exists 0700)
 # --------------------------------------------------------------------------
 _desk_ensure_dir()
+try:
+    _desk_prune()        # E118: frames past the age cap go at start, not on first view
+except Exception:
+    pass
 
 register_get("/api/desktop/shots", desktop_shots_handler)
 register_get("/api/desktop/shot", desktop_shot_handler)

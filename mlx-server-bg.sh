@@ -47,6 +47,55 @@ MODEL="$(cat "$BG_FILE" 2>/dev/null || echo "$DEFAULT_BG_MODEL")"
 PORT="${BG_PORT:-8081}"
 VLM_PY="$HOME/.hermes/mlx-vlm-venv/bin/python"
 
+# --- Remote code (2026-10-08 audit B03 / F01) ------------------------------
+# Off unless this lane's model has a literal `trust_remote_code: true` in its
+# models.json roster entry (the lane has no server-backend file of its own).
+# Round 3: the same read now also yields the entry's `model_subfolder` and
+# `sampling` (forwarded as-is; mlx-vlm-launch.py validates both strictly), and
+# its `hf_offline`. Every value starts at its safe default, so a missing or
+# unreadable models.json means exactly the old behaviour.
+TRUST_REMOTE="0"; MODEL_SUBFOLDER=""; SAMPLING_JSON=""; ROSTER_OFFLINE="0"
+unset MLX_VLM_MODEL_SUBFOLDER MLX_VLM_SAMPLING_DEFAULTS
+eval "$(python3 - "$HOME/.hermes/dashboard/models.json" "$MODEL" <<'PYEOF' 2>/dev/null || true
+import json, shlex, sys
+try:
+    ms = json.load(open(sys.argv[1])).get("models") or []
+except Exception:
+    ms = []
+ms = [m for m in ms if isinstance(m, dict) and m.get("id") == sys.argv[2]]
+print("TRUST_REMOTE=" + ("1" if any(m.get("trust_remote_code") is True for m in ms) else "0"))
+m = ms[0] if ms else {}
+sub = m.get("model_subfolder")
+print("MODEL_SUBFOLDER=" + shlex.quote(sub if isinstance(sub, str) else ""))
+smp = m.get("sampling")
+print("SAMPLING_JSON=" + shlex.quote(json.dumps(smp) if isinstance(smp, dict) and smp else ""))
+print("ROSTER_OFFLINE=" + ("1" if m.get("hf_offline") is True else "0"))
+PYEOF
+)"
+[ "$TRUST_REMOTE" = "1" ] || TRUST_REMOTE="0"
+[ "$TRUST_REMOTE" = "1" ] && echo "[mlx-bg] roster trust_remote_code=true — this model's own Python will run"
+if [ -n "$MODEL_SUBFOLDER" ]; then
+  export MLX_VLM_MODEL_SUBFOLDER="$MODEL_SUBFOLDER"
+  ROSTER_OFFLINE=1      # never snapshot_download a whole multi-variant repo
+  echo "[mlx-bg] model_subfolder=$MODEL_SUBFOLDER — loading <snapshot>/$MODEL_SUBFOLDER"
+fi
+if [ -n "$SAMPLING_JSON" ]; then
+  export MLX_VLM_SAMPLING_DEFAULTS="$SAMPLING_JSON"
+  echo "[mlx-bg] roster sampling defaults: $SAMPLING_JSON"
+fi
+
+# --- Offline when the weights are complete (2026-10-21 audit C49) -----------
+# Same rule as mlx-server.sh: a fully downloaded model starts with no
+# huggingface.co round trip and never picks up an upstream change by itself.
+# A roster hf_offline / model_subfolder entry is offline unconditionally.
+if [ "$ROSTER_OFFLINE" = 1 ]; then
+  export HF_HUB_OFFLINE=1 MLX_VLM_LOCAL_ONLY=1
+  echo "[mlx-bg] HF_HUB_OFFLINE=1 + MLX_VLM_LOCAL_ONLY=1 (roster hf_offline/model_subfolder) — local cache only"
+elif python3 "$(dirname "$0")/mlx-vlm-launch.py" --local-ready "$MODEL" 2>/dev/null; then
+  export HF_HUB_OFFLINE=1 MLX_VLM_LOCAL_ONLY=1
+  echo "[mlx-bg] HF_HUB_OFFLINE=1 + MLX_VLM_LOCAL_ONLY=1 (weights complete on disk) — local cache only"
+fi
+
 # --- RAM-aware prompt-cache sizing (1.0.3) -----------------------------------
 # Mirrors the tiering in mlx-server.sh (same sysctl read, same GiB units, same
 # fallback to 64GB when sysctl is unavailable), but with its OWN, lower table:
@@ -71,14 +120,16 @@ if [ -x "$VLM_PY" ]; then
   export APC_ENABLED=1
   export APC_EXACT_CACHE_ENTRIES="${APC_EXACT_CACHE_ENTRIES:-$APC_ENTRIES_DEFAULT}"
   echo "[mlx-bg] ${RAM_GB}GB Mac → APC_EXACT_CACHE_ENTRIES=$APC_EXACT_CACHE_ENTRIES"
-  exec "$VLM_PY" "$(dirname "$0")/mlx-vlm-launch.py" \
-    --model "$MODEL" --host 127.0.0.1 --port "$PORT" \
-    --max-tokens 4096 --trust-remote-code
+  VLM_ARGS=(--model "$MODEL" --host 127.0.0.1 --port "$PORT" --max-tokens 4096)
+  [ "$TRUST_REMOTE" = "1" ] && VLM_ARGS+=(--trust-remote-code)
+  exec "$VLM_PY" "$(dirname "$0")/mlx-vlm-launch.py" "${VLM_ARGS[@]}"
 fi
 
 echo "Starting MLX background server (mlx-lm fallback): $MODEL on :$PORT"
-exec python3 -m mlx_lm server \
-  --model "$MODEL" --host 127.0.0.1 --port "$PORT" \
-  --max-tokens 4096 --prompt-cache-size "$APC_ENTRIES_DEFAULT" \
-  --prompt-cache-bytes "$PROMPT_CACHE_BYTES" \
-  --chat-template-args '{"enable_thinking": false}' --trust-remote-code
+# Through the launcher for the same model pin + request guard (C130).
+LM_ARGS=(--model "$MODEL" --host 127.0.0.1 --port "$PORT"
+  --max-tokens 4096 --prompt-cache-size "$APC_ENTRIES_DEFAULT"
+  --prompt-cache-bytes "$PROMPT_CACHE_BYTES"
+  --chat-template-args '{"enable_thinking": false}')
+[ "$TRUST_REMOTE" = "1" ] && LM_ARGS+=(--trust-remote-code)
+exec python3 "$(dirname "$0")/mlx-vlm-launch.py" --mlx-lm "${LM_ARGS[@]}"

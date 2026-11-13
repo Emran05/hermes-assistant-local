@@ -190,6 +190,27 @@ def _ym_seed_handler(ctx):
         return ({"ok": False, "error": "internal: " + str(e)}, 500)
 
 
+def _ym_secret_refusal(text):
+    """None when `text` may be stored, else the refusal response (C44).
+
+    These files are model-writable, and For-You, the brief and (with both
+    switches on) Claude read them. The test is aux_memlayer's _ml_looks_secret,
+    the one its facts API and MCP memory_facts(add=) run, resolved by name at
+    call time. Fails closed like aux_memlayer: no test, or one that raises,
+    stores nothing (503, aux_memlayer's _ml_no_scrubber shape)."""
+    looks = globals().get("_ml_looks_secret")
+    if not callable(looks):
+        return ({"ok": False, "error": "secret scrubber unavailable — "
+                 "aux_memlayer.py did not load, so nothing can be stored"}, 503)
+    try:
+        if looks(text):
+            return ({"ok": False, "error": "that looks like a credential "
+                     "— not storing it"}, 400)
+    except Exception as e:             # _MlNoScrubber: it cannot tell
+        return ({"ok": False, "error": str(e) or "secret scrubber unavailable"}, 503)
+    return None
+
+
 # --------------------------------------------------------------------------
 # POST /api/youmodel/add — append ONE §-delimited entry to a typed file or a
 # people/<slug>.md card.  Creates the file (with template scaffolding for
@@ -199,7 +220,8 @@ def _ym_seed_handler(ctx):
 def _ym_add_handler(ctx):
     try:
         b = ctx.body or {}
-        name = (b.get("file") or b.get("name") or "").strip()
+        name = b.get("file") or b.get("name") or ""
+        name = name.strip() if isinstance(name, str) else ""    # E123: bad_file, not 500
         text = b.get("text")
         if name not in YM_NAMES and not (name.startswith("people/")
                                          and _mem_valid_name(name)):
@@ -214,6 +236,9 @@ def _ym_add_handler(ctx):
         if text == "§" or ENTRY_DELIM in ("\n" + text + "\n"):
             return ({"ok": False, "error": "bad_entry",
                      "hint": "An entry can't contain the § delimiter line."}, 400)
+        refused = _ym_secret_refusal(text)
+        if refused:
+            return refused
 
         try:
             path = _mem_path(name)

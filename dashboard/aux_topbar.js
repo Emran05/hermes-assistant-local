@@ -30,19 +30,27 @@
       '.topchip svg{opacity:.7;flex:0 0 auto}' +
       '.topchip b{font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}' +
       '.topchip .mut{color:var(--muted);font-size:11px}' +
+      // a long city name must not push the header past the window edge
+      '.topchip .tc-city{max-width:84px;overflow:hidden;text-overflow:ellipsis}' +
       '.topchip[hidden]{display:none}' +
       // escalation OFF: the chip stays but goes quiet — it is reporting a
-      // state, not a live number worth reading.
-      '.topchip.is-off{opacity:.7}' +
-      '.topchip.is-off b{font-weight:500;color:var(--faint)}' +
-      '@media (max-width:900px){.topchips .tc-city,.topchips .tc-lbl{display:none}}' +
+      // state, not a live number worth reading. Quiet = lighter weight in
+      // --muted, NOT opacity:.7 + --faint (that measured 2.75:1 on the light
+      // theme; --muted on the chip's glass clears 4.5:1 in both themes). The
+      // separator rides on the label, so with the label hidden (<=1060px) the
+      // chip reads "off", not a stray "· off".
+      '.topchip.is-off b{font-weight:500;color:var(--muted)}' +
+      '.topchip.is-off .tc-lbl::after{content:" \\00B7"}' +
+      // 1060, not 900: between 901 and ~1060px the labels pushed the header
+      // ~100px past the window edge (index.html documents the whole ladder)
+      '@media (max-width:1060px){.topchips .tc-city,.topchips .tc-lbl{display:none}}' +
       '@media (max-width:700px){.topchips{display:none}}' +
       '</style>';
   }
 
-  // The header greeting says "Thursday, September 3" and the clock widget says
-  // "Thursday, Sep 3"; a third format ("09/03/2026") on the same screen just
-  // reads as noise. Match the clock card's family, one size shorter.
+  // The clock widget says "Thursday, Sep 3"; a second format ("09/03/2026")
+  // on the same screen just reads as noise. Match the clock card's family,
+  // one size shorter.
   function shortDate(d) {
     try { return d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" }); }
     catch (e) { return d.toDateString(); }
@@ -58,7 +66,7 @@
     host.innerHTML = css() +
       '<span class="topchip" id="tc-weather" hidden title="">' + ICON.weather +
         '<b class="tc-temp">--</b><span class="mut tc-city"></span></span>' +
-      '<span class="topchip" id="tc-claude" hidden title="Claude Code usage on this Mac (~/.claude/projects) — not Hermes escalations; those show as Claude dialogues in the Agent view">' + ICON.claude +
+      '<span class="topchip" id="tc-claude" role="img" aria-label="Claude Code usage" hidden title="Claude Code usage on this Mac (~/.claude/projects) — not Hermes escalations; those show as Claude dialogues in the Agent view">' + ICON.claude +
         '<span class="tc-lbl mut">Claude Code</span><b class="tc-pct">--</b></span>' +
       '<span class="topchip" id="tc-date" title="">' + ICON.date + '<b class="tc-date">--</b></span>';
     var anchor = header.querySelector(".modelwrap") || header.querySelector("#model-pill");
@@ -107,8 +115,9 @@
       // Escalation is off: the usage number is stale trivia — say the thing
       // that actually changes what the assistant will do.
       cc.classList.add("is-off");
-      cc.querySelector(".tc-pct").textContent = "· off";
-      cc.title = "Claude escalation is off";
+      cc.querySelector(".tc-pct").textContent = "off";
+      cc.title = "Claude Code — Claude escalation is off";
+      cc.setAttribute("aria-label", "Claude Code: escalation is off");
       cc.hidden = false;
       return;
     }
@@ -123,7 +132,17 @@
       tip.push("resets in " + (hh ? hh + "h " : "") + mm + "m");
     }
     cc.title = "Claude usage" + (tip.length ? " — " + tip.join(" · ") : "");
+    // the visible text is just "42%" once the label is hidden at narrow
+    // widths — the accessible name always says what the number is
+    cc.setAttribute("aria-label", "Claude Code usage: " + cc.querySelector(".tc-pct").textContent +
+      (tip.length ? ", " + tip.join(", ") : ""));
     cc.hidden = false;
+  }
+
+  var missed = false;
+  function tick() {
+    if (document.hidden) { missed = true; return; }
+    poll();
   }
 
   function start() {
@@ -139,7 +158,14 @@
       });
       if (typeof window.claudeEscalationState === "function") escOff = window.claudeEscalationState() === false;
     } catch (e) {}
-    setInterval(renderDate, 60000); setInterval(poll, 60000);
+    setInterval(renderDate, 60000); setInterval(tick, 60000);
+    // E92 (C88/C90): nothing polls a hidden window — /api/topbar calls the
+    // weather provider, so a hidden window would keep that egress alive. A
+    // tick skipped while hidden is made up once when the window comes back.
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden || !missed) return;
+      missed = false; renderDate(); poll();
+    });
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
   else start();

@@ -35,7 +35,7 @@
   }
   function WL(el) { if (typeof wireLinks === "function") { try { wireLinks(el); } catch (e) {} } }
   function sub(t) {
-    return '<div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;' +
+    return '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;' +
       'color:var(--muted);font-weight:600;margin:12px 0 6px">' + E(t) + "</div>";
   }
 
@@ -45,12 +45,12 @@
   var IC_ARROW = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:11px;height:11px;display:inline-block;vertical-align:-1px;margin-right:3px"><path d="M5 12h14M13 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
   var BTN_CSS = "border:1px solid var(--hairline);background:var(--glass-2);color:var(--muted);" +
-    "border-radius:7px;padding:2px 8px;font:inherit;font-size:10px;cursor:pointer;line-height:1.5";
+    "border-radius:7px;padding:2px 8px;font:inherit;font-size:12px;cursor:pointer;line-height:1.5";
 
   function reactBtns(mv) {
     var u = E(mv.url || "");
     if (mv.reaction) {
-      return '<span class="w-sub" style="font-size:10px;color:var(--faint)">marked ' + E(mv.reaction) + "</span>";
+      return '<span class="w-sub" style="font-size:12px;color:var(--muted)">marked ' + E(mv.reaction) + "</span>";
     }
     return '<button class="fy-react" data-url="' + u + '" data-re="useful" title="Useful — more like this" style="' + BTN_CSS + '">' + IC_UP + " Useful</button>" +
       '<button class="fy-react" data-url="' + u + '" data-re="noise" title="Noise — less like this" style="' + BTN_CSS + '">' + IC_DN + " Noise</button>";
@@ -72,7 +72,7 @@
           }).then(function (r) { return r.json(); }).then(function (x) {
             var row = btn.parentNode;
             if (x && x.ok && row) {
-              row.innerHTML = '<span class="w-sub" style="font-size:10px;color:var(--faint)">marked ' + E(re) + " — tunes future picks</span>";
+              row.innerHTML = '<span class="w-sub" style="font-size:12px;color:var(--muted)">marked ' + E(re) + " — tunes future picks</span>";
             } else { btn.disabled = false; }
           }).catch(function () { btn.disabled = false; });
         };
@@ -102,7 +102,8 @@
 
   function moveCard(mv, compact) {
     fyCss();
-    var h = '<div class="fy-move" style="padding:8px 0;border-bottom:1px solid var(--hairline)">';
+    // compact (the Hub card): a little tighter, so one more real pick fits
+    var h = '<div class="fy-move" style="padding:' + (compact ? "7px" : "8px") + ' 0;border-bottom:1px solid var(--hairline)">';
     // Plain ink, no underline — these are headlines in a card, exactly like
     // Tech News / News Feed (.news-item a). They were falling through to the
     // UA default link style (blue + underline), which made For You the only
@@ -111,13 +112,13 @@
     h += '<div style="min-width:0"><a class="fy-title" href="#" data-url="' + E(mv.url || "") +
       '" style="font-size:' + (compact ? "12.5px" : "13px") + '">' + E(mv.title || "(untitled)") + "</a></div>";
     if (mv.why_you) {
-      h += '<div class="w-sub" style="font-size:' + (compact ? "10.5px" : "11.5px") + ';line-height:1.45;margin-top:2px;color:var(--muted)">' + E(mv.why_you) + "</div>";
+      h += '<div class="w-sub" style="font-size:' + "12px" + ';line-height:1.45;margin-top:2px;color:var(--muted)">' + E(mv.why_you) + "</div>";
     }
     if (mv.suggested_action) {
-      h += '<div style="font-size:' + (compact ? "10.5px" : "11.5px") + ';margin-top:3px;color:var(--wac);font-weight:600">' + IC_ARROW + E(mv.suggested_action) + "</div>";
+      h += '<div style="font-size:' + "12px" + ';margin-top:3px;color:var(--wac);font-weight:600">' + IC_ARROW + E(mv.suggested_action) + "</div>";
     }
-    h += '<div style="display:flex;align-items:center;gap:6px;margin-top:5px;flex-wrap:wrap">' +
-      '<span class="w-sub" style="font-size:10px;color:var(--faint)">' + E(mv.source || "") + (mv.ts ? " · " + E(REL(mv.ts)) : "") + "</span>" +
+    h += '<div style="display:flex;align-items:center;gap:6px;margin-top:' + (compact ? "4px" : "5px") + ';flex-wrap:wrap">' +
+      '<span class="w-sub" style="font-size:12px;color:var(--muted)">' + E(mv.source || "") + (mv.ts ? " · " + E(REL(mv.ts)) : "") + "</span>" +
       '<span style="margin-left:auto;display:flex;gap:5px;align-items:center">' + reactBtns(mv) + "</span></div>";
     if (!compact) h += scoreBar(mv.score, "var(--wac)");
     h += "</div>";
@@ -163,15 +164,68 @@
         body.innerHTML = '<div class="hint">' + E(d.note || "No moves matched your model this pass — the loop retries every 2 hours.") + "</div>";
         return;
       }
-      var h = "";
-      for (var i = 0; i < Math.min(3, moves.length); i++) h += moveCard(moves[i], true);
-      if (!d.personalized) h += nudge(false);
-      else if (d.generated_at) h += '<div class="w-sub" style="font-size:10px;color:var(--faint);margin-top:6px">' + E(d.count || moves.length) + " moves · updated " + E(T12(d.generated_at)) + "</div>";
+      // Every pick the payload carries goes in the list; fyFit() then shows
+      // as many as the card's height holds (never fewer than three), so a card
+      // stretched by a taller neighbour fills with real picks instead of a
+      // blank band, and the note sits directly under the last one shown.
+      var h = '<div class="fy-list">';
+      for (var i = 0; i < Math.min(FY_MAX, moves.length); i++) h += moveCard(moves[i], true);
+      h += "</div>";
+      if (!d.personalized) h += '<div class="w-foot fy-foot" style="margin-top:0;padding-top:0">' + nudge(false) + "</div>";
+      else if (d.generated_at) h += '<div class="w-sub w-foot fy-foot" style="margin-top:0;font-size:12px;color:var(--muted)">' + E(d.count || moves.length) + " moves · updated " + E(T12(d.generated_at)) + "</div>";
       body.innerHTML = h;
       WL(body);
       wireReacts(body);
+      fyWatch(body);
     };
   }
+
+  // ---- fit the list to the card ------------------------------------------------
+  // The card's height is its grid row's, usually set by a taller neighbour.
+  // Phase 1 lays the list out with `contain:size` (so the picks add nothing to
+  // the row's height) and a floor of the first three picks, letting it take
+  // whatever height the row leaves; the picks that end inside that height are
+  // the ones that fit. Phase 2 drops the rest and the containment, so the list
+  // is exactly those picks and the note follows them. Measured, never guessed:
+  // it holds for any widget order and width.
+  var FY_MAX = 8, FY_MIN = 3;
+  function fyFit(body) {
+    var list = body && body.querySelector ? body.querySelector(".fy-list") : null;
+    if (!list) return 0;
+    var mv = list.children, n = mv.length, i;
+    for (i = 0; i < n; i++) mv[i].style.display = "";
+    if (n <= FY_MIN) { list.style.contain = ""; list.style.flex = ""; list.style.minHeight = ""; return n; }
+    var top = list.getBoundingClientRect().top;
+    var floor = mv[FY_MIN - 1].getBoundingClientRect().bottom - top;
+    list.style.contain = "size"; list.style.flex = "1 1 auto"; list.style.minHeight = Math.ceil(floor) + "px";
+    var room = list.getBoundingClientRect().height, k = 0;
+    for (i = 0; i < n; i++) { if (mv[i].getBoundingClientRect().bottom - top <= room + 1) k = i + 1; else break; }
+    k = Math.max(Math.min(FY_MIN, n), k);
+    for (i = k; i < n; i++) mv[i].style.display = "none";
+    list.style.contain = ""; list.style.flex = ""; list.style.minHeight = "";
+    return k;
+  }
+  // re-fit when the card's size changes (a neighbour finished loading, the
+  // window was resized); one observer per card, re-armed on each render
+  function fyWatch(body) {
+    var raf = (typeof requestAnimationFrame === "function") ? requestAnimationFrame : function (f) { return setTimeout(f, 0); };
+    var card = body.closest ? body.closest(".w") : null;
+    raf(function () { try { fyFit(body); } catch (e) {} });
+    if (!card || typeof ResizeObserver !== "function") return;
+    if (card.__fyRO) { try { card.__fyRO.disconnect(); } catch (e) {} }
+    var last = "";
+    card.__fyRO = new ResizeObserver(function () {
+      var r = card.getBoundingClientRect(), key = Math.round(r.width) + "x" + Math.round(r.height);
+      if (key === last) return;
+      last = key;
+      raf(function () {
+        try { fyFit(body); } catch (e) {}
+        var r2 = card.getBoundingClientRect(); last = Math.round(r2.width) + "x" + Math.round(r2.height);
+      });
+    });
+    card.__fyRO.observe(card);
+  }
+  if (typeof window !== "undefined") window.__fyFit = fyFit;
 
   // ---- rich pop-out: the full Agent-Inbox queue -------------------------------
   if (typeof EXPAND_RENDER !== "undefined") {
@@ -182,9 +236,9 @@
       h += '<div style="display:flex;align-items:baseline;gap:10px;margin:2px 0 2px">' +
         '<span class="num" style="font-size:34px;font-weight:730;line-height:1;color:var(--wac)">' + moves.length + "</span>" +
         '<span style="font-size:13px;color:var(--muted)">move' + (moves.length === 1 ? "" : "s") + " for you</span>" +
-        (d.generated_at ? '<span class="w-sub" style="margin-left:auto;font-size:11px">updated ' + E(T12(d.generated_at)) + " · " + E(REL(d.generated_at)) + "</span>" : "") +
+        (d.generated_at ? '<span class="w-sub" style="margin-left:auto;font-size:12px">updated ' + E(T12(d.generated_at)) + " · " + E(REL(d.generated_at)) + "</span>" : "") +
         "</div>";
-      h += '<div class="w-sub" style="font-size:11px;margin-bottom:4px">' +
+      h += '<div class="w-sub" style="font-size:12px;margin-bottom:4px">' +
         (d.personalized
           ? (d.reasoned ? "Ranked by your goals, projects and people — each with why it is for you."
             : "Matched to your model lexically" + (d.note ? " (" + E(d.note) + ")" : "") + ".")
@@ -197,19 +251,19 @@
         for (var i = 0; i < moves.length; i++) {
           var mv = moves[i];
           h += '<div class="fy-xmove" style="display:flex;gap:10px;padding:2px 0">' +
-            '<span class="num" style="flex:0 0 18px;text-align:right;color:var(--faint);font-size:11px;padding-top:10px">' + (i + 1) + "</span>" +
+            '<span class="num" style="flex:0 0 18px;text-align:right;color:var(--muted);font-size:12px;padding-top:10px">' + (i + 1) + "</span>" +
             '<div style="flex:1;min-width:0">' + moveCard(mv, false) + "</div></div>";
           if (mv.matched_goal || mv.matched_person) {
             h += '<div style="margin:-4px 0 4px 28px;display:flex;gap:5px;flex-wrap:wrap">' +
-              (mv.matched_goal ? '<span class="w-sub" style="font-size:10px;border:1px solid var(--hairline);border-radius:6px;padding:1px 7px">goal: ' + E(mv.matched_goal) + "</span>" : "") +
-              (mv.matched_person ? '<span class="w-sub" style="font-size:10px;border:1px solid var(--hairline);border-radius:6px;padding:1px 7px">person: ' + E(mv.matched_person) + "</span>" : "") +
+              (mv.matched_goal ? '<span class="w-sub" style="font-size:12px;border:1px solid var(--hairline);border-radius:6px;padding:1px 7px">goal: ' + E(mv.matched_goal) + "</span>" : "") +
+              (mv.matched_person ? '<span class="w-sub" style="font-size:12px;border:1px solid var(--hairline);border-radius:6px;padding:1px 7px">person: ' + E(mv.matched_person) + "</span>" : "") +
               "</div>";
           }
         }
       } else {
         h += '<div class="hint" style="margin-top:8px">' + E(d.note || "Nothing in the queue yet.") + "</div>";
       }
-      h += '<div class="w-sub" style="font-size:10.5px;color:var(--faint);line-height:1.5;margin-top:12px">' +
+      h += '<div class="w-sub" style="font-size:12px;color:var(--muted);line-height:1.5;margin-top:12px">' +
         "Moves queue here instead of pinging you — the loop re-reasons every ~2 hours and when fresh intel lands. " +
         "Useful/Noise tunes which sources and goals surface next. Nothing here acts on your behalf.</div>";
 

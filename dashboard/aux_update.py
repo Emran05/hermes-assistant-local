@@ -403,6 +403,41 @@ def _upd_cache_write(obj):
         pass
 
 
+def _upd_note_attempt(ts, signed):
+    """Record that a check REACHED GitHub / origin at `ts` (2026-11-09 audit
+    E85), whatever it answered. checked_at stays the time of the last GOOD
+    answer (it is also the cache's freshness clock), so a check that got a
+    401/403/404/5xx or no tags used to leave no trace and "Last outbound"
+    froze. `attempted_at` / `attempt_signed` (a token or the owner's git
+    credentials went with it) are written beside it, nothing else changes."""
+    try:
+        cur = _upd_cache_read()
+        cur = cur if isinstance(cur, dict) else {}
+        cur["attempted_at"] = ts
+        cur["attempt_signed"] = bool(signed)
+        _upd_cache_write(cur)
+    except Exception:
+        pass
+
+
+def _upd_main_behind(remote):
+    """Is the origin/main commit `remote` (full or short sha) NOT yet in HEAD?
+    True / False, or None when HEAD cannot be read. A checkout with local
+    commits on top of origin/main is not behind (2026-11-09 audit E130: it
+    used to read "update available" forever, because HEAD never EQUALS the
+    remote head there). A remote commit this checkout has never fetched is
+    unknown to merge-base, which therefore answers "behind"."""
+    if not remote:
+        return None
+    rc, head = _upd_git(["rev-parse", "HEAD"])
+    if rc != 0 or not head:
+        return None
+    if head.startswith(remote):
+        return False
+    rc2, _ = _upd_git(["merge-base", "--is-ancestor", remote, "HEAD"])
+    return rc2 != 0
+
+
 def _upd_payload(current, channel, latest=None, notes="", url="",
                  published_at="", assets=None, source="none", error=""):
     latest = latest or ""
@@ -429,17 +464,49 @@ def _upd_check_main_channel(current, budget):
                             error="could not reach origin")
     rc2, head = _upd_git(["rev-parse", "HEAD"])
     head = head if rc2 == 0 else ""
-    same = bool(head) and head == remote
+    behind = _upd_main_behind(remote)
     short = remote[:7]
     p = _upd_payload(current, "main", latest="main@" + short,
                      notes="Tracks origin/main — the development branch. "
                            "Newer than any release tag, and not release-tested.",
                      url="https://github.com/%s/commits/main" % _UPD_REPO,
                      source="main")
-    p["update_available"] = not same
+    p["update_available"] = True if behind is None else behind
     p["remote_head"] = short
     p["local_head"] = head[:7]
     return p
+
+
+def _upd_refresh_cached(payload, current):
+    """A cached payload re-judged against what is installed NOW.
+
+    A cached `main` answer kept update_available=true for up to the 6 h TTL
+    after the update was applied, though HEAD then equalled the remote head
+    it was cached against (2026-10-08 audit, R2-54). HEAD is local and cheap
+    to read, so every answer served from the cache recomputes it; a stable
+    answer recomputes from VERSION the same way. If HEAD cannot be read the
+    cached verdict stands.
+    """
+    p = dict(payload)
+    p["current"] = current
+    if p.get("source") == "main":
+        remote = str(p.get("remote_head") or "")
+        rc, head = _upd_git(["rev-parse", "HEAD"])
+        behind = _upd_main_behind(remote)
+        if remote and rc == 0 and head and behind is not None:
+            p["local_head"] = head[:7]
+            p["update_available"] = behind
+    else:
+        p["update_available"] = _upd_newer(p.get("latest"), current)
+    return p
+
+
+def _upd_last_finished():
+    """When update.sh last finished (its update-state.json), or 0."""
+    try:
+        return float((_upd_state_read().get("last_result") or {}).get("finished_at") or 0)
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
 
 
 def _upd_check(force=False, budget=_UPD_BUDGET, opener=None):
@@ -448,34 +515,37 @@ def _upd_check(force=False, budget=_UPD_BUDGET, opener=None):
     channel = _upd_channel()
     now = _upd_time.time()
     cached = _upd_cache_read()
+    checked_at = float(cached.get("checked_at") or 0)
+    # An update that finished after this answer was cached busts it: what is
+    # "newer" changed underneath it (R2-54).
     fresh = (cached.get("payload") and cached.get("channel") == channel and
-             (now - float(cached.get("checked_at") or 0)) < _UPD_TTL)
+             (now - checked_at) < _UPD_TTL and checked_at >= _upd_last_finished())
     if fresh and not force:
-        p = dict(cached["payload"])
-        p["current"] = current
-        p["update_available"] = (p.get("update_available") if p.get("source") == "main"
-                                 else _upd_newer(p.get("latest"), current))
+        p = _upd_refresh_cached(cached["payload"], current)
         p["cached"] = True
         return p
 
     # Never queue behind another check (the 6-hourly background one runs with a
     # long budget): if someone else holds the lock, answer from cache.
     if not _UPD_LOCK.acquire(timeout=min(1.0, max(0.2, budget / 5.0))):
-        p = dict(cached.get("payload") or
-                 _upd_payload(current, channel, source="none", error="check in progress"))
-        p["current"] = current
+        if cached.get("payload"):
+            p = _upd_refresh_cached(cached["payload"], current)
+        else:
+            p = _upd_payload(current, channel, source="none", error="check in progress")
         p["checking"] = True
         return p
+    att = {"reached": False, "signed": False}     # E85: every attempt counts
     try:
         deadline = _upd_time.time() + max(1.0, budget)
 
         if channel == "main":
             p = _upd_check_main_channel(current, deadline - _upd_time.time())
             if p.get("source") == "main":
+                att.update(reached=True, signed=True)     # git, owner's credentials
                 _upd_cache_write({"checked_at": now, "channel": channel,
                                   "etag": "", "payload": p})
             elif cached.get("payload"):
-                stale = dict(cached["payload"])
+                stale = _upd_refresh_cached(cached["payload"], current)
                 stale["stale"] = True
                 stale["error"] = p.get("error") or ""
                 return stale
@@ -488,6 +558,8 @@ def _upd_check(force=False, budget=_UPD_BUDGET, opener=None):
         status, obj, new_etag = _upd_fetch(_UPD_API, etag=etag,
                                            timeout=min(4.0, remain()), opener=opener)
         source = "github"
+        if status:
+            att["reached"] = True
 
         # b. authenticated (private repo / rate limited)
         if status in (401, 403, 404) and _upd_time.time() < deadline:
@@ -497,6 +569,8 @@ def _upd_check(force=False, budget=_UPD_BUDGET, opener=None):
                     _UPD_API, etag=etag, token=tok,
                     timeout=min(4.0, remain()), opener=opener)
                 source = "github-token"
+                if status:
+                    att.update(reached=True, signed=True)
 
         if status == 304 and cached.get("payload"):
             p = dict(cached["payload"])
@@ -524,6 +598,7 @@ def _upd_check(force=False, budget=_UPD_BUDGET, opener=None):
             rc, out = _upd_git(["ls-remote", "--tags", "origin"],
                                timeout=min(6.0, max(2.0, remain())))
             if rc == 0:
+                att.update(reached=True, signed=True)
                 tags = _upd_tags_from_ls_remote(out)
                 if tags:
                     top = tags[-1]
@@ -545,13 +620,14 @@ def _upd_check(force=False, budget=_UPD_BUDGET, opener=None):
                404: "no release found (repo private, or no releases yet)"
                }.get(status, "check failed (HTTP %s)" % status)
         if cached.get("payload"):
-            p = dict(cached["payload"])
-            p["current"] = current
+            p = _upd_refresh_cached(cached["payload"], current)
             p["stale"] = True
             p["error"] = err
             return p
         return _upd_payload(current, channel, source="none", error=err)
     finally:
+        if att["reached"]:
+            _upd_note_attempt(now, att["signed"])
         _UPD_LOCK.release()
 
 
@@ -639,6 +715,25 @@ def _upd_known_tags():
     return tags
 
 
+def _upd_chat_busy():
+    """True while a chat turn is running. server.py's chat_jobs_active() (E18)
+    is resolved BY NAME at call time; a server.py without it falls back to
+    reading CHAT_JOBS the same way (a job that is not done is running). Any
+    error reads as "not busy": this only guards against losing a reply, and
+    must never make Apply impossible."""
+    fn = globals().get("chat_jobs_active")
+    try:
+        if callable(fn):
+            return bool(fn())
+        jobs = globals().get("CHAT_JOBS")
+        if isinstance(jobs, dict):
+            return any(isinstance(v, dict) and not v.get("done")
+                       for v in list(jobs.values()))
+    except Exception:
+        pass
+    return False
+
+
 def _upd_apply(ctx):
     body = ctx.body if isinstance(getattr(ctx, "body", None), dict) else {}
     target = str(body.get("target") or "latest").strip()
@@ -663,6 +758,16 @@ def _upd_apply(ctx):
                          "or discard them first (or run ./update.sh --force in a "
                          "terminal)",
                 "dirty": dirty}, 409
+
+    # A chat turn in flight (2026-11-09 audit E18): applying restarts the
+    # dashboard AND serve, which kills that turn and loses its reply. Refuse
+    # unless the owner confirmed with a literal `force: true`.
+    if body.get("force") is not True and _upd_chat_busy():
+        return {"ok": False, "reason": "chat_busy", "busy": True,
+                "error": "A chat turn is still running. Updating now restarts the "
+                         "dashboard and the agent backend, which stops that turn "
+                         "and loses its reply. Wait for it to finish, or choose "
+                         "Update anyway."}, 409
 
     # --------------------------------------------------------------------
     # the lock (2026-09-10 audit A08). _upd_running() used to be checked

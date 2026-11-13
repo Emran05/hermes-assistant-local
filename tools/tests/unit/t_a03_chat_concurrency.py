@@ -65,7 +65,9 @@ def chat_namespace(scratch):
     definitions("dashboard/server.py",
                 ["read_json", "write_json", "chat_path", "load_chat",
                  "_new_message_id", "stamp_message_ids", "_save_chat_locked",
-                 "save_chat", "save_chat_update"], ns)
+                 "save_chat", "save_chat_update",
+                 # write_json's C27 move-aside of a corrupt target
+                 "_json_unparsable", "_quarantine_corrupt"], ns)
     return ns
 
 
@@ -234,7 +236,7 @@ def test_rev_and_ids():
 def test_done_after_persist():
     with tempfile.TemporaryDirectory(prefix="hermes-a03-") as d:
         ns = chat_namespace(Path(d))
-        definitions("dashboard/server.py", ["_finish_chat_job"], ns)
+        definitions("dashboard/server.py", ["_finish_chat_job", "_clear_awaiting_reply"], ns)
         order = []
         real_update = ns["save_chat_update"]
 

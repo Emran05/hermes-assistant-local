@@ -2,7 +2,8 @@
 //
 // Auto-served at /aux_google.js.  Chains onto window.mindExtras (same pattern
 // as aux_trust.js) and renders one card (#mind-extra-google) into #view-mind:
-// a status chip (Not connected / Connected · read-only) plus a 3-step connect
+// a status chip (Not connected / Connected · read-only / Reconnect needed —
+// the last refresh failed, C21) plus a 3-step connect
 // wizard (paste client_secret JSON → open Google consent → paste the redirect
 // URL back).  Talks only to the local /api/google/* routes; the pasted client
 // secret goes straight to the backend and is never re-displayed.
@@ -101,7 +102,7 @@
       ".gc-dot{flex:0 0 auto;width:18px;height:18px;border-radius:99px;display:inline-flex;align-items:center;",
       "justify-content:center;font-size:10px;font-weight:700;color:var(--muted);",
       "background:var(--glass);border:1px solid var(--hairline)}",
-      ".gc-step.gc-on .gc-dot{color:#fff;background:var(--iris);border-color:var(--iris)}",
+      ".gc-step.gc-on .gc-dot{color:var(--iris-ink,#fff);background:var(--iris);border-color:var(--iris)}",
       ".gc-step.gc-done .gc-dot{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,transparent)}",
       ".gc-sbody{padding:10px 12px 12px;font-size:12px;color:var(--muted);line-height:1.5}",
       ".gc-sbody a{color:var(--iris);text-decoration:none}",
@@ -193,7 +194,8 @@
   // ---- render --------------------------------------------------------------
   var SCOPE_LABEL = {
     "https://www.googleapis.com/auth/gmail.readonly": "Read mail",
-    "https://www.googleapis.com/auth/calendar": "Calendar",
+    "https://www.googleapis.com/auth/calendar.readonly": "Calendar · read-only",
+    "https://www.googleapis.com/auth/calendar": "Calendar · read and write",
     "https://www.googleapis.com/auth/contacts.readonly": "Contacts · read-only",
   };
 
@@ -229,16 +231,35 @@
     (st.missing_features || []).forEach(function (m) {
       miss += '<div class="gc-miss">' + E(m) + "</div>";
     });
+    // a grant made before C51 also holds read/write calendar: say so, and ask
+    // for a reconnect rather than calling it read-only
+    var wide = (st.scope_excess || []).length > 0;
+    // C21: the token file says "connected"; the last refresh may disagree
+    var dead = st.needs_reauth === true;
+    var rfail = /^refresh_failed:/.test(String(st.reason || ""));
+    var rcode = rfail ? String(st.reason).slice(15) : "";
+    var rwhen = st.refresh_failed_at ? " at " + t12(st.refresh_failed_at) : "";
     var html =
       '<div class="gc-row" style="margin-top:2px">' +
-      chip("Connected · read-only", "var(--ok)") +
+      (dead ? chip("Reconnect needed", "var(--bad)")
+       : wide ? chip("Connected · wider than read-only", "var(--warn)")
+            : chip("Connected · read-only", "var(--ok)")) +
       (st.email ? '<span class="gc-tiny" style="margin-top:0">' + E(st.email) + "</span>" : "") +
       "</div>" +
       '<div class="gc-scopes">' + chips + "</div>" +
+      (dead ? '<div class="gc-err">Google no longer accepts this sign-in (' + E(rcode) +
+        E(rwhen) + "): it was revoked, or it expired. Your calendar is not reaching " +
+        "Hermes. Disconnect, then connect again.</div>"
+       : rfail ? '<div class="gc-tiny">The last token refresh failed (' + E(rcode) +
+        E(rwhen) + "). It is retried every 5 minutes.</div>" : "") +
+      (wide ? '<div class="gc-err">This grant is older and wider than Hermes asks for ' +
+        "today: it can also change your calendar. Disconnect, then connect again to " +
+        "narrow it to read-only.</div>" : "") +
       safetyNote() +
       (miss ? '<div class="gc-band">Not granted<span class="gc-rule"></span></div>' + miss : "") +
       '<div class="gc-btnrow"><button class="ghost" id="gc-disc">Disconnect</button>' +
-      '<span class="gc-tiny" style="margin-top:0">Token refreshes itself from here.</span></div>';
+      (dead ? "" : '<span class="gc-tiny" style="margin-top:0">Token refreshes itself from here.</span>') +
+      "</div>";
     var s = mount(grid, html, st.checked_at ? "checked " + t12(st.checked_at) : "");
     if (!s) return;
     var b = s.querySelector("#gc-disc");
@@ -267,8 +288,9 @@
     if (!GW.open) {
       var intro =
         '<div class="gc-row" style="margin-top:2px">' + chip("Not connected", "var(--faint)") + "</div>" +
-        '<div class="gc-lede">Connect Gmail (read-only), Calendar and Contacts so Hermes can ' +
-        "read your mail, keep the agenda fresh and draft replies for you to send.</div>" +
+        '<div class="gc-lede">Connect read-only Gmail, Calendar and Contacts so Hermes can ' +
+        "read your mail and keep the agenda fresh. Replies it drafts are text for you to " +
+        "send yourself.</div>" +
         safetyNote() +
         '<div class="gc-btnrow"><button class="primary" id="gc-go">Connect Google</button></div>';
       var s0 = mount(grid, intro, "");
@@ -300,7 +322,7 @@
 
     var body2 =
       "Open Google’s consent page in your browser and approve the three read items. " +
-      "Hermes asks only for <b>read mail</b>, <b>calendar</b> and <b>read-only contacts</b> — nothing that can send." +
+      "Hermes asks only for <b>read-only</b> mail, calendar and contacts — nothing that can send or change anything." +
       '<div class="gc-btnrow"><button class="primary" id="gc-consent">Open Google consent ' + OPEN_SVG + "</button>" +
       (GW.authUrl ? '<button class="ghost" id="gc-copy">Copy link</button>' : "") + "</div>" +
       (GW.authUrl ? '<div class="gc-url" id="gc-urlbox">' + E(GW.authUrl) + "</div>" : "") +
@@ -364,10 +386,9 @@
     if (consent) consent.addEventListener("click", async function () {
       consent.disabled = true; consent.textContent = "Preparing…";
       var j;
-      try {
-        var r = await fetch("/api/google/auth_url", { cache: "no-store" });
-        j = await r.json();
-      } catch (e) { j = { ok: false, error: "network" }; }
+      // POST: it rewrites the PKCE pending file (R2-48)
+      try { j = await jpost("/api/google/auth_url", {}); }
+      catch (e) { j = { ok: false, error: "network" }; }
       if (j && j.ok && j.auth_url) {
         GW.authUrl = j.auth_url; GW.err = ""; GW.step = 3;
         try { if (typeof window.open === "function") window.open(j.auth_url); } catch (e) {}

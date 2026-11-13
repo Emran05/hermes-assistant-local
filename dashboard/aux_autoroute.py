@@ -57,12 +57,26 @@ AR_DEFAULT_MODE = "off"
 AR_DEFAULT_MIN = 2.5
 AR_MAX_TASK = 4000          # chars of user message passed to Claude
 AR_MAX_REPLY = 3000         # chars of the local reply passed as context
+# How long Claude's answer waits for the local turn before it is persisted
+# (R2-11). hermes_rpc publishes job["turn_deadline"] once the prompt is in —
+# TURN_TIMEOUT of agent time plus every second an approval card waited — so
+# that is the real ceiling; before it exists the wake + session setup +
+# submit can take a few minutes. The grace covers what follows the deadline
+# (interrupt, deny-all, persisting the reply).
+AR_PRESUBMIT_MAX = 420
+AR_WAIT_GRACE = 90
 
 _AR_EXPLICIT = re.compile(
     r"\b(?:think\s+(?:hard|harder|deeply|carefully|it\s+through)|deep\s*(?:think|dive)"
     r"|ask\s+claude|use\s+claude|escalate|second\s+opinion|really\s+think|reason\s+(?:carefully|deeply)"
     r"|go\s+deep(?:er)?|thorough(?:ly)?\s+analy)", re.I)
-_AR_DEEP = re.compile(r"\b(?:think\s+(?:hard|harder|deeply)|deep\s*(?:think|dive)|go\s+deep|opus)\b", re.I)
+# Deep (Opus, 600 s) only on an explicit ask. A bare "opus" used to count, so
+# any message mentioning e.g. "magnum opus" took the Opus path (2026-10-08 P3).
+_AR_DEEP = re.compile(r"\b(?:think\s+(?:hard|harder|deeply)|deep\s*(?:think|dive)|go\s+deep)\b", re.I)
+# Text inside a third-party data fence (dashboard/untrusted.py block(), the
+# needs-you draft fence) was written by someone else: it is never scored and
+# never sent to Claude (2026-10-21 audit C37).
+_AR_FENCE = re.compile(r"<<<(?:BEGIN |MESSAGE FROM )[^\n]*>>>.*?<<<END[^\n]*?>>>", re.S)
 _AR_JUDGMENT = re.compile(
     r"\b(?:should\s+(?:i|we)|would\s+you|is\s+it\s+worth|worth\s+it|which\s+(?:is|one|should)|better"
     r"|compare|comparison|versus|\bvs\.?\b|trade-?offs?|pros?\s+and\s+cons?|recommend\w*|advice|advise"
@@ -178,31 +192,70 @@ _AR_LOCK = threading.Lock()
 _ar_orig_worker = _chat_worker
 
 
-def _ar_last_user_text(session):
+def _ar_last_user(session):
+    """The conversation's last user message (the one this turn answers)."""
     try:
         for m in reversed(load_chat(session).get("messages") or []):
-            if m.get("role") == "user":
-                return m.get("text") or ""
+            if isinstance(m, dict) and m.get("role") == "user":
+                return m
     except Exception:
         pass
-    return ""
+    return {}
 
 
-def _ar_persist(session, entry):
+def _ar_last_user_text(session):
+    return _ar_last_user(session).get("text") or ""
+
+
+def _ar_persist(session, entry, after_id=None):
+    """Append Claude's answer — or, when the local turn never finished, put it
+    right after the user message it answers (`after_id`, the message's stable
+    id), so it never lands after some LATER reply (R2-11)."""
+    def _apply(chat):
+        msgs = chat["messages"]
+        if after_id:
+            for i, m in enumerate(msgs):
+                if isinstance(m, dict) and m.get("id") == after_id:
+                    msgs.insert(i + 1, entry)
+                    return
+        msgs.append(entry)
+
     try:
-        # save_chat_update appends inside the lock. The old load/append/save
+        # save_chat_update mutates inside the lock. The old load/append/save
         # pair raced the local worker's own reply on the very same
         # conversation — both saw N messages, both wrote N+1, and whichever
         # landed second erased the other (2026-09-10 audit A03).
-        save_chat_update(session, lambda chat: chat["messages"].append(entry))
+        save_chat_update(session, _apply)                       # noqa: F821
     except Exception as e:
         print("[aux_autoroute] persist failed: %r" % e, file=sys.stderr)
 
 
-def _ar_think_thread(job, session, q, depth, reason, score):
+def _ar_wait_local(job):
+    """Block until the local turn is done (its reply persisted — `done` is set
+    only after that), it has left CHAT_JOBS, or it is past its OWN ceiling.
+    Returns whether it finished.
+
+    This used to be a flat 2000 × 0.3 s (10 min), but a turn may run 600 s of
+    agent time plus up to 290 s per approval card, so a long turn had Claude's
+    answer persisted BEFORE the local reply and the history order broke."""
+    t0 = job.get("ts") if isinstance(job.get("ts"), (int, float)) else time.time()
+    while not job.get("done"):
+        jobs = globals().get("CHAT_JOBS")
+        if isinstance(jobs, dict) and job.get("id") and jobs.get(job["id"]) is not job:
+            break                       # the job is gone: nothing will finish it
+        dl = job.get("turn_deadline")
+        ceiling = dl if isinstance(dl, (int, float)) else t0 + AR_PRESUBMIT_MAX
+        if time.time() > ceiling + AR_WAIT_GRACE:
+            break
+        time.sleep(0.3)
+    return bool(job.get("done"))
+
+
+def _ar_think_thread(job, session, q, depth, reason, score, after_id=None):
     """Runs IN PARALLEL with the local turn (Sonnet quick ≈ 5-8s, so the deep
     answer usually lands about when the local reply does). Persists AFTER the
-    local turn is done so the chat history keeps user → local → Claude order."""
+    local turn is done so the chat history keeps user → local → Claude order;
+    if the local turn never finishes, right after the user message instead."""
     think = globals().get("claude_think")
     t0 = time.time()
     try:
@@ -215,18 +268,23 @@ def _ar_think_thread(job, session, q, depth, reason, score):
     except Exception as e:
         res = {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
     ms = int((time.time() - t0) * 1000)
-    # wait (bounded) for the local turn so persistence order is sane
-    for _ in range(2000):                            # ≤ 10 min
-        if job.get("done"):
-            break
-        time.sleep(0.3)
+    # wait for the local turn (up to its real ceiling) so the order is sane
+    finished = _ar_wait_local(job)
+    if job.get("stop_requested"):
+        # The owner stopped this turn: Claude's parallel answer is dropped,
+        # never persisted (the `claude -p` call itself ran to its end).
+        job["deep"] = {"state": "done", "ok": False, "reason": reason, "score": score,
+                       "depth": depth, "stopped": True,
+                       "error": "You stopped this turn, so Claude's answer was not kept."}
+        return
     if res.get("ok") and (res.get("text") or "").strip():
         entry = {"state": "done", "ok": True, "text": res["text"], "model": res.get("model"),
                  "ms": res.get("ms") or ms, "reason": reason, "score": score,
                  "depth": depth, "ts": time.time(), "auto": True}
         job["deep"] = entry
         _ar_persist(session, {"role": "bot", "text": res["text"], "ts": entry["ts"],
-                              "deep": {k: entry[k] for k in ("model", "ms", "reason", "score", "depth", "auto")}})
+                              "deep": {k: entry[k] for k in ("model", "ms", "reason", "score", "depth", "auto")}},
+                    after_id=None if finished else after_id)
         with _AR_LOCK:
             _AR_STATS["routed"] += 1
             _AR_STATS["last"] = {"ts": entry["ts"], "reason": reason, "model": entry["model"], "ms": entry["ms"]}
@@ -251,7 +309,13 @@ def _ar_before(job, session):
     # exactly as they left it.
     if mode == "off" or not _ar_escalation_on():
         return
-    q = _ar_last_user_text(session)
+    # A job that quotes third-party text (a needs-you draft) is never routed,
+    # whatever its wording scores (C37): a stranger must not be able to choose
+    # whether, or how hard, their message is uploaded to Claude.
+    if job.get("no_escalate"):
+        return
+    last = _ar_last_user(session)
+    q = _AR_FENCE.sub(" ", last.get("text") or "")
     score, why = ar_score(q)
     with _AR_LOCK:
         _AR_STATS["turns"] += 1
@@ -267,7 +331,8 @@ def _ar_before(job, session):
         return
     depth = "deep" if _AR_DEEP.search(q) else "quick"
     job["deep"] = {"state": "thinking", "reason": reason, "score": score, "depth": depth}
-    threading.Thread(target=_ar_think_thread, args=(job, session, q, depth, reason, score),
+    threading.Thread(target=_ar_think_thread,
+                     args=(job, session, q, depth, reason, score, last.get("id")),
                      daemon=True).start()
 
 

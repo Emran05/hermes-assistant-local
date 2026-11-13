@@ -315,7 +315,11 @@ def spawn_bench_server(model, entry, block, port, venv_py, logpath, timeout=600)
     launcher = os.path.join(tmpdir, "vlm-bench-launch.py")   # name must NOT match the dashboard pgrep
     shutil.copy2(LAUNCHER, launcher)
     args = [venv_py, launcher, "--model", model, "--host", "127.0.0.1", "--port", str(port),
-            "--max-tokens", "1024", "--trust-remote-code"]
+            "--max-tokens", "1024"]
+    # F01/B03: remote code only for a roster entry with a literal
+    # `trust_remote_code: true`, exactly as mlx-server.sh decides it
+    if entry.get("trust_remote_code") is True:
+        args.append("--trust-remote-code")
     draft = entry.get("draft_model") or ""
     if block != "none":
         if not draft:

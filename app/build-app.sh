@@ -18,7 +18,11 @@ SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || true)"
 BUILDVER="$VER${SHA:+ +$SHA}"
 BUILDVER="${BUILDVER// /}"
 
-rm -rf "$BUILD"; mkdir -p "$BIN" "$RES"
+# Remove only what THIS script builds. app/build also holds the dictation
+# helper (app/build-dictation.sh) — the bundle the owner runs and registered
+# for Start at login — and wiping the whole folder deleted it
+# (2026-11-09 audit E126).
+rm -rf "$APP" "$BUILD/AppIcon.iconset" "$BUILD/icon-1024.png"; mkdir -p "$BIN" "$RES"
 
 echo "→ compiling"
 swiftc -O -o "$BIN/HermesAssistant" "$HERE/main.swift" \
